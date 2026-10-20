@@ -40,6 +40,10 @@ _Avoid_: bot, orchestrator, controller, github app 服务端
 一次幂等的重算：从 GitHub 与 k8s 读出全部相关状态，算出该做什么并执行。
 _Avoid_: sync loop, poll, tick, 轮询
 
+**Defer**:
+额度已满时本轮什么都不做——不建 Job、不改 label、不评论——等下一次 reconcile 自然重试。
+_Avoid_: queue, 排队, 延后重试
+
 **Agent role**:
 一次运行要扮演的角色（`implement-ticket` / `implement-spec`），决定挂载哪份 prompt。
 _Avoid_: mode, action, agent type
@@ -49,6 +53,14 @@ _Avoid_: mode, action, agent type
 **Job**:
 一个 k8s Job，跑一个 agent role，对应一张 ticket（或某个 spec 的收尾）。
 _Avoid_: worker, pod, task
+
+**Slot**:
+一个 Job 占用的一个并发名额；全局与每个 target repo 各有一条上限。Job 只要名下还有未到终态的 pod 就占着它的 Slot，无论该 pod 是否正在终止。
+_Avoid_: 并发数, 令牌, quota
+
+**Guardrail quota**:
+namespace 里只算对象数量的 ResourceQuota（不含 requests/limits 键），用来防止 App 逻辑写错时无限起 Job；它不承载并发语义。
+_Avoid_: quota, 上限, 配额
 
 **Run result**:
 Job 结束前写在自己 Job 对象 annotation 上的结果载荷 `{outcome, summary, commentBody?, newTickets?[]}`。
