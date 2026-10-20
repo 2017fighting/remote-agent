@@ -62,6 +62,10 @@ _Avoid_: status, state, 返回值
 每个 target repo 一个、长期保留的 PVC，里面是该仓库 main 的一份同步克隆。
 _Avoid_: cache, mirror, workspace
 
+**Sync Job**:
+App 起的一次性 Job，把某个 target repo 的 base PVC 同步到最新 main；它是 base PVC 唯一的写者。
+_Avoid_: git-sync, mirror job, fetcher
+
 **Job snapshot**:
 从 base PVC 打出的 CSI 快照，用来给一次 Job 播种工作副本。
 _Avoid_: clone, copy, overlay
