@@ -1,6 +1,6 @@
 # 一个 ticket 一个 k8s Job
 
-每次 agent 运行是由 App 通过 k8s API 创建的 Job，而不是复用 sandcastle 库、GitHub Actions self-hosted runner，或常驻 pod。理由是隔离与信号：每个 ticket 拿到自己的一块 PVC 与自己的 Job，**Job 的终态**就是这次运行的结果，ResourceQuota 就是并发上限。isolated 的是 Job 而不是 pod——pod 会在 `resume()` 里重启（[ADR-0008](0008-durable-runtime-base.md)），重建的是工作副本所在的卷，不是从快照重新播种。代价是 App 要自己管 Job 模板、卷与结果回收，其中一部分 sandcastle 本来已经提供。
+每次 agent 运行是由 App 通过 k8s API 创建的 Job，而不是复用 sandcastle 库、GitHub Actions self-hosted runner，或常驻 pod。理由是隔离与信号：每个 ticket 拿到自己的一块 PVC 与自己的 Job，**Job 的终态**就是这次运行的结果，ResourceQuota 就是并发上限。隔离的边界是 Job 而不是 pod——pod 会在 `resume()` 里重启（[ADR-0008](0008-durable-runtime-base.md)），但重启不换卷、不换工作副本。代价是 App 要自己管 Job 模板、卷与结果回收，其中一部分 sandcastle 本来已经提供。
 
 ## Considered Options
 
