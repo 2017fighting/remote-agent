@@ -28,13 +28,13 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 - **为什么必写**：`code-review` 的 spec 查找顺序是 commit message 的 issue 引用 → 参数路径 → `docs|specs|.scratch` 匹配文件 → **问用户**，它**没有** parent/sub-issue 遍历；`/implement` 也是拿到无歧义的 ticket 引用才开工（`implement/SKILL.md:9`）。AFK 下最后一档「问用户」等于卡死。
 - **不写会怎样**：reviewer 的 Spec 轴静默跳过并报「no spec available」，整轮「Spec 轴通过」是假的；或模型凭上下文猜错对象，审了别人的活。
 - **写什么**：我们是在写叙述，不是真调 skill——review 步骤直接写明「spec 来源 = `<owner/repo>#<n>`」，值由 runner 渲染时注入；并要求每条 commit message 以 `#<n>` 开头（spec 收尾 role 用 `#<spec>`），留给人和 PR 做溯源。commit 的成色是**软约束**：不阻断、不重试，代码与 review 不依赖它。
-- **落点**：prompt（注入值来自 runner）。
+- **落点**：prompt（正文与 spec 正文由 **App** 读好、经 Job 参数交给 runner 渲染——模型手上没有 `gh` 与凭证，见 [#14](https://github.com/2017fighting/remote-agent/issues/14)）。
 
 ### 2. review 的固定点 → `_common`，值由 runner 注入
 
 - **为什么必写**：`code-review` 只看 `git diff <fixed-point>...HEAD`（三点，对 merge-base），无参数时**问用户**；且它要求先确认 ref 能 resolve、diff 非空，否则在扇出两个 reviewer 之前就失败。
 - **不写会怎样**：模型自己猜 `HEAD~3` 或 `main`，Spec 轴审到错的范围；或 diff 为空却两手一摊报 `done`。
-- **写什么**：字面值（merge-base sha，或 init container 记录的 baseSha，来源归 [#17](https://github.com/2017fighting/remote-agent/issues/17)），配一句「解析不开或 diff 为空就先自己处理，不许跳过 review 静默收尾」。
+- **写什么**：字面值（merge-base sha，或 init container 记录的 baseSha，来源归 [#17](https://github.com/2017fighting/remote-agent/issues/17)），配一句「解析不开或 diff 为空就先自己处理，不许跳过 review 静默收尾」。**取哪个 sha 按 role 分**（[#14](https://github.com/2017fighting/remote-agent/issues/14)）：ticket role 取**本次运行的起点**（每票只审本票的 diff），spec 收尾 role 取**分支起点**；整条分支的覆盖面由 spec 收尾那一次全分支 review 提供。
 - **落点**：prompt（注入）+ 工具（review 工具自己 `git rev-parse` 与非空校验，坏 ref 直接弹回，不浪费两个 reviewer）。
 
 ### 3. 小 bug 的授权 → `_common`（`implement-spec` 收尾段加一句）
@@ -70,7 +70,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 - **为什么必写**：上游两个 brief **没有**禁止再委派，实测扇出到 50+ 个子 agent 且未修；契约里也没指定 subagent 的 role 名（它只说「parallel sub-agents」）。
 - **不写会怎样**：一次运行炸成几十个 conversation，烧钱烧额度，最后没人说得清结论从哪来。
 - **写什么**（三处，缺一层都不够）：
-  - **工具**：runner 烧一个 `code_review` 工具，起一个**独立 conversation** 的 reviewer（foreground、`replay: "safe"`、独立模型由 runner 给），传固定点与 spec 指针，取回两轴报告。它的工具表只有 `read` / `grep`——**不给 subagent 工具，也不给 `code_review` 自己**，从结构上断掉扇出。
+  - **工具**：runner 烧一个 `code_review` 工具，起一个**独立 conversation** 的 reviewer（foreground、`replay: "safe"`、独立模型由 runner 给），传固定点与 spec 正文，取回两轴报告。它的工具表是 `read` / `grep` / `bash`——**不给 subagent 工具，也不给 `code_review` 自己**，扇出从工具表上被结构地断掉。（[#14](https://github.com/2017fighting/remote-agent/issues/14) 就地改：reviewer 得自己跑 `git diff` / `git log`，所以它拿到 `bash`；只读靠 prompt 约束，`bash` 本身不打开扇出。）
   - **ConfigMap**：两轴 brief 写成 `review-standards` / `review-spec` 两份模板（含 smell baseline 12 条、standards 文件清单、diff 命令与 commit 列表）。改 review 话术不必重建镜像。
   - **模板末行**：一句「不要开子 agent、不要改文件」，两轴模板各一遍——reviewer 才是被约束的人。
 - **落点**：工具（起 conversation + 工具表裁剪）+ ConfigMap（两份 brief）+ prompt（一句禁令，在 review 模板里而不是角色模板里）。
