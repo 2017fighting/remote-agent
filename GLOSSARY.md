@@ -63,11 +63,15 @@ namespace 里只算对象数量的 ResourceQuota（不含 requests/limits 键）
 _Avoid_: quota, 上限, 配额
 
 **Run result**:
-Job 结束前写在自己 Job 对象 annotation 上的结果载荷 `{outcome, summary, commentBody?, newTickets?[]}`。
+Job 结束前写在自己 Job 对象 annotation 上的结果载荷 `{v, outcome, summary, commentBody?, newTickets?[], reason?, warnings?[]}`；agent 用 Result tool 自述，wrapper 负责落盘（[ADR-0007](docs/adr/0007-run-result-contract.md)）。
 _Avoid_: report, output, artifact
 
+**Result tool**:
+镜像里烧的 pi 自定义工具（`run_result`），agent 收尾时调用它自述 run result，并把本次 run 就此终结；它只写结果文件，不碰 GitHub、不碰 k8s。
+_Avoid_: result command, agent-result helper
+
 **Outcome**:
-run result 的三种结论之一——`done` / `blocked` / `error`。
+run result 的三种结论之一——`done` / `blocked` / `error`；它描述**这次运行是怎么结束的**，不描述为什么没做成（后者在 `reason` 里）。`error` 包揽一切非 agent 自述的失败并享有一次自动重试，`blocked` 只留给「pi 正常跑完但 agent 自述卡住」。
 _Avoid_: status, state, 返回值
 
 **Base PVC**:
