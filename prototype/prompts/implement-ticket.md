@@ -13,7 +13,7 @@
 
 1. 全部改动 commit 完（标题以 `#{{ticket_number}}` 开头）。
 2. 收尾跑一次全量测试 + typecheck。
-3. `code_review`：固定点 `{{fixed_point}}`，两轴都跑。
+3. `code_review`：固定点 `{{fixed_point}}`（本次运行的起点），两轴都跑。review 只有这一轮：发现修完就收尾，不再跑第二轮。[A9→已定]
 4. review 提出的问题，落在本次改动范围内的**修掉**，修在一个新 commit 里（不 `--amend`，保住「reviewer 当时看的是什么」）；范围外的不要硬修，记进 `warnings`。[A9]
 5. 调 `finish_ticket`：`summary` 写这次交付了什么（一两句），`commentBody` 写要贴回 issue 的那条评论（干了什么、怎么验证的、留了什么尾巴），`warnings` 放「出了范围所以没动」的发现。
 

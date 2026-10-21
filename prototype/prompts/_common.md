@@ -4,7 +4,7 @@
 
 不要请求确认、不要请求批准、不要征求偏好、不要以「你希望我怎么做」收尾。真做不下去（工作项自相矛盾、环境坏了、缺的是一个只有人能给的决定），调 `blocked` 结束这次运行，把「人需要改什么」写清楚。
 
-# 手头的工作项 [A2]
+# 手头的工作项 [A2→已定：正文由控制面取好经 Job 参数交给 runner 渲染]
 
 - 引用：`{{work_ref}}`（形如 `owner/repo#123`）
 - 标题：{{work_title}}
@@ -45,9 +45,13 @@
 
 Commit 之后，用 `code_review` 工具做两轴 review：Standards 轴（这段 diff 是否守本仓库写明的编码标准）、Spec 轴（是否真的实现了工作项与它所属 spec 的要求）。工具会起一个独立的 reviewer conversation，两轴各读一份系统提示。
 
-review 的固定点是 **`{{fixed_point}}`**（merge-base 的字面值）。原样交给工具，不要自己换 `HEAD~3`、`main`、`origin/main` 或别的 ref。[P3][A7]
+review 的固定点是 **`{{fixed_point}}`**（merge-base 的字面值）。原样交给工具，不要自己换 `HEAD~3`、`main`、`origin/main` 或别的 ref。[P3][A7→已定]
+
+固定点代表「这次工作从哪开始」：ticket role 是**本次运行的起点**（这次运行开始时分支所在的位置），spec 收尾 role 是**分支的起点**。
 
 工具会先校验固定点能否解析、diff 是否为空；被弹回来就说明你漏了 commit 或固定点用错了，补齐再来。**不许跳过 review 直接收尾，也不许对着空 diff 说「没有发现问题」。**
+
+review 只有一轮：把发现修掉（另起 commit）就收尾，不要为了「再看看」再跑一遍。[A9→已定：不再 review]
 
 Spec 轴要比对的 spec 就是工作项指到的那条（`{{work_ref}}` 的 `Part of #<spec>`，spec 收尾 role 就是它自己）；reviewer 不会去翻 parent/sub-issue，所以按工具给的指针走，别让它自己找。[P4]
 
