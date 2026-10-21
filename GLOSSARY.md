@@ -67,8 +67,20 @@ _Avoid_: worker, pod, task
 _Avoid_: wrapper, entrypoint, pi 命令
 
 **Ticket PVC**:
-一个 ticket 一块、`ReadWriteOncePod`、比 Job 活得久的 PVC，里面同时装这个 ticket 的工作副本与 durable 的 session storage。
+一个 ticket 一块、`ReadWriteOncePod`、比 Job 活得久的 PVC，里面同时装这个 ticket 的工作副本（`repo/`）与 durable 的 session storage（`state/`）。
 _Avoid_: 工作卷, workspace, job pvc
+
+**Seed**:
+init container 把工作副本装进 Ticket PVC 的那一步：问 `git ls-remote` 分支在不在、全量克隆、checkout `agent/spec-<n>`、写 marker。只碰 `repo/`，从不碰 `state/`。
+_Avoid_: bootstrap, sync, 初始化
+
+**Seed marker**:
+`state/seeded.json`——播种最后一步原子写下的记录：这块卷是按哪个 repo、哪个分支、哪个 commit 播的。存在且与 Job 的 env 一致就跳过播种；未提交改动与 session storage 靠它保住。
+_Avoid_: done flag, lock file, 初始化标记
+
+**Review fixed point**:
+review 只审它之后的 diff 的那个提交。ticket role 取**本次运行的起点**（runner 开工前读到的 HEAD，存进 durable，`resume()` 后不变），spec 收尾 role 取**分支起点**（`git merge-base origin/main HEAD`）。值由 runner 注入 prompt 与 `code_review` 工具。
+_Avoid_: base sha, diff 起点, 基准提交
 
 **Slot**:
 一个 Job 占用的一个并发名额；全局与每个 target repo 各有一条上限。Job 只要名下还有未到终态的 pod 就占着它的 Slot，无论该 pod 是否正在终止。
@@ -89,6 +101,10 @@ _Avoid_: result command, agent-result helper
 **Outcome**:
 run result 的三种结论之一——`done` / `blocked` / `error`；它描述**这次运行是怎么结束的**，不描述为什么没做成（后者是 App 证据评论里的事，不进载荷）。agent 只能产生 `done`（调 `finish_ticket` / `finish_spec`）与 `blocked`（调 `blocked`）；`error` 只由 runner/App 判（Job 非正常终态、读不到 annotation、label 与 Job 漂移），包揽一切非 agent 自述的失败且**不自动重试**（重试的粒度是 k8s 重启 pod + 同卷 `resume()`）。
 _Avoid_: status, state, 返回值
+
+**Seed failure**:
+播种失败的五个分类（`auth` / `repo_unreachable` / `ref_missing` / `disk` / `unknown`）与两个退出码（可重试 75、不可重试 78）。不可重试的那一类由 Job 的 `podFailurePolicy` 直接判终态，不等 `backoffLimit` 磨完。
+_Avoid_: seed error, clone 失败, 初始化错误
 
 **Base PVC**:
 每个 target repo 一个、长期保留的 PVC，里面是该仓库 main 的一份同步克隆。**v1 不用**——工作副本由 init container 直接播种进 Ticket PVC（[ADR-0008](docs/adr/0008-durable-runtime-base.md)），留作 v2 候选。
