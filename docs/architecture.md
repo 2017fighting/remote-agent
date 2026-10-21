@@ -4,6 +4,8 @@
 
 图里的名词一律取自 `GLOSSARY.md`。与 ADR 不一致的地方不在这里偷偷改，集中在[第 8 节](#8-两处缺口)列出。
 
+> **⚠️ 部分图已过期（[ADR-0008](adr/0008-durable-runtime-base.md)）**：执行面基座从 `pi -p --mode json` 换成了 pi-durable（库）+ 自写 runner，因此**第 1、2、6、7 节的图**与**第 8 节的缺口 A** 不再成立：Base PVC / Sync Job / Job snapshot 已退出 v1，终态只有三种（Job `Complete` / `backoffLimit` 耗尽 / `DeadlineExceeded`），pod 重启对 GitHub 不可见，`error` 不再自动重试。重画归属 spec 阶段（见地图的「Not yet specified」）；在此之前以 `docs/adr/0003`、`0004`、`0005`、`0007`、`0008` 为准。
+
 ## 1. 系统全景
 
 ```mermaid
@@ -193,6 +195,8 @@ flowchart TD
 以下两点是**你提的需求与现有 ADR 之间真实存在的差距**，不是实现细节。按 `docs/agents/domain.md` 的要求显式列出。
 
 ### 缺口 A：崩溃后是「重跑整个 ticket」，不是「接着之前跑」
+
+> **已解决（[ADR-0008](adr/0008-durable-runtime-base.md)）**：基座换成 pi-durable 后，崩溃/被驱逐是 k8s 重启 pod + 同一块 Ticket PVC 上 `resume()` 从最后一个 checkpoint 接着跑，「重跑整个 ticket」不再成立。下面的现状描述只对 pi CLI 时代成立，保留作背景。
 
 现状由 ADR-0007 决定：一切非 agent 自述的失败（OOM、被驱逐、超时、pi 的 `stopReason ∈ error|aborted|length`）都归为 `outcome=error`，享有一次自动重试。重试是 App 起一个**新 Job、从同一份 Job snapshot 重新开始**。
 

@@ -1,5 +1,7 @@
 # base PVC 由一个 App 起的一次性 sync Job 保鲜
 
+> **Status**: v1 不适用。base PVC、Sync Job、Job snapshot 已退出 v1——工作副本由 init container 幂等播种进每 ticket 自己那块 PVC（[ADR-0008](0008-durable-runtime-base.md)）。本文保留为 v2 候选（真需要「从一份干净 main 快速播种」时的首选形态）。
+
 每个 target repo 的 base PVC，由 App 在每次起 agent Job 之前新建一个一次性 sync Job（`git fetch origin main` + `reset --hard` + `clean -fdx`）来刷新，App 等它 Succeeded 之后才创建 VolumeSnapshot 与 agent Job；同步失败直接把这次运行标 `error`，不降级用旧 base。选它是因为「快照必须打在静止的 base 上」这条顺序约束只有创建者能保证，而常驻 syncer 会让 base 悄悄落后、App 自己挂卷又会把单副本长跑服务拖进磁盘 I/O。代价是每次运行多一个 Job 的生命周期与一段启动延迟，且瞬时网络抖动会废掉一次运行（由 `error` 自动重试一次兜底）。
 
 ## Considered Options

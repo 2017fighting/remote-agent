@@ -45,14 +45,22 @@ _Avoid_: sync loop, poll, tick, 轮询
 _Avoid_: queue, 排队, 延后重试
 
 **Agent role**:
-一次运行要扮演的角色（`implement-ticket` / `implement-spec`），决定挂载哪份 prompt。
+一次运行要扮演的角色（`implement-ticket` / `implement-spec`），决定用哪份 prompt 模板。
 _Avoid_: mode, action, agent type
 
 ### 执行面
 
 **Job**:
-一个 k8s Job，跑一个 agent role，对应一张 ticket（或某个 spec 的收尾）。
+一个 k8s Job，跑一个 agent role，对应一张 ticket（或某个 spec 的收尾）。Job 的终态是这次运行唯一的结论来源；pod 可以在 `resume()` 里重启，所以 pod 的终态不说明任何事。
 _Avoid_: worker, pod, task
+
+**Runner**:
+镜像里烧的 TypeScript 程序：打开 Ticket PVC 上的 durable storage、注入 prompt 与模型、跑一个 agent role、在真正终态时把 run result 写进自己 Job 的 annotation。它是 Job 里唯一的 k8s writer。
+_Avoid_: wrapper, entrypoint, pi 命令
+
+**Ticket PVC**:
+一个 ticket 一块、`ReadWriteOncePod`、比 Job 活得久的 PVC，里面同时装这个 ticket 的工作副本与 durable 的 session storage。
+_Avoid_: 工作卷, workspace, job pvc
 
 **Slot**:
 一个 Job 占用的一个并发名额；全局与每个 target repo 各有一条上限。Job 只要名下还有未到终态的 pod 就占着它的 Slot，无论该 pod 是否正在终止。
@@ -63,27 +71,27 @@ namespace 里只算对象数量的 ResourceQuota（不含 requests/limits 键）
 _Avoid_: quota, 上限, 配额
 
 **Run result**:
-Job 结束前写在自己 Job 对象 annotation 上的结果载荷 `{v, outcome, summary, commentBody?, newTickets?[], reason?, warnings?[]}`；agent 用 Result tool 自述，wrapper 负责落盘（[ADR-0007](docs/adr/0007-run-result-contract.md)）。
+写在 Job 自己对象 annotation 上的结果载荷 `{v, outcome, summary, commentBody?, newTickets?[], reason?, warnings?[]}`；agent 用 Result tool 自述，runner 在 outcome 已定之后才落盘——被中断的运行不写它（[ADR-0007](docs/adr/0007-run-result-contract.md)）。
 _Avoid_: report, output, artifact
 
 **Result tool**:
-镜像里烧的 pi 自定义工具（`run_result`），agent 收尾时调用它自述 run result，并把本次 run 就此终结；它只写结果文件，不碰 GitHub、不碰 k8s。
+runner 里烧的 durable 工具（`run_result`），agent 收尾时调用它自述 run result；它返回 `control: { terminate: true }` 让本次 run 就此收尾，且只把自述交给 runner，不碰 GitHub、不碰 k8s。
 _Avoid_: result command, agent-result helper
 
 **Outcome**:
-run result 的三种结论之一——`done` / `blocked` / `error`；它描述**这次运行是怎么结束的**，不描述为什么没做成（后者在 `reason` 里）。`error` 包揽一切非 agent 自述的失败并享有一次自动重试，`blocked` 只留给「pi 正常跑完但 agent 自述卡住」。
+run result 的三种结论之一——`done` / `blocked` / `error`；它描述**这次运行是怎么结束的**，不描述为什么没做成（后者在 `reason` 里）。`error` 包揽一切非 agent 自述的失败且**不自动重试**（重试的粒度是 k8s 重启 pod + 同卷 `resume()`），`blocked` 只留给「run 正常收尾但 agent 自述卡住」。
 _Avoid_: status, state, 返回值
 
 **Base PVC**:
-每个 target repo 一个、长期保留的 PVC，里面是该仓库 main 的一份同步克隆。
+每个 target repo 一个、长期保留的 PVC，里面是该仓库 main 的一份同步克隆。**v1 不用**——工作副本由 init container 直接播种进 Ticket PVC（[ADR-0008](docs/adr/0008-durable-runtime-base.md)），留作 v2 候选。
 _Avoid_: cache, mirror, workspace
 
 **Sync Job**:
-App 起的一次性 Job，把某个 target repo 的 base PVC 同步到最新 main；它是 base PVC 唯一的写者。
+App 起的一次性 Job，把某个 target repo 的 base PVC 同步到最新 main；它是 base PVC 唯一的写者。**v1 不用**（没有 base PVC）。
 _Avoid_: git-sync, mirror job, fetcher
 
 **Job snapshot**:
-从 base PVC 打出的 CSI 快照，用来给一次 Job 播种工作副本。
+从 base PVC 打出的 CSI 快照，用来给一次 Job 播种工作副本。**v1 不用**：工作副本直接在 Ticket PVC 上生长，不再从快照播种。
 _Avoid_: clone, copy, overlay
 
 ### 外部边界
