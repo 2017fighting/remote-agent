@@ -67,7 +67,7 @@ _Avoid_: worker, pod, task
 _Avoid_: wrapper, entrypoint, pi 命令
 
 **Ticket PVC**:
-一个 ticket 一块、`ReadWriteOncePod`、比 Job 活得久的 PVC，里面同时装这个 ticket 的工作副本（`repo/`）与 durable 的 session storage（`state/`）。
+一个 ticket 一块、`ReadWriteOncePod`、比 Job 活得久的 PVC，里面同时装这个 ticket 的工作副本（`repo/`）、durable 的 session storage（`state/`）与 HOME 的缓存（`home/`）。
 _Avoid_: 工作卷, workspace, job pvc
 
 **Seed**:
@@ -103,7 +103,7 @@ run result 的三种结论之一——`done` / `blocked` / `error`；它描述**
 _Avoid_: status, state, 返回值
 
 **Seed failure**:
-播种失败的五个分类（`auth` / `repo_unreachable` / `ref_missing` / `disk` / `unknown`）与两个退出码（可重试 75、不可重试 78）。不可重试的那一类由 Job 的 `podFailurePolicy` 直接判终态，不等 `backoffLimit` 磨完。
+播种失败的五个分类（`auth` / `repo_unreachable` / `ref_missing` / `disk` / `unknown`）与两个退出码（可重试 75、不可重试 78）。不可重试的那一类由 Job 的 `podFailurePolicy` 直接判终态，不等 `backoffLimit` 磨完；`disk` 的触发点是播种前的 `df` 预检（卷空闲空间不足）。
 _Avoid_: seed error, clone 失败, 初始化错误
 
 **Base PVC**:

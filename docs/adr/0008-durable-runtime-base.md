@@ -4,7 +4,7 @@
 
 ## 硬约束（选型的后果，不是实现细节）
 
-- **单写者**：durable 自身没有任何跨进程锁（`README`：「One process owns a storage at a time; there is no cross-process locking」）。防线只能建在 k8s 上——Ticket PVC 用 `ReadWriteOncePod`、Job 用 `parallelism: 1`、旧进程在 `terminationGracePeriodSeconds` 内 `harness.close()` 后退出。
+- **单写者**：durable 自身没有任何跨进程锁（`README`：「One process owns a storage at a time; there is no cross-process locking」）。防线只能建在 k8s 上——Ticket PVC 用 `ReadWriteOncePod`、Job 用 `parallelism: 1`、旧进程在 `terminationGracePeriodSeconds` 内 `harness.close()` 后退出（v1 取 120s，见 [ADR-0010](0010-job-resource-budget.md)）。
 - **sqlite 必须落块卷**：durable 的 SQLite 后端是 WAL + `synchronous = NORMAL`，NFS 上的锁与共享内存语义退化（home-ops 已把 SQLite-on-NFS 记为接受的降级）。Ticket PVC 固定 `truenas-iscsi-retain`，不用 `truenas-nfs-retain`。
 - **终态只有三种**：Job `Complete`（runner 自述 done/blocked 后写了 annotation）、`backoffLimit` 耗尽、`activeDeadlineSeconds` 到点。pod 重启与 `resume()` 全程对 GitHub 不可见——runner 被 SIGTERM 时只 `harness.close()` 然后非零退出，**不写 annotation**。
 - **结果载体不变、证据换了**：Result tool + Job annotation 那一层保留（[ADR-0007](0007-run-result-contract.md)），砍掉的是「解析 pi json 流」那一层；outcome 的判定证据从 pi 的 `stopReason`/退出码换成 durable 的 `submission.wait()` 与 task outcome。
@@ -12,7 +12,7 @@
 ## Considered Options
 
 - **留在 `pi -p --mode json`，在 App 侧重试**：不加新依赖，但缺口 A 无解——一次性运行没有 checkpoint，重试永远是「从零重跑整个 ticket」。
-- **钉 `/root/clone/pi` 的源码 commit（`v1.3.0-61-g16f5f0af4`）**：白得 `restartLimit`/park、`sleeping`/`sleepUntil`、`wake()`、`retryTask`、双参数 `onReport`。不要：npm 1.3.0 已够 v1 用（`resume()`、`submission.wait()`、`control: { terminate: true }`、`harness.closed` 都在发布版里），而源码 HEAD 未发布、`CHANGELOG` 的 `[Unreleased]` 已列 4 条 Breaking Change。**v1 因此不依赖 park / sleeping / retryTask / 双参数 `onReport`**；crash-loop 的上界由 Job 的 `backoffLimit` 给。
+- **钉 `/root/clone/pi` 的源码 commit（`v1.3.0-61-g16f5f0af4`）**：白得 `restartLimit`/park、`sleeping`/`sleepUntil`、`wake()`、`retryTask`、双参数 `onReport`。不要：npm 1.3.0 已够 v1 用（`resume()`、`submission.wait()`、`control: { terminate: true }`、`harness.closed` 都在发布版里），而源码 HEAD 未发布、`CHANGELOG` 的 `[Unreleased]` 已列 4 条 Breaking Change。**v1 因此不依赖 park / sleeping / retryTask / 双参数 `onReport`**；crash-loop 的上界由 Job 的 `backoffLimit` 给（v1 取 4，见 [ADR-0010](0010-job-resource-budget.md)）。
 - **用 `@earendil-works/pi-env` 把 harness 移出 pod**（长驻 runner 持存储与凭证、pod 只当工具执行面）：能让崩溃续跑与「人接进去」都变免费，但控制面变成有状态的（撞 [ADR-0001](0001-stateless-reconciler.md)），且需要一条进 pod 的通道（当前 App Role 没有 `pods/exec`）。留在地图的雾里。
 
 ## Consequences

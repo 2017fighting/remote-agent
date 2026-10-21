@@ -131,4 +131,4 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 ## 本清单不覆盖
 
-runner 的内部结构（task/phase、工具集、section 拼接方式）留给 spec 阶段的 `/codebase-design`；工作副本与凭证归 [#17](https://github.com/2017fighting/remote-agent/issues/17)；模型与 provider 归 [#20](https://github.com/2017fighting/remote-agent/issues/20)；Job 与卷的预算归 [#18](https://github.com/2017fighting/remote-agent/issues/18)。
+runner 的内部结构（task/phase、工具集、section 拼接方式）留给 spec 阶段的 `/codebase-design`；工作副本与凭证归 [#17](https://github.com/2017fighting/remote-agent/issues/17)；模型与 provider 归 [#20](https://github.com/2017fighting/remote-agent/issues/20)；Job 与卷的预算归 [ADR-0010](../adr/0010-job-resource-budget.md)。

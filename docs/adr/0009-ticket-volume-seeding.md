@@ -14,7 +14,7 @@ v1 没有 Base PVC 与快照，工作副本由 init container 幂等播种进 Ti
 - **两个 review 固定点都由 runner 读一次、存进 durable**：ticket role 在渲 prompt 与发第一个模型请求**之前** `git rev-parse HEAD`；spec 收尾 role 存 `git merge-base origin/main HEAD`。值以 durable 文档提交（`defineDoc` + checkpoint），`resume()` 后读到的就是那个已提交的值。崩溃若发生在「读到 HEAD」与「提交文档」之间，因为 agent 尚未开工，重算也不会错。
 - **push 先于 annotation**：runner 在结局时 `git push origin HEAD:refs/heads/agent/spec-<n>`，**成功才写 Job annotation**；push 失败就非零退出、不写 annotation，让 k8s 拉起新 pod、`resume()` 到结尾再 push（pod 重试即免费重试），退避耗尽才是 `error(no-result)`。远端已前进（非 FF）不自动 rebase/pull——v1 每 spec 串行，出现即异常。
 - **播种只做 git**：不 `npm install`。依赖由 agent 按目标仓库的 AGENTS.md 自己装（收尾的全量测试会自己讨饭吃）。好处是 seed 始终秒级、镜像不绑生态、失败分类不混入「包管理器失败」。
-- **PVC 5Gi 起、允许扩容**：实测量级是 `.git` 14MB + 工作树 16MB + `node_modules`（pi-web 的 `package-lock.json` 有 853 个包，含 playwright）0.5–1.5GB + `.next` 几百 MB + durable sqlite 几十 MB。**不能**用 GitHub API 的 `size` 乘系数定容——它只含仓库本身，会系统性低估大头。具体数字归 [#18](https://github.com/2017fighting/remote-agent/issues/18)。
+- **PVC 固定 8Gi、不依赖扩容**：实测量级是 `.git` 14MB + 工作树 16MB + `node_modules`（pi-web 的 `package-lock.json` 有 853 个包，含 playwright）0.5–1.5GB + `.next` 几百 MB + durable sqlite 几十 MB。**不能**用 GitHub API 的 `size` 乘系数定容——它只含仓库本身，会系统性低估大头。具体数字与「写满怎么办」归 [ADR-0010](0010-job-resource-budget.md)。
 
 ## Considered Options
 
@@ -29,7 +29,7 @@ v1 没有 Base PVC 与快照，工作副本由 init container 幂等播种进 Ti
 
 - **App 的 RBAC 多一类对象**：`secrets create/patch/get/delete`（[#12](https://github.com/2017fighting/remote-agent/issues/12) 的 Role 里没有），因为 per-Job Secret 随 Job 一起生灭。
 - **App 需要一个 tick**：续期不是事件驱动的（活跃 Job 不产生事件），所以 [ADR-0001](0001-stateless-reconciler.md) 的 reconcile 除了被 webhook / Job watch 唤醒，还要有一个周期性重排。#2 的「何时被唤醒」要补这一条。
-- **`backoffLimit` 的语义变清晰**：`podFailurePolicy` 强制 `restartPolicy: Never`，所以 pod 层没有「原地重启」，每次崩溃都是一个新 pod、init container 都要重跑一次（靠 marker 跳过）。crash-loop 的上界仍是 `backoffLimit`（[#18](https://github.com/2017fighting/remote-agent/issues/18)）。
+- **`backoffLimit` 的语义变清晰**：`podFailurePolicy` 强制 `restartPolicy: Never`，所以 pod 层没有「原地重启」，每次崩溃都是一个新 pod、init container 都要重跑一次（靠 marker 跳过）。crash-loop 的上界仍是 `backoffLimit`（v1 取 4，见 [ADR-0010](0010-job-resource-budget.md)）。
 - **App 的证据评论靠 pod 状态与日志**：App 没有 `pods/exec`，读不到卷上的 `state/seed-error.json`；它读 `initContainerStatuses[].state.terminated.exitCode` 与容器日志（`pods/log get` 已有）。文件是留给「人挂上卷看现场」的。
 - **prompt 一行都不用写这些**：checkout / push / 凭证 / 卷路径 / review 固定点的来源，全在 init container、runner 与工具里（[prompt 清单](../agents/prompt-checklist.md) 第 10 条已把这类写成「不写」）。清单第 2 条的 `git diff <fixed>...HEAD` 三点写法**不需要改**——全量克隆下两个 role 的固定点都是本地真实祖先。
 - **每张票的卷都要重新装一遍依赖**：只占时间不占错（装载失败归 agent 的 `error`）。共享依赖缓存是以后的事。
