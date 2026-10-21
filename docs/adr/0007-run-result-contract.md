@@ -1,6 +1,6 @@
 # run result 由 agent 自述工具写出，runner 落到 Job annotation
 
-这次运行的结论只能由 agent 主动产出一个结构化产物：durable 的 `submission.wait()` 只说得清「run 是正常收尾还是没答」（`done` / `unanswered(reason)`），说不清「agent 自判没做完」，而 `blocked` 是状态机需要的一等公民。决定：runner 里烧一个 durable 工具（`run_result`），agent 收尾时调用它自述 `{v, outcome, summary, commentBody?, newTickets?[], reason?, warnings?[]}`；工具返回 `control: { terminate: true }`（durable 会把这次 run 以成功收尾、把 inputs settle 成 `done`），runner 在 **outcome 已定之后**把同一份 JSON 写进 Job 自己的 annotation（`remote-agent/run-result`）。runner 是唯一的 k8s writer，工具只把自述交给 runner。
+这次运行的结论只能由 agent 主动产出一个结构化产物：durable 的 `submission.wait()` 只说得清「run 是正常收尾还是没答」（`done` / `unanswered(reason)`），说不清「agent 自判没做完」，而 `blocked` 是状态机需要的一等公民。决定：runner 里烧**三个** durable 工具，按 `AGENT_ROLE` 注入，agent 收尾时调用其中一个自述——`finish_ticket`（这张 ticket 干完了）、`finish_spec`（整条 spec 干完了、可开 PR，带 `prBody`，可带 `newTickets`）、`blocked`（自判卡住，`summary` + `commentBody` 必填）。**outcome 不是字段，而是「调了哪个工具」**：前两个记 `done`，第三个记 `blocked`；agent 无法自述 `error`。工具返回 `control: { terminate: true }`（durable 会把这次 run 以成功收尾、把 inputs settle 成 `done`），runner 在 **outcome 已定之后**把 `{v, outcome, summary, commentBody?, prBody?, newTickets?[], warnings?[]}` 写进 Job 自己的 annotation（`remote-agent/run-result`）。runner 是唯一的 k8s writer，工具只把自述交给 runner。
 
 结果**载体**沿用 pi 时代的结论：pi 1.3.0 的 `-p --mode json` 既没有 `result` 事件、退出码也分不出「agent 自判没做完」与「正常跑完」（见 `research/pi-afk-contract`），所以「agent 主动自述」这条通道是必要的。换基座（[ADR-0008](0008-durable-runtime-base.md)）只砍掉了管线里「解析 pi json 流」那一层，判定证据从 pi 的 `stopReason`/退出码换成 durable 的 `submission.wait()` 与 task outcome。
 
@@ -14,7 +14,7 @@
 
 ## Consequences
 
-- outcome 描述「这次运行是怎么结束的」，不描述为什么没做成：一切非 agent 自述的失败（`unanswered` 的 `model_error`/`no_model`/`faulted`/`aborted`/`missing_task`/`task_too_old`/`migration_failed`、`harness.closed` 的 `failed`、`backoffLimit` 耗尽、`DeadlineExceeded`、没有 annotation）都是 `error`；`blocked` 只留给「run 正常收尾 + agent 自述卡住」。细分原因在 `reason` 里，不进枚举、不进状态机。
+- outcome 描述「这次运行是怎么结束的」，不描述为什么没做成：一切非 agent 自述的失败（`unanswered` 的 `model_error`/`no_model`/`faulted`/`aborted`/`missing_task`/`task_too_old`/`migration_failed`、`harness.closed` 的 `failed`、`backoffLimit` 耗尽、`DeadlineExceeded`、没有 annotation）都是 `error`；`blocked` 只留给「run 正常收尾 + agent 自述卡住」。agent 侧**没有** `error` 也没有 `reason`：细分原因由 App 写进它自己发的证据评论（`no-result` / `BackoffLimitExceeded` / `DeadlineExceeded` 等），不进载荷、不进状态机。
 - **`error` 不再自动重试**（ADR-0008）：重试的粒度是 k8s 重启 pod + 同卷 `resume()`，App 不重建 Job。所以 `error` 是**人的**入口，不是自动回路的入口。
 - **annotation 只在 outcome 已定时写**：runner 被 SIGTERM / OOM / 驱逐时只 `harness.close()` 然后非零退出，不写 annotation——那不是终态，pod 会被 k8s 重启并接着跑。因此不再需要「超时压过文件里的 `done`」这条特例；取而代之的是：Job 已是终态却读不到 annotation → App 兜底判 `error`（`reason=no-result`），证据取 pod 终态（`OOMKilled`/`DeadlineExceeded`/exitCode）与容器日志。
 - **Job 在 App 成功读到 annotation 之前不得被删**；Ticket PVC 比 Job 活得久（ADR-0008），所以「读不到」只发生在 runner 没走到终态的情形。

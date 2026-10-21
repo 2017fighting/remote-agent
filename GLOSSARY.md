@@ -79,15 +79,15 @@ namespace 里只算对象数量的 ResourceQuota（不含 requests/limits 键）
 _Avoid_: quota, 上限, 配额
 
 **Run result**:
-写在 Job 自己对象 annotation 上的结果载荷 `{v, outcome, summary, commentBody?, newTickets?[], reason?, warnings?[]}`；agent 用 Result tool 自述，runner 在 outcome 已定之后才落盘——被中断的运行不写它（[ADR-0007](docs/adr/0007-run-result-contract.md)）。
+写在 Job 自己对象 annotation 上的结果载荷 `{v, outcome, summary, commentBody?, prBody?, newTickets?[], warnings?[]}`；agent 用 Result tool 自述，runner 在 outcome 已定之后才落盘——被中断的运行不写它（[ADR-0007](docs/adr/0007-run-result-contract.md)）。outcome 的值不在载荷里选，而由「调了哪个 Result tool」决定。
 _Avoid_: report, output, artifact
 
 **Result tool**:
-runner 里烧的 durable 工具（`run_result`），agent 收尾时调用它自述 run result；它返回 `control: { terminate: true }` 让本次 run 就此收尾，且只把自述交给 runner，不碰 GitHub、不碰 k8s。
+runner 里烧的三个 durable 工具，按 Agent role 注入其中两个——`finish_ticket`（这张 ticket 干完）/ `finish_spec`（整条 spec 干完、可开 PR）/ `blocked`（自判卡住）；它返回 `control: { terminate: true }` 让本次 run 就此收尾，且只把自述交给 runner，不碰 GitHub、不碰 k8s。
 _Avoid_: result command, agent-result helper
 
 **Outcome**:
-run result 的三种结论之一——`done` / `blocked` / `error`；它描述**这次运行是怎么结束的**，不描述为什么没做成（后者在 `reason` 里）。`error` 包揽一切非 agent 自述的失败且**不自动重试**（重试的粒度是 k8s 重启 pod + 同卷 `resume()`），`blocked` 只留给「run 正常收尾但 agent 自述卡住」。
+run result 的三种结论之一——`done` / `blocked` / `error`；它描述**这次运行是怎么结束的**，不描述为什么没做成（后者是 App 证据评论里的事，不进载荷）。agent 只能产生 `done`（调 `finish_ticket` / `finish_spec`）与 `blocked`（调 `blocked`）；`error` 只由 runner/App 判（Job 非正常终态、读不到 annotation、label 与 Job 漂移），包揽一切非 agent 自述的失败且**不自动重试**（重试的粒度是 k8s 重启 pod + 同卷 `resume()`）。
 _Avoid_: status, state, 返回值
 
 **Base PVC**:

@@ -4,7 +4,7 @@
 
 图里的名词一律取自 `GLOSSARY.md`。与 ADR 不一致的地方不在这里偷偷改，集中在[第 8 节](#8-两处缺口)列出。
 
-> **⚠️ 部分图已过期（[ADR-0008](adr/0008-durable-runtime-base.md)）**：执行面基座从 `pi -p --mode json` 换成了 pi-durable（库）+ 自写 runner，因此**第 1、2、6、7 节的图**与**第 8 节的缺口 A** 不再成立：Base PVC / Sync Job / Job snapshot 已退出 v1，终态只有三种（Job `Complete` / `backoffLimit` 耗尽 / `DeadlineExceeded`），pod 重启对 GitHub 不可见，`error` 不再自动重试。重画归属 spec 阶段（见地图的「Not yet specified」）；在此之前以 `docs/adr/0003`、`0004`、`0005`、`0007`、`0008` 为准。
+> **⚠️ 部分图已过期（[ADR-0008](adr/0008-durable-runtime-base.md)）**：执行面基座从 `pi -p --mode json` 换成了 pi-durable（库）+ 自写 runner，因此**第 1、2、6、7 节的图**与**第 8 节的缺口 A** 不再成立：Base PVC / Sync Job / Job snapshot 已退出 v1，终态只有三种（Job `Complete` / `backoffLimit` 耗尽 / `DeadlineExceeded`），pod 重启对 GitHub 不可见，`error` 不再自动重试。**第 3 节的 Spec 循环图另有两处失效（[#16](https://github.com/2017fighting/remote-agent/issues/16)）**：收尾 Job **不再跑 e2e**（`/implement-spec` 原文里没有 e2e，v1 不自行加），`Closes #<spec>` **不由 commit 带**，而是 App 开 PR 时追加进 PR body（ADR-0002 下 agent 不碰 GitHub）。重画归属 spec 阶段（见地图的「Not yet specified」）；在此之前以 `docs/adr/0003`、`0004`、`0005`、`0007`、`0008` 为准。
 
 ## 1. 系统全景
 
