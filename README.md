@@ -25,10 +25,10 @@ WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3
 
 ## 我们需要用到的issue label
 
-- `agent:implement`: 标记这个issue(spec or ticket)需要由remote agent进行实现
-- `agent:in-progress`: `github app`接收到了请求，计算出了frontier ticket，将这个ticket标记为了进行中
-- `agent:error`: k8s job实现时非正常退出，由`github app`进行设置
-- `agent:blocked`: k8s job实现时发现无法AFK（需要人来做决定），或者某些东西无法实现，没有做完，由k8s job进行设置
+- `agent:implement`: 标记这个 issue(spec or ticket) 需要由 remote agent 进行实现；**人写，App 永不删**（它记的是「人授权过」，不是「此刻在跑」）
+- `agent:in-progress`: `github app` 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
+- `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 `github app` 设置；**没有自动重试**，人改 label 是唯一重入方式
+- `agent:blocked`: agent 自述没做完、需要人做决定，由 `github app` 按 run result 设置
 
 ## implement整体流程
 
@@ -45,7 +45,7 @@ spec-ticket的关系是一对多的，spec会有sub issue，ticket通常没有(e
 
 ## 如何找spec当前frontier ticket
 
-list then open children，drop any with an open blocker or an assignee or an `agent:*`(blocked/error/in-progress) label, first wins.
+list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ no `agent:*` label），first wins.
 
 ## job并发
 
@@ -110,50 +110,30 @@ commit需要有`Closes #<spec-issue-number>`
 
 ## issue状态机
 
-1. human在和Interactive agent确定好spec之后创建出来的
-   status: open
-   label: []
+完整表格与状态机图见 [docs/architecture.md 第 4 节](docs/architecture.md#4-状态机)；这里只留三条前提、入口门和一张 label 清单。
 
-2. interactive agent将某些issue标记为`ready for an AFK agent`
-   status: open
-   label: [ready-for-agent]
+**三条前提**
 
-3. human手动给某个spec/ticket添加agent:implement
-   status: open
-   label: [ready-for-agent, agent:implement]
+1. **Job 的终态只有三种**：`Complete`（runner 自述 done/blocked 后已写 annotation）、`Failed(reason=BackoffLimitExceeded)`、`Failed(reason=DeadlineExceeded)`。**只有 Job 终态会移动 label**；pod 层的 OOMKilled / 驱逐 / SIGTERM / CrashLoopBackOff 与重启后的 `resume()` 全程对 GitHub **不可见**（[ADR-0008](docs/adr/0008-durable-runtime-base.md)）。「Job 在跑但 pod 在重启」是一个对 GitHub 不可见的自环：label 停在 `agent:in-progress`、不评论、Slot 继续占着——票看起来一动不动，那是正常的。
+2. **写者各一个**：label、评论、关 issue、开 PR 全是 **App**（[ADR-0002](docs/adr/0002-app-is-sole-github-writer.md)）；annotation 只有 **Runner**（[ADR-0007](docs/adr/0007-run-result-contract.md)）。Job 从不碰 issue。
+3. **label 是三个维度**：triage（`ready-for-agent` / `ready-for-human`，人写，表示谁该干）、授权（`agent:implement`，人写）、运行事实（`agent:in-progress` / `agent:error` / `agent:blocked`，只有 App 写）。**assignee 不参与状态机**，App 不读也不写。
 
-4. github app将某个ticket设置为了进行中状态
-   status: open
-   label: [ready-for-agent, agent:in-progress]
+**入场门（Gate）**
 
-5. k8s job正常退出，做完了，由k8s job将这个issue关闭
-   status: close
-   label: [ready-for-agent]
+```
+open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ 无任何 agent:*
+```
 
-6. k8s job非正常退出
-   status: open
-   label: [ready-for-human, agent:error]
+四条件缺一不动。`ready-for-agent` 是门的一部分而不是装饰：spec 收尾后把它换成 `ready-for-human`，就是靠这一条退出门。额度满时 **Defer**（本轮不建 Job、不改 label、不评论，只写一条日志，见 #13）。
 
-7. k8s job没有实现完
-   status: open
-   label: [ready-for-human, agent:blocked]
+| 场景（Job 终态 · annotation） | ticket 的 label | spec 的 label |
+|---|---|---|
+| —（Claim：Job 非终态，含 pod 重启自环） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | `[ready-for-agent, agent:implement]`（不变，spec 不写 `agent:in-progress`） |
+| `Complete` · `done` | `closed` · `[ready-for-agent, agent:implement]` | `[ready-for-human, agent:implement]` + 已开 PR |
+| `Complete` · `done` + `newTickets` | `closed` · 同上，新 sub-issue 已建 | `[ready-for-agent, agent:implement]`（**不开 PR**，新票进 frontier） |
+| `Complete` · `blocked` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | 同左 |
+| 任何 `error`（自述 / backoffLimit / DeadlineExceeded / no-result / no-job） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | 同左 |
+| 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent` | 同左 |
+| 额度满 · Defer | 一字不变 | 一字不变 |
 
-8. github app将spec设置为了进行中状态
-   status: open
-   label: [ready-for-agent, agent:implement, agent:in-progress]
-
-9. k8s job正常退出，spec确认全做完了，提了pr(commit里有Closes #${spec-issue-number}，这样在merge时会自动关闭spec issue)
-   status: open
-   label: [ready-for-human, agent:implement]
-
-10. k8s job非正常退出
-    status: open
-    label: [ready-for-human, agent:implement, agent:error]
-
-11. k8s job正常退出，但是判断有真阻塞
-    status: open
-    label: [ready-for-human, agent:implement, agent:blocked]
-
-12. 状态同3,k8s job发现没有实现完，需要它在这个spec下创建新的sub issue(如果新的issue可以AFK实现，就带`ready-for-agent`的label，否则就带`ready-for-human`的label，之后github app需要检测到有新的frontier ticket未实现完成，实现这些新的issue)
-    status: open
-    label: [ready-for-agent, agent:implement]
+每个 `error` / `blocked` 终态 App 都会发一条评论（reason + Job/pod 名 + pod 终态证据 + 保留的 Ticket PVC 名 + `kubectl logs` 指引）——因为那几条路上根本没有 annotation。

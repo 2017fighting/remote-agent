@@ -15,12 +15,20 @@ _Avoid_: epic, parent issue, 大 issue
 _Avoid_: task, subtask, child issue
 
 **Frontier**:
-某个 spec 当前可开工的那张 ticket——open、无 open blocker、无 assignee、无 `agent:*` label，按 sub-issue 顺序取第一张。
+某个 spec 当前可开工的那张 ticket：它的 sub-issue 里第一条通过 Gate 的。
 _Avoid_: next task, queue head, 待办
 
+**Gate**:
+一张 issue 可以被 App 动手的全部条件：`open` ∧ 无 open blocker ∧ 有 `ready-for-agent` ∧ 有 `agent:implement` ∧ 无任何 `agent:*` label。四条件缺一不动；不够条件不是错误，只是不做。
+_Avoid_: 门槛, 准入, ready check
+
 **Claim**:
-用 assignee 表示某张 ticket 已被一次运行占用。
+App 给一张 ticket 加上 `agent:in-progress` 的那一次 label edit，表示此刻有一个 Job 占着它；去重靠它加确定性 Job 名（create-if-absent）。assignee 不参与状态机。
 _Avoid_: lock, lease, 认领标记
+
+**Re-entry**:
+人把一张 `blocked` / `error` 的票送回 Frontier 的唯一动作：摘 `agent:blocked` / `agent:error`，把 `ready-for-human` 换回 `ready-for-agent`；`agent:implement` 不动。
+_Avoid_: retry, 重新触发, 恢复
 
 **Target repo**:
 某个 spec/ticket 所属的仓库，也就是 agent 真正提交代码的地方。
@@ -106,13 +114,13 @@ _Avoid_: proxy, gateway, router, LLM API
 人（或 interactive agent）声明这张 issue 已经 spec 完整、可以交给 AFK agent。
 
 **agent:implement**:
-人手动加上，表示「开始按这个 spec/ticket 干活」。
+人手动加上，表示「开始按这个 spec/ticket 干活」。记的是「人授权过」，不是「此刻在跑」，所以 App 永不删它。
 
 **agent:in-progress**:
-App 加上，表示已有 Job 在跑。
+App 加上，表示这张 ticket 此刻被一个 Job 占着（Claim → Job 终态）。只出现在 ticket 上，spec 从不带它；pod 重启期间它一字不变。
 
 **agent:error**:
-Job 非正常退出（含超时），由 App 加上。
+App 加上，表示这次运行没有可用结论：Job 非正常退出（backoffLimit 耗尽 / 超时）、Job 已终态却读不到 run result、或 label 与 Job 漂移（有 `in-progress` 无 Job）。同时摘 `ready-for-agent`、加 `ready-for-human`、发一条带证据的评论；**没有自动重试**。
 
 **agent:blocked**:
-Job 正常退出但没做完、或遇到真阻塞，由 App 加上。
+Agent 自述没做完、需要人做决定，由 App 按 run result 加上（同时摘 `ready-for-agent`、加 `ready-for-human`、转写评论）。
