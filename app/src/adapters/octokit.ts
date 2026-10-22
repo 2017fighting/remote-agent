@@ -44,6 +44,9 @@ export class OctokitGitHub implements GitHubPort {
   createIssue(): Promise<never> {
     return this.notImplemented("createIssue");
   }
+  addSubIssue(): Promise<never> {
+    return this.notImplemented("addSubIssue");
+  }
   createPullRequest(): Promise<never> {
     return this.notImplemented("createPullRequest");
   }

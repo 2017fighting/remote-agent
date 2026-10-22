@@ -8,13 +8,19 @@ import type { GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sPort } from "./ports/K8sPort.js";
 
 /**
- * Claim execution (spec #33 §2 step 3, ADR-0013). Write order is
+ * Job start-up (spec #33 §2 steps 3 and 4, ADR-0013). Write order is
  *
- *   Ticket PVC (if absent) → per-Job Secret (mint) → Job (if absent) → `agent:in-progress`
+ *   PVC (if absent) → per-Job Secret (mint) → Job (if absent) → `agent:in-progress`
  *
  * Job before label is deliberate: crashing between the two leaves "Job running
  * + ticket still in the gate", which the k8s half of the gate absorbs next
  * pass. The reverse order would leave "in-progress + no Job" — a fake T6e.
+ *
+ * The spec's closeout Job runs the same sequence minus the label: a spec never
+ * carries `agent:in-progress` (§4.5), so its "already consumed" marker is the
+ * label migration the outcome performs. Everything else — the deterministic
+ * name, the volume, the minted token, create-if-absent, the k8s half of the
+ * Claim-gate — is the same door, not a second one.
  *
  * Existence is probed by deterministic name (RBAC has no `secrets list`), which
  * is also what makes a replay free: on an unchanged world the PVC and the
@@ -31,8 +37,8 @@ import type { K8sPort } from "./ports/K8sPort.js";
  * - `403 quota exceeded` (the Guardrail ResourceQuota) is a **normal branch**:
  *   no Job this pass, no label change, no comment, no `agent:error`.
  *
- * Any other failure stops the pass at this ticket; the next pass recomputes
- * from world state, so there is no half-state to clean up.
+ * Any other failure stops the pass at this Job; the next pass recomputes from
+ * world state, so there is no half-state to clean up.
  */
 
 export interface ClaimTicketInput {
@@ -46,6 +52,16 @@ export interface ClaimTicketInput {
   workItemJson: string;
 }
 
+/** The spec closeout Job: same deterministic name rule, applied to the spec's own number. */
+export interface StartCloseoutJobInput {
+  config: AppConfig;
+  github: GitHubPort;
+  k8s: K8sPort;
+  targetRepo: string;
+  specNumber: number;
+  workItemJson: string;
+}
+
 export type ClaimResult =
   | { kind: "claimed"; jobName: string }
   /** The Job object was already there (a create raced us): nothing more to do this pass. */
@@ -56,6 +72,33 @@ export type ClaimResult =
   | { kind: "failed"; jobName: string; error: unknown };
 
 export async function claimTicket(input: ClaimTicketInput): Promise<ClaimResult> {
+  return startAgentJob({ ...input, markInProgress: true });
+}
+
+/** S1 → S2: start the closeout Job. No label write — a spec never carries `agent:in-progress`. */
+export async function startCloseoutJob(input: StartCloseoutJobInput): Promise<ClaimResult> {
+  return startAgentJob({
+    ...input,
+    issueNumber: input.specNumber,
+    role: "implement-spec",
+    markInProgress: false,
+  });
+}
+
+interface AgentJobInput {
+  config: AppConfig;
+  github: GitHubPort;
+  k8s: K8sPort;
+  targetRepo: string;
+  issueNumber: number;
+  specNumber: number;
+  role: AgentRole;
+  workItemJson: string;
+  /** The Claim *is* the label edit; only the ticket role has one. */
+  markInProgress: boolean;
+}
+
+async function startAgentJob(input: AgentJobInput): Promise<ClaimResult> {
   const { config, github, k8s, targetRepo, issueNumber, specNumber } = input;
   const pvc = renderTicketPvc({ config, targetRepo, issueNumber, specNumber });
   const job = renderJobManifest({
@@ -68,9 +111,9 @@ export async function claimTicket(input: ClaimTicketInput): Promise<ClaimResult>
   });
 
   try {
-    // 1. Ticket PVC — long-lived, one per ticket (ADR-0011). A volume reused
-    //    from a judged run still carries `remote-agent/expires-at`; Claim is
-    //    where that retention clock stops (an absent value = not deletable).
+    // 1. Volume — long-lived, one per issue (ADR-0011). A volume reused from a
+    //    judged run still carries `remote-agent/expires-at`; this is where that
+    //    retention clock stops (an absent value = not deletable).
     if ((await k8s.getPvc(pvc.name)) === null) {
       await createIfAbsent(() => k8s.createPvc(pvc));
     } else {
@@ -91,8 +134,10 @@ export async function claimTicket(input: ClaimTicketInput): Promise<ClaimResult>
     // 3. Job — create-if-absent under the deterministic name.
     const created = await createIfAbsent(() => k8s.createJob(job));
 
-    // 4. Label last (ADR-0013): the Claim is this label edit.
-    await github.editLabels(targetRepo, issueNumber, [LABEL_AGENT_IN_PROGRESS], []);
+    // 4. Label last (ADR-0013): for a ticket the Claim is this label edit.
+    if (input.markInProgress) {
+      await github.editLabels(targetRepo, issueNumber, [LABEL_AGENT_IN_PROGRESS], []);
+    }
 
     return { kind: created ? "claimed" : "already-claimed", jobName: job.name };
   } catch (error) {

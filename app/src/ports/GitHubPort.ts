@@ -72,6 +72,13 @@ export interface GitHubPort {
     body: string;
     labels: string[];
   }): Promise<GitHubIssue>;
+  /**
+   * Link an existing issue as a sub-issue of a spec — the second half of the
+   * `newTickets` path (S3N / T4): an issue that is not listed as a sub-issue
+   * never reaches the Frontier, so creating it is not enough. Create-if-absent:
+   * an existing link is a no-op, which is what keeps a replayed pass write-free.
+   */
+  addSubIssue(ownerRepo: string, specNumber: number, issueNumber: number): Promise<void>;
   createPullRequest(input: {
     ownerRepo: string;
     title: string;
