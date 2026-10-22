@@ -37,8 +37,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Non-root, uid 1000 — the same uid the Job pods use.
-RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app
+# The base image's `node` user is already uid/gid 1000 — the same uid the Job pods use.
 
 ENV NODE_ENV=production \
     NODE_NO_WARNINGS=1 \
@@ -46,9 +45,13 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 COPY --from=build /build/dist/main.mjs /app/main.mjs
+# `main.mjs` exports startApp(); this glue is what actually starts it and wires
+# SIGTERM to a clean stop (ADR-0008: close before the pod goes away).
+COPY --from=build /build/scripts/app-entry.mjs /app/app-entry.mjs
+RUN chown -R 1000:1000 /app
 
 USER 1000
 EXPOSE 8080
 
 ENTRYPOINT ["node"]
-CMD ["/app/main.mjs"]
+CMD ["/app/app-entry.mjs"]

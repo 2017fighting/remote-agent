@@ -3,6 +3,8 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import {
   readRunnerEnv,
   readServiceAccountNamespace,
+  requireEnv,
+  REQUIRED_RUNNER_ENV_KEYS,
   StartupError,
   jobPaths,
   type RunnerEnv,
@@ -26,6 +28,9 @@ export interface RunnerEntryOptions {
 export async function runRunner(options: RunnerEntryOptions = {}): Promise<RunOutcome> {
   const env = options.env ?? process.env;
   const log = options.log ?? ((line: string) => console.log(line));
+  // Validate the env before any I/O: a broken Job template must fail on its own
+  // error, not on a missing ServiceAccount mount it would never have needed.
+  requireEnv(env, REQUIRED_RUNNER_ENV_KEYS);
   const namespace = options.namespace ?? (await readServiceAccountNamespace());
   const runnerEnv: RunnerEnv = readRunnerEnv(env, namespace);
   const paths = jobPaths();

@@ -117,6 +117,17 @@ describe("seed", () => {
     expect(log.join("\n")).toContain("seeded repo=");
   });
 
+  it("seeds a virgin volume where neither repo/ nor state/ exists yet", async () => {
+    // What the kubelet actually mounts: an empty volume at the layout root.
+    const f = await fixture({ withSpecBranch: true });
+    await rm(f.paths.state, { recursive: true, force: true });
+    const outcome = await seed(seedDeps(f));
+    expect(outcome.exitCode).toBe(0);
+    expect(await git(["rev-parse", "--abbrev-ref", "HEAD"], f.paths.repo)).toBe("agent/spec-33");
+    const marker = JSON.parse(await readFile(f.paths.seedMarker, "utf8")) as SeedMarkerV1;
+    expect(marker.branch).toBe("agent/spec-33");
+  });
+
   it("starts the spec branch from origin/main when it does not exist yet", async () => {
     const f = await fixture({ withSpecBranch: false });
     const outcome = await seed(seedDeps(f));

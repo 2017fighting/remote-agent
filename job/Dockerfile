@@ -41,9 +41,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
-# Non-root, uid 1000: the Job's pod runs with fsGroup 1000, and git must not see
-# root-owned files in the Ticket PVC worktree (ADR-0009).
-RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin agent
+# The base image's `node` user is already uid/gid 1000, which is what the Job's
+# pod fsGroup uses (ADR-0009): git must not see root-owned files in the Ticket PVC.
 
 # ADR-0010: HOME lives on the Ticket PVC so npm does not refetch on every pod.
 ENV HOME=/mnt/agent/home \
@@ -54,6 +53,7 @@ WORKDIR /mnt/agent/repo
 
 COPY --from=build /build/dist/seed.mjs /opt/remote-agent/seed.mjs
 COPY --from=build /build/dist/runner.mjs /opt/remote-agent/runner.mjs
+RUN chown -R 1000:1000 /opt/remote-agent
 
 USER 1000
 

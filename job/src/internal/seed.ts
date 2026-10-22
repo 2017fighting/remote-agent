@@ -81,8 +81,11 @@ export function exitCodeFor(kind: SeedFailureKind): typeof SEED_EXIT.retryable |
 }
 
 async function checkDisk(deps: SeedDeps): Promise<void> {
+  // On a virgin volume `state/` does not exist yet, so the pre-check runs on the
+  // mount root the volume actually provides; the three directories come after.
   let free: number;
   try {
+    await mkdir(deps.paths.state, { recursive: true });
     free = await deps.freeBytes(deps.paths.state);
   } catch (error) {
     throw new SeedFailure("unknown", `df failed: ${(error as Error).message}`);
