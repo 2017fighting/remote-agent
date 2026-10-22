@@ -1,7 +1,7 @@
 import { JOB_ENV_KEYS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
 import type { AppConfig } from "../config.js";
 import { JOB_IMAGE } from "../job-image.js";
-import type { K8sContainer, K8sEnvVar, K8sJobManifest } from "../ports/K8sPort.js";
+import type { K8sContainer, K8sEnvVar, K8sJobManifest, K8sPvcManifest, K8sVolumeMount } from "../ports/K8sPort.js";
 
 /**
  * Job template (docs/deployment.md §6, ADR-0010): the pod spec is built in App
@@ -122,7 +122,9 @@ function renderSeedContainer(input: JobTemplateInput): K8sContainer {
       { name: JOB_ENV_KEYS.specNumber, value: String(specNumber) },
       { name: JOB_ONLY_ENV_KEYS.gitRemoteUrl, value: gitRemoteUrl(config.gitBaseUrl, targetRepo) },
     ],
-    volumeMounts: ticketVolumeMounts(),
+    // The seed clones, so it needs the token file too (ADR-0009: both containers
+    // mount it as a file, never as env).
+    volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount()],
     resources: { requests: SEED_REQUESTS },
   };
 }
@@ -132,12 +134,7 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     name: AGENT_CONTAINER_NAME,
     image: JOB_IMAGE,
     env: renderJobEnv(input),
-    // The token is mounted as one file at the shared path the runner reads at
-    // push time — never as env (ADR-0009).
-    volumeMounts: [
-      ...ticketVolumeMounts(),
-      { name: "token", mountPath: TOKEN_MOUNT_PATH, subPath: TOKEN_SECRET_KEY, readOnly: true },
-    ],
+    volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount()],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
 }
@@ -147,8 +144,17 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
  * directories on the same Ticket PVC (ADR-0009). Mounting the root once keeps
  * the three paths from drifting apart between template and image.
  */
-function ticketVolumeMounts() {
+function ticketVolumeMounts(): K8sVolumeMount[] {
   return [{ name: "ticket", mountPath: VOLUME_PATHS.mountRoot }];
+}
+
+/**
+ * The per-Job token as a single file both containers read at git time — never as
+ * env (ADR-0009: env is immutable across pod restarts and readable from
+ * `kubectl get job -o yaml`).
+ */
+function tokenVolumeMount(): K8sVolumeMount {
+  return { name: "token", mountPath: TOKEN_MOUNT_PATH, subPath: TOKEN_SECRET_KEY, readOnly: true };
 }
 
 function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
@@ -177,7 +183,12 @@ export function gitRemoteUrl(gitBaseUrl: string, targetRepo: string): string {
 }
 
 /** Ticket PVC create payload (ADR-0010 / ADR-0011). */
-export function renderTicketPvc(input: { config: AppConfig; targetRepo: string; issueNumber: number; specNumber: number }) {
+export function renderTicketPvc(input: {
+  config: AppConfig;
+  targetRepo: string;
+  issueNumber: number;
+  specNumber: number;
+}): K8sPvcManifest {
   const { config, targetRepo, issueNumber, specNumber } = input;
   return {
     name: jobName(targetRepo, issueNumber),

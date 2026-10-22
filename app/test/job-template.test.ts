@@ -146,9 +146,10 @@ describe("job template: env key surface", () => {
 describe("job template: volumes and mounts", () => {
   it("mounts the Ticket PVC at the layout root for both containers", () => {
     const job = manifest();
-    expect(job.podTemplate.initContainers[0]!.volumeMounts).toEqual([
-      { name: "ticket", mountPath: VOLUME_PATHS.mountRoot },
-    ]);
+    expect(job.podTemplate.initContainers[0]!.volumeMounts).toContainEqual({
+      name: "ticket",
+      mountPath: VOLUME_PATHS.mountRoot,
+    });
     const agentMounts = job.podTemplate.containers[0]!.volumeMounts!;
     expect(agentMounts).toContainEqual({ name: "ticket", mountPath: VOLUME_PATHS.mountRoot });
     // repo/, state/ and home/ are directories under that one mount.
