@@ -24,10 +24,15 @@ COPY scripts scripts
 
 # ARG → compiled constant: rewrite build-info.ts before bundling, so the value the
 # App reads at runtime is the tag CI actually pushed for the Job image.
+#
+# `--banner:js` gives the ESM bundle a real `require`: some dependencies (undici,
+# via octokit) are CommonJS and call `require("node:…")` at load time, which
+# esbuild's ESM output cannot resolve on its own.
 ARG JOB_IMAGE_TAG=0.0.0-dev
 RUN node scripts/bake-build-info.mjs --tag "${JOB_IMAGE_TAG}" \
  && node_modules/.bin/esbuild app/src/main.ts \
       --bundle --platform=node --format=esm --target=node22 \
+      --banner:js='import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);' \
       --outfile=dist/main.mjs
 
 # --- runtime ------------------------------------------------------------------
