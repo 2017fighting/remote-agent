@@ -79,13 +79,14 @@ jobs:
   # git half is real `git http-backend`) and a stub OpenAI-compatible model
   # service in kind. It is the spec's delivery gate.
   #
-  # NOT YET REQUIRED, on purpose: the App still has no production port
-  # implementations (#43: octokit + @kubernetes/client-node), so the App process
-  # exits at its startup list and this job fails with that reason rather than
-  # passing. It becomes required — and `push-images` gains it in `needs` — when
-  # #43 merges and the loop can actually close. Leaving it non-required now keeps
-  # the signal honest: a red gate is visible, but it does not block unrelated
-  # work before the adapter it depends on exists.
+  # REQUIRED: this is the spec's delivery gate. `push-images` lists it in `needs`,
+  # so nothing is published to GHCR unless the closed loop held on kind.
+  #
+  # It was deliberately non-required while the App still lacked production port
+  # implementations (#43); once those landed the loop closed and the gate became
+  # binding. A red run here means the App and the Job disagree about a contract —
+  # the exact class of bug that unit tests cannot see, because each side is green
+  # on its own.
   kind-e2e:
     needs: build-images
     runs-on: ubuntu-latest
@@ -126,9 +127,8 @@ jobs:
           kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-model --tail 100 || true
 
   push-images:
-    # `kind-e2e` joins this `needs` when #43 lands and the gate can go green;
-    # nothing is published before the closed loop is green on kind (spec #33 §9).
-    needs: [build-images]
+    # Nothing is published before the closed loop is green on kind (spec #33 §9).
+    needs: [build-images, kind-e2e]
     # PRs build but never publish; main and release tags publish (spec #33 §9).
     if: >-
       ${{

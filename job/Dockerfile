@@ -25,11 +25,17 @@ COPY job job
 COPY scripts scripts
 
 # One bundle per entrypoint: the Job image must not need the workspace at runtime.
+#
+# `--banner:js` gives the ESM bundle a real `require`: pi-ai pulls CommonJS
+# dependencies that call `require("node:…")` at load time, which esbuild's ESM
+# output cannot resolve on its own.
 RUN node_modules/.bin/esbuild job/src/seed.ts \
       --bundle --platform=node --format=esm --target=node22 \
+      --banner:js='import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);' \
       --outfile=dist/seed.mjs \
  && node_modules/.bin/esbuild job/src/runner.ts \
       --bundle --platform=node --format=esm --target=node22 \
+      --banner:js='import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);' \
       --outfile=dist/runner.mjs
 
 # --- runtime ------------------------------------------------------------------

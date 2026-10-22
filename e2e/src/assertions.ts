@@ -35,6 +35,18 @@ export interface PollOptions<T> {
   describe?(value: T): string;
 }
 
+/**
+ * Thrown when the App reports its own failure while we wait for a downstream
+ * effect. Polling a timeout after the App has already said why it failed wastes
+ * minutes and buries the cause, so this short-circuits with the App's words.
+ */
+export class AppReportedFailure extends Error {
+  constructor(readonly appError: string) {
+    super(`the App reported a pass failure: ${appError}`);
+    this.name = "AppReportedFailure";
+  }
+}
+
 /** Poll `observe` until `until` is true, or throw `AssertionTimeout`. */
 export async function poll<T>(options: PollOptions<T>): Promise<T> {
   const started = Date.now();

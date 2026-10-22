@@ -17,19 +17,34 @@ the e2e and production is three env values on the App Deployment:
 
 ## Status
 
-**Not green yet, and deliberately not marked required in CI.** The App has no
-production port implementations: `app/src/adapters/octokit.ts` and
-`app/src/adapters/k8s.ts` throw `not implemented` for all 14 + 18 methods, and
-`app/src/main.ts` defaults to them. The App process therefore exits at its
-startup list (`OctokitGitHub.listIssues not implemented`) before it can serve a
-webhook. That work is
-[#43](https://github.com/2017fighting/remote-agent/issues/43); when it merges,
-this harness should go green without changes — it was built against the
-`GitHubPort` / `K8sPort` contracts those adapters implement.
+**Green, and required in CI.** The closed loop holds end to end:
 
-The harness fails loudly with that reason rather than skipping (see
-`e2e/src/run.ts`, `waitForAppOrFailFast`), because a silently-skipped gate is
-worse than a red one.
+```
+tickets closed: 34, 35
+spec labels: ["agent:implement","ready-for-human"]
+PR: #1 agent/spec-33 -> main (draft=false)
+PR body carries Closes #33: yes (once)
+real git services observed: receive-pack, upload-pack
+```
+
+`push-images` lists this job in `needs`, so nothing reaches GHCR unless the loop
+closed.
+
+The gate has already earned its keep. Every bug below was invisible to the unit
+suite — each side was green on its own, or the in-memory fake was more permissive
+than the real API server — and each was fatal in a cluster:
+
+- the App bound `127.0.0.1:<random>` instead of `0.0.0.0:$PORT` (webhook unreachable)
+- the readiness probe did `GET /webhook` on a POST-only path
+- the ESM bundles had no `createRequire` banner, so their CJS dependencies failed
+- the webhook was delivered with `wget`, absent from the image
+- `Secret.data` was sent as plaintext, not base64 (400 on every Secret create)
+- the seed init container inherited the image's runner `CMD` and died on runner-only env
+- `secretKeyRef` / `fieldRef` env vars were dropped instead of nested under `valueFrom`
+- the run-result PATCH used Node's `fetch` without the ServiceAccount CA (`fetch failed`)
+- the Job template never mounted the prompts ConfigMap the runner reads
+- provenance labels used values k8s rejects (`owner/name#n`), so no Job was ever created
+- the Job image was tagged differently from the reference the App bakes
 
 ## Run it
 

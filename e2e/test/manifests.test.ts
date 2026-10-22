@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
+  APP_SECRET,
   APP_SERVICE_ACCOUNT,
   JOB_SERVICE_ACCOUNT,
   NAMESPACE,
@@ -11,6 +12,7 @@ import {
   PROMPTS_CONFIGMAP,
   renderAppDeployment,
   renderAppRbac,
+  renderAppSecret,
   renderJobRbac,
   renderPromptsConfigMap,
   renderResourceQuota,
@@ -128,33 +130,64 @@ describe("harness manifests: quota, storage class, prompts", () => {
 });
 
 describe("harness manifests: App Deployment env is the whole test difference", () => {
-  it("points the three base URLs at the stubs and nothing else at a test-only value", () => {
-    const deployment = renderAppDeployment({
-      image: "remote-agent-e2e/app:local",
-      stubGitHubUrl: "http://stub-github:8080",
-      stubModelUrl: "http://stub-model:8080/v1",
-      targetRepo: "2017fighting/remote-agent",
-      webhookSecret: "s",
-    }) as {
-      spec: {
-        replicas: number;
-        template: {
-          spec: {
-            serviceAccountName: string;
-            containers: Array<{ env: Array<{ name: string; value?: string }> }>;
-          };
+  const deployment = renderAppDeployment({
+    image: "remote-agent-e2e/app:local",
+    stubGitHubUrl: "http://stub-github:8080",
+    stubModelUrl: "http://stub-model:8080/v1",
+    targetRepo: "2017fighting/remote-agent",
+  }) as {
+    spec: {
+      replicas: number;
+      template: {
+        spec: {
+          serviceAccountName: string;
+          containers: Array<{
+            env: Array<{
+              name: string;
+              value?: string;
+              valueFrom?: { secretKeyRef?: { name: string; key: string } };
+            }>;
+          }>;
         };
       };
     };
-    const env = Object.fromEntries(
-      deployment.spec.template.spec.containers[0]!.env.map((entry) => [entry.name, entry.value]),
-    );
-    expect(env["GITHUB_API_BASE_URL"]).toBe("http://stub-github:8080");
-    expect(env["GIT_BASE_URL"]).toBe("http://stub-github:8080");
-    expect(env["OMNIROUTE_BASE_URL"]).toBe("http://stub-model:8080/v1");
-    expect(env["NAMESPACE"]).toBe(NAMESPACE);
+  };
+  const env = Object.fromEntries(
+    deployment.spec.template.spec.containers[0]!.env.map((entry) => [entry.name, entry]),
+  );
+
+  it("points the three base URLs at the stubs and nothing else at a test-only value", () => {
+    expect(env["GITHUB_API_BASE_URL"]?.value).toBe("http://stub-github:8080");
+    expect(env["GIT_BASE_URL"]?.value).toBe("http://stub-github:8080");
+    expect(env["OMNIROUTE_BASE_URL"]?.value).toBe("http://stub-model:8080/v1");
+    expect(env["NAMESPACE"]?.value).toBe(NAMESPACE);
     expect(deployment.spec.template.spec.serviceAccountName).toBe(APP_SERVICE_ACCOUNT);
     // One replica, no database (docs/deployment.md §1).
     expect(deployment.spec.replicas).toBe(1);
+  });
+
+  it("feeds both credentials from the Secret, as production does", () => {
+    // A literal here would hide a missing Secret key: the App would boot against
+    // a value only the e2e has. Production reads `remote-agent-secret` (§3).
+    for (const key of ["GITHUB_APP_PRIVATE_KEY", "GITHUB_WEBHOOK_SECRET"]) {
+      expect(env[key]?.value).toBeUndefined();
+      expect(env[key]?.valueFrom?.secretKeyRef).toEqual({ name: APP_SECRET, key });
+    }
+  });
+});
+
+describe("harness manifests: the one Secret (docs/deployment.md §3)", () => {
+  it("carries exactly the three keys the docs list, and the App reads two of them", () => {
+    const secret = renderAppSecret({
+      privateKey: "pem",
+      webhookSecret: "secret",
+      omniRouteApiKey: "key",
+    }) as { metadata: { name: string }; stringData: Record<string, string> };
+    expect(secret.metadata.name).toBe(APP_SECRET);
+    expect(Object.keys(secret.stringData).sort()).toEqual([
+      "GITHUB_APP_PRIVATE_KEY",
+      "GITHUB_WEBHOOK_SECRET",
+      "OMNIROUTE_API_KEY",
+    ]);
   });
 });

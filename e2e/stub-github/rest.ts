@@ -56,6 +56,12 @@ export interface RestContext {
   world: StubWorld;
   /** The `owner/name` this stub serves; a route for another repo is a 404. */
   repo: string;
+  /**
+   * The single installation the stub reports. octokit's App auth resolves this
+   * before any data read, so the App-JWT hand-off needs it even though the stub
+   * does not verify the JWT itself.
+   */
+  installationId: number;
   /** Token value returned by the installation-token mint. */
   installationToken: string;
   /** Installation-token lifetime in seconds (GitHub returns ~1h). */
@@ -75,6 +81,12 @@ export async function routeRest(
 ): Promise<RestResponse> {
   const { world, repo } = context;
 
+  // GET /app/installations — the App-level listing octokit's `eachInstallation`
+  // paginates before it can hand out an installation client.
+  if (method === "GET" && segments[0] === "app" && segments[1] === "installations" && segments.length === 2) {
+    return { status: 200, body: [{ id: context.installationId }] };
+  }
+
   // POST /app/installations/:id/access_tokens — mintInstallationToken.
   if (method === "POST" && segments[0] === "app" && segments[1] === "installations" && segments[3] === "access_tokens") {
     const expiresAt = new Date(context.now().getTime() + context.tokenTtlSeconds * 1000).toISOString();
@@ -84,11 +96,26 @@ export async function routeRest(
     };
   }
 
+  // GET /installation/repositories — the installation-token-scoped repo list
+  // octokit walks to turn an installation into repositories.
+  if (method === "GET" && segments[0] === "installation" && segments[1] === "repositories") {
+    const [owner, name] = repo.split("/");
+    return {
+      status: 200,
+      body: { total_count: 1, repositories: [{ id: 1, name, full_name: `${owner}/${name}` }] },
+    };
+  }
+
   // Everything below is `/repos/:owner/:name/...`.
   if (segments[0] !== "repos") return notFound();
   const ownerRepo = `${segments[1]}/${segments[2]}`;
   if (ownerRepo !== repo) return notFound();
   const rest = segments.slice(3);
+
+  // GET /repos/:o/:n/installation — the repo → installation lookup.
+  if (method === "GET" && rest.length === 1 && rest[0] === "installation") {
+    return { status: 200, body: { id: context.installationId } };
+  }
 
   // GET /repos/:o/:n/issues — listIssues (the App's universe).
   if (method === "GET" && rest.length === 1 && rest[0] === "issues") {

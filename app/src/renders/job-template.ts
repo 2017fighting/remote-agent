@@ -1,4 +1,12 @@
-import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
+import {
+  ANNOTATIONS,
+  JOB_ENV_KEYS,
+  JOB_MOUNT_PATHS,
+  LABELS,
+  VOLUME_PATHS,
+  jobName,
+  secretName,
+} from "@remote-agent/shared";
 import type { AppConfig } from "../config.js";
 import { JOB_IMAGE } from "../job-image.js";
 import type { K8sContainer, K8sEnvVar, K8sJobManifest, K8sPvcManifest, K8sVolumeMount } from "../ports/K8sPort.js";
@@ -52,6 +60,9 @@ export const PROMPTS_CONFIGMAP_NAME = "remote-agent-prompts";
 export const TOKEN_SECRET_KEY = "token";
 
 /** Code constants, not env overrides (ADR-0010: they follow the image's toolchain). */
+/** Init container entrypoint inside the Job image (job/Dockerfile). */
+export const SEED_ENTRYPOINT = "/opt/remote-agent/seed.mjs";
+
 export const AGENT_CONTAINER_NAME = "runner";
 export const SEED_CONTAINER_NAME = "seed";
 export const SEED_FAILURE_EXIT_CODE = 78;
@@ -79,14 +90,19 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
   return {
     name,
     namespace: config.namespace,
+    // Identity goes in the annotations: `owner/name` and `owner/name#n` contain
+    // `/` and `#`, which a label value may not carry (the API server answers
+    // 422), and slugifying them would lose the repo token renewal mints
+    // against. Labels keep only the values k8s accepts (ADR-0011).
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${targetRepo}#${issueNumber}`,
       [LABELS.spec]: String(specNumber),
-      [LABELS.repo]: targetRepo,
       [LABELS.role]: role,
     },
-    annotations: {},
+    annotations: {
+      [ANNOTATIONS.repo]: targetRepo,
+      [ANNOTATIONS.ticket]: `${targetRepo}#${issueNumber}`,
+    },
     parallelism: 1,
     backoffLimit: config.jobBackoffLimit,
     activeDeadlineSeconds: config.jobActiveDeadlineSeconds,
@@ -130,6 +146,12 @@ function renderSeedContainer(input: JobTemplateInput): K8sContainer {
   return {
     name: SEED_CONTAINER_NAME,
     image: JOB_IMAGE,
+    // The image's CMD is the runner, so the init container must name its own
+    // entrypoint explicitly. Without this the "seed" container runs the runner,
+    // which validates the runner's env and dies on the keys seed deliberately
+    // does not get (`missing required env: AGENT_ROLE, ...`) — the pod then loops
+    // to BackoffLimitExceeded and no ticket ever starts.
+    command: ["node", SEED_ENTRYPOINT],
     env: [
       { name: JOB_ENV_KEYS.targetRepo, value: targetRepo },
       { name: JOB_ENV_KEYS.specNumber, value: String(specNumber) },
@@ -236,10 +258,12 @@ export function renderTicketPvc(input: {
   return {
     name: jobName(targetRepo, issueNumber),
     namespace: config.namespace,
-    annotations: {},
+    annotations: {
+      [ANNOTATIONS.repo]: targetRepo,
+      [ANNOTATIONS.ticket]: `${targetRepo}#${issueNumber}`,
+    },
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${targetRepo}#${issueNumber}`,
       [LABELS.spec]: String(specNumber),
     },
     spec: {

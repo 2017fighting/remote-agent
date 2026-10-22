@@ -1,4 +1,4 @@
-import { LABELS } from "@remote-agent/shared";
+import { ANNOTATIONS, LABELS } from "@remote-agent/shared";
 import type { K8sJob, K8sPod } from "../ports/K8sPort.js";
 
 /**
@@ -11,7 +11,8 @@ import type { K8sJob, K8sPod } from "../ports/K8sPort.js";
  *
  * Occupancy is counted per Job (pods grouped by ownerReferences), so a Job
  * restarting its pod never double-counts, and a Job is counted per target repo
- * by its `remote-agent/repo` label.
+ * by its `remote-agent/repo` annotation (`owner/name` is not a legal label
+ * value, ADR-0011).
  */
 
 export interface SlotUsage {
@@ -39,7 +40,7 @@ export function countSlotUsage(jobs: K8sJob[], pods: K8sPod[]): SlotUsage {
 
   const perRepo = new Map<string, number>();
   for (const name of holdingJobNames) {
-    const repo = managedJobs.get(name)?.labels[LABELS.repo];
+    const repo = managedJobs.get(name)?.annotations[ANNOTATIONS.repo];
     if (!repo) continue;
     perRepo.set(repo, (perRepo.get(repo) ?? 0) + 1);
   }

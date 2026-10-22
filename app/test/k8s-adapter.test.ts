@@ -276,6 +276,32 @@ describe("KubeClientK8s: Jobs", () => {
     expect(created).toMatchObject({ name: manifest.name, namespace: NAMESPACE, finished: false });
   });
 
+  it("nests env references under valueFrom, so secret and downward-API vars survive", async () => {
+    const { k8s, requests } = await adapter();
+    const manifest = jobManifest("agent-2017fighting-pi-web-35");
+    manifest.podTemplate.initContainers.push({ name: "seed", image: "job:e2e", command: ["node", "/opt/remote-agent/seed.mjs"] });
+    manifest.podTemplate.containers.push({ name: "runner", image: "job:e2e" });
+    manifest.podTemplate.containers[0]!.env = [
+      { name: "PLAIN", value: "x" },
+      { name: "OMNIROUTE_API_KEY", secretKeyRef: { name: "remote-agent-secret", key: "OMNIROUTE_API_KEY" } },
+      { name: "JOB_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
+    ];
+    await k8s.createJob(manifest);
+
+    const body = requests().at(-1)?.json() as Record<string, any>;
+    const agent = body["spec"]["template"]["spec"]["containers"][0];
+    // The API nests both reference kinds under `valueFrom`. Sending the port
+    // shape straight through drops them, and the container then starts without
+    // the variable — the runner dies on "missing required env: OMNIROUTE_API_KEY".
+    expect(agent.env).toEqual([
+      { name: "PLAIN", value: "x" },
+      { name: "OMNIROUTE_API_KEY", valueFrom: { secretKeyRef: { name: "remote-agent-secret", key: "OMNIROUTE_API_KEY" } } },
+      { name: "JOB_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
+    ]);
+    const seed = body["spec"]["template"]["spec"]["initContainers"][0];
+    expect(seed.command).toEqual(["node", "/opt/remote-agent/seed.mjs"]);
+  });
+
   it("getJob maps conditions and reads finished from Complete/Failed only", async () => {
     const { k8s } = await adapter({
       jobs: [
@@ -414,9 +440,12 @@ describe("KubeClientK8s: Secrets", () => {
 
     const created = await k8s.createSecret(secret);
     expect(created).toMatchObject({ name: secret.name, data: { token: "ghs_stub" } });
+    // The wire body must be base64 even though the port speaks plaintext: a
+    // plaintext `data` value is a 400 from the API server on every create, which
+    // stops Claim before the Job exists. This assertion is the boundary.
     expect(requests().at(-1)?.json()).toMatchObject({
       metadata: { name: secret.name, annotations: secret.annotations, labels: secret.labels },
-      data: secret.data,
+      data: { token: Buffer.from(secret.data["token"]!, "utf8").toString("base64") },
     });
 
     expect(await k8s.getSecret(secret.name)).toMatchObject({ name: secret.name });
@@ -432,6 +461,27 @@ describe("KubeClientK8s: Secrets", () => {
 
     await k8s.deleteSecret(secret.name);
     expect(await k8s.getSecret(secret.name)).toBeNull();
+  });
+
+  it("speaks plaintext on the port and base64 on the wire, in both directions", async () => {
+    const { k8s } = await adapter();
+    // A token shape k8s' base64 decoder would reject if sent raw (ADR-0009 says
+    // never assume a token's shape, so this is deliberately arbitrary).
+    const token = "ghs_APPID.JWT~with:odd+chars/=";
+
+    const created = await k8s.createSecret({
+      ...secret,
+      data: { token },
+    });
+    expect(created.data).toEqual({ token });
+
+    // getSecret decodes, so the renewal comparison sees the same plaintext the
+    // mount will contain — a base64/plaintext mismatch here would re-mint every
+    // pass, silently.
+    expect((await k8s.getSecret(secret.name))?.data).toEqual({ token });
+
+    const patched = await k8s.patchSecret(secret.name, { data: { token: token + "2" } });
+    expect(patched.data).toEqual({ token: token + "2" });
   });
 
   it("patchSecret writes nothing when the patch changes nothing (replayability)", async () => {

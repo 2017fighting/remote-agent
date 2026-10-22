@@ -1,4 +1,5 @@
 import { isAlreadyExists, K8sApiError } from "../ports/errors.js";
+import { assertMetadataValid } from "./k8s-metadata.js";
 import type {
   K8sEvent,
   K8sJob,
@@ -17,6 +18,11 @@ import type {
  * create-if-absent (409 semantics = success). Created manifests are kept so
  * tests can assert the Job's decision surface (image, env, volumes, budgets,
  * `podFailurePolicy`, TTL, labels) — read objects carry no pod template.
+ *
+ * Every create validates `metadata.labels` / `metadata.annotations` with the
+ * API server's grammar and throws its 422 (see `k8s-metadata.ts`): the fake
+ * must not accept an object the server would reject, or the suite goes green on
+ * something that cannot exist in a cluster.
  */
 export class FakeK8s implements K8sPort {
   jobs: K8sJob[] = [];
@@ -91,6 +97,7 @@ export class FakeK8s implements K8sPort {
   async createJob(job: K8sJobManifest): Promise<K8sJob> {
     const existing = this.jobs.find((j) => j.name === job.name);
     if (existing) throw new K8sApiError(409, `jobs.batch "${job.name}" already exists`);
+    assertMetadataValid({ kind: "Job", name: job.name, labels: job.labels, annotations: job.annotations });
     this.takeInjectedFailure("job");
     const created: K8sJob = {
       name: job.name,
@@ -138,6 +145,12 @@ export class FakeK8s implements K8sPort {
   async createSecret(secret: K8sSecret): Promise<K8sSecret> {
     const existing = this.secrets.find((s) => s.name === secret.name);
     if (existing) throw new K8sApiError(409, `secrets "${secret.name}" already exists`);
+    assertMetadataValid({
+      kind: "Secret",
+      name: secret.name,
+      labels: secret.labels,
+      annotations: secret.annotations,
+    });
     this.takeInjectedFailure("secret");
     const created: K8sSecret = { ...secret, creationTimestamp: secret.creationTimestamp ?? this.clock() };
     this.secrets.push(created);
@@ -152,6 +165,7 @@ export class FakeK8s implements K8sPort {
   async patchSecret(name: string, patch: K8sSecretPatch): Promise<K8sSecret> {
     const secret = this.secrets.find((s) => s.name === name);
     if (!secret) throw new Error(`secret not found: ${name}`);
+    assertMetadataValid({ kind: "Secret", name, annotations: patch.annotations });
     const nextAnnotations = { ...secret.annotations, ...patch.annotations };
     const nextData = { ...secret.data, ...patch.data };
     const annotationsChanged = Object.entries(nextAnnotations).some(([k, v]) => secret.annotations[k] !== v);
@@ -174,6 +188,7 @@ export class FakeK8s implements K8sPort {
   async createPvc(pvc: K8sPvcManifest): Promise<K8sPvc> {
     const existing = this.pvcs.find((p) => p.name === pvc.name);
     if (existing) throw new K8sApiError(409, `persistentvolumeclaims "${pvc.name}" already exists`);
+    assertMetadataValid({ kind: "PersistentVolumeClaim", name: pvc.name, labels: pvc.labels, annotations: pvc.annotations });
     this.takeInjectedFailure("pvc");
     const created: K8sPvc = {
       name: pvc.name,
@@ -199,6 +214,7 @@ export class FakeK8s implements K8sPort {
   async patchPvcAnnotations(name: string, annotations: Record<string, string>): Promise<K8sPvc> {
     const pvc = this.pvcs.find((p) => p.name === name);
     if (!pvc) throw new Error(`pvc not found: ${name}`);
+    assertMetadataValid({ kind: "PersistentVolumeClaim", name, annotations });
     const changed = Object.entries(annotations).some(([k, v]) => pvc.annotations[k] !== v);
     if (changed) {
       pvc.annotations = { ...pvc.annotations, ...annotations };

@@ -34,6 +34,8 @@ export interface StubGitHubOptions {
   port?: number;
   host?: string;
   tokenTtlSeconds?: number;
+  /** The installation id the stub reports for its one repo. */
+  installationId?: number;
 }
 
 export interface StubGitHub {
@@ -56,6 +58,7 @@ export async function startStubGitHub(options: StubGitHubOptions): Promise<StubG
     world,
     repo: scenario.repo,
     installationToken: options.token,
+    installationId: options.installationId ?? 1,
     tokenTtlSeconds: options.tokenTtlSeconds ?? 3600,
     now: () => new Date(),
   };
@@ -94,6 +97,31 @@ export async function startStubGitHub(options: StubGitHubOptions): Promise<StubG
     }
 
     const { segments, query } = parseUrl(url);
+    // `GET /__state` — the final world, for the harness's assertions. Not part
+    // of the GitHub surface the App uses: it exists so the e2e can assert on the
+    // world the App left behind (closed tickets, the PR and its body) instead of
+    // inferring it from kubectl alone.
+    if ((req.method ?? "GET") === "GET" && segments.length === 1 && segments[0] === "__state") {
+      sendJson(res, 200, {
+        issues: world.listIssues().map((issue) => ({
+          number: issue.number,
+          state: issue.state,
+          labels: issue.labels,
+          comments: world.listComments(issue.number).map((comment) => comment.body),
+        })),
+        pullRequests: world.listPullRequests().map((pr) => ({
+          number: pr.number,
+          state: pr.state,
+          draft: pr.draft,
+          headBranch: pr.headBranch,
+          baseBranch: pr.baseBranch,
+          body: pr.body,
+        })),
+        gitOperations: gitOperations.map((op) => ({ service: op.service, exitCode: op.exitCode })),
+      });
+      return;
+    }
+
     // `GET /repos/:o/:n/pulls?head=owner:branch` — the by-branch lookup.
     if (
       (req.method ?? "GET") === "GET" &&

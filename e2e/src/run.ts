@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -16,7 +16,7 @@ import {
   renderAppRbac,
   renderJobRbac,
   renderNamespace,
-  renderOmniRouteSecret,
+  renderAppSecret,
   renderPromptsConfigMap,
   renderResourceQuota,
   renderStubService,
@@ -34,6 +34,7 @@ import {
   AssertionTimeout,
   delay,
   isJobFinished,
+  AppReportedFailure,
   jobTerminalReason,
   kubectlJson,
   poll,
@@ -77,10 +78,18 @@ const repoRoot = resolve(process.env["RA_E2E_REPO_ROOT"] ?? process.cwd());
 
 /** Image tags the harness builds and loads. Distinct from GHCR so nothing is pulled by accident. */
 const APP_IMAGE = "remote-agent-e2e/app:local";
-const JOB_IMAGE = "remote-agent-e2e/job:local";
+/**
+ * The Job image must be tagged with **the reference the App bakes into itself**,
+ * not a local alias: the App's pod template names the image, and a Job pod can
+ * only start if that exact reference resolves inside the cluster. Tagging it
+ * anything else yields `Init:ImagePullBackOff` on every Job — which is what the
+ * first real run of this harness produced.
+ */
+const JOB_IMAGE_REPOSITORY = "ghcr.io/2017fighting/remote-agent-job";
 const STUB_GITHUB_IMAGE = "remote-agent-e2e/stub-github:local";
 const STUB_MODEL_IMAGE = "remote-agent-e2e/stub-model:local";
 const JOB_IMAGE_TAG = "e2e";
+const JOB_IMAGE = `${JOB_IMAGE_REPOSITORY}:${JOB_IMAGE_TAG}`;
 
 const STUB_GITHUB_PORT = 8080;
 const STUB_MODEL_PORT = 8080;
@@ -89,6 +98,21 @@ const APP_PORT = 8080;
 const WEBHOOK_SECRET = "e2e-webhook-secret";
 const INSTALLATION_TOKEN = "ghs_e2e_installation_token";
 const OMNIROUTE_API_KEY = "e2e-omniroute-key";
+
+/**
+ * The App's GitHub App signing key, generated per run.
+ *
+ * Production reads it from `remote-agent-secret` (docs/deployment.md §3) and the
+ * adapter rejects an empty one, so the harness has to supply a real RSA key of
+ * the shape GitHub issues — not a placeholder string. The stub does not verify
+ * the signature (there is no GitHub App behind it), but the key must parse,
+ * because `OctokitGitHub` signs a JWT with it before its first read.
+ */
+const APP_PRIVATE_KEY = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+}).privateKey;
 
 export interface RunOptions {
   keep: boolean;
@@ -164,7 +188,11 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       ...renderJobRbac(),
       renderResourceQuota(),
       await renderPromptsConfigMap(join(repoRoot, "prompts")),
-      renderOmniRouteSecret(OMNIROUTE_API_KEY),
+      renderAppSecret({
+        privateKey: APP_PRIVATE_KEY,
+        webhookSecret: WEBHOOK_SECRET,
+        omniRouteApiKey: OMNIROUTE_API_KEY,
+      }),
     ]);
 
     // The stubs read their scenario from a ConfigMap so they start with no
@@ -229,7 +257,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
         stubGitHubUrl,
         stubModelUrl,
         targetRepo: TARGET_REPO,
-        webhookSecret: WEBHOOK_SECRET,
       }),
     ]);
 
@@ -287,9 +314,40 @@ async function ensureCluster(runner: Runner, name: string): Promise<void> {
   const existing = await runner.run("kind", ["get", "clusters"], { allowFailure: true });
   if (existing.stdout.split("\n").includes(name)) {
     runner.note(`cluster ${name} already exists; reusing it`);
+    await resetNamespace(runner, `kind-${name}`);
     return;
   }
   await runner.run("kind", ["create", "cluster", "--name", name, "--wait", "180s"]);
+}
+
+/**
+ * Drop the e2e namespace before reusing a cluster.
+ *
+ * Everything the harness owns lives in it (Deployments, Jobs, Ticket PVCs,
+ * per-Job Secrets), so a previous run's objects would otherwise be asserted on:
+ * a stale App pod still runs the previous image, and a stale Job or PVC makes a
+ * claim assertion pass without this run having claimed anything. The namespace
+ * is re-applied from `manifests.ts` a few lines later, so deleting it is safe.
+ */
+async function resetNamespace(runner: Runner, context: string): Promise<void> {
+  const deleted = await runner.run("kubectl", ["--context", context, "delete", "namespace", NAMESPACE, "--ignore-not-found", "--wait=false"], {
+    allowFailure: true,
+  });
+  if (deleted.exitCode !== 0) {
+    runner.note(`could not delete namespace ${NAMESPACE}: ${deleted.stderr.trim()}`);
+    return;
+  }
+  runner.note(`deleted namespace ${NAMESPACE} from the previous run; waiting for it to go`);
+  await poll<string>({
+    description: `namespace ${NAMESPACE} is gone`,
+    timeoutMs: 120_000,
+    intervalMs: 1000,
+    observe: () =>
+      runner.run("kubectl", ["--context", context, "get", "namespace", NAMESPACE, "-o", "name"], { allowFailure: true })
+        .then((result) => result.stdout.trim()),
+    until: (stdout) => stdout === "",
+    describe: (stdout) => stdout || "absent",
+  });
 }
 
 async function buildImages(runner: Runner, options: RunOptions): Promise<void> {
@@ -331,6 +389,43 @@ async function loadImages(runner: Runner, clusterName: string): Promise<void> {
   for (const image of [APP_IMAGE, JOB_IMAGE, STUB_GITHUB_IMAGE, STUB_MODEL_IMAGE]) {
     await runner.run("kind", ["load", "docker-image", "--name", clusterName, image]);
   }
+  // Assert the reference the App bakes is actually present in the cluster: a
+  // mismatch here shows up much later as `Init:ImagePullBackOff` on every Job,
+  // which reads like a Job bug rather than a harness bug.
+  //
+  // Read it from the BUILT image, not from app/src/build-info.ts: the source file
+  // holds the development default (`0.0.0-dev`), and only the image's build arg
+  // rewrites it. Checking the source would compare against a value no cluster ever
+  // sees — which is exactly the false alarm this guard produced on its first run.
+  const imageTag = await readBakedJobImage(runner);
+  if (imageTag === null) {
+    runner.note("could not read the App image's baked Job image reference; skipping the mismatch check");
+    return;
+  }
+  if (imageTag !== JOB_IMAGE) {
+    throw new Error(
+      `the App image bakes Job image ${imageTag} but the harness built/loaded ${JOB_IMAGE}: ` +
+        "Job pods would fail with ImagePullBackOff. Tag the Job image with the baked reference.",
+    );
+  }
+}
+
+/** The Job image reference compiled into the App image, or null when unreadable. */
+async function readBakedJobImage(runner: Runner): Promise<string | null> {
+  const script = [
+    'const m = await import("file:///app/build-info.mjs").catch(() => null);',
+    'if (m && m.JOB_IMAGE) { process.stdout.write(m.JOB_IMAGE); process.exit(0); }',
+    'const src = await import("node:fs/promises").then((fs) => fs.readFile("/app/main.mjs", "utf8")).catch(() => "");',
+    'const hit = /(ghcr\.io\/[A-Za-z0-9._\/-]+):([A-Za-z0-9._-]+)/.exec(src);',
+    'if (hit) process.stdout.write(`${hit[1]}:${hit[2]}`);',
+  ].join("\n");
+  const result = await runner.run(
+    "docker",
+    ["run", "--rm", "--entrypoint", "node", APP_IMAGE, "-e", script],
+    { allowFailure: true },
+  );
+  const value = result.stdout.trim();
+  return result.exitCode === 0 && value !== "" ? value : null;
 }
 
 async function waitForDeployment(
@@ -347,6 +442,36 @@ async function waitForDeployment(
     until: (deployment) => (deployment?.status?.availableReplicas ?? 0) >= 1,
     describe: (deployment) => JSON.stringify(deployment?.status ?? null),
   });
+}
+
+
+/**
+ * Fail fast when the App has already reported why it cannot proceed.
+ *
+ * A silent poll loop for an object the App will never create is the worst
+ * failure mode in this harness: it burns the whole timeout and reports
+ * "Job not found" when the real cause is one line in the App log. Called
+ * before each downstream wait.
+ */
+async function abortOnAppFailure(runner: Runner, context: string, phase: string): Promise<void> {
+  const logs = await runner.run("kubectl", ["--context", context, "-n", NAMESPACE, "logs", "deploy/remote-agent", "--tail", "80"], {
+    allowFailure: true,
+  });
+  const match = /pass-error[^\n]*/.exec(logs.stdout);
+  if (match === null) return;
+  runner.section("app", `App reported a failure during ${phase}`);
+  runner.write(
+    [
+      `While waiting for: ${phase}`,
+      "",
+      "The App's own log line (this is the cause, not the downstream symptom):",
+      match[0],
+      "",
+      "Full tail:",
+      logs.stdout.trim() || "(empty)",
+    ].join("\n"),
+  );
+  throw new AppReportedFailure(match[0]);
 }
 
 /**
@@ -448,17 +573,37 @@ async function sendWebhooks(
     const payload = JSON.stringify({ action: delivery.action, issue: { number: SPEC_NUMBER } });
     const signature = "sha256=" + createHmac("sha256", WEBHOOK_SECRET).update(payload).digest("hex");
     // Deliver from inside the cluster so the signature and the route are the
-    // real ones (no port-forward in the path).
-    const script = [
-      `printf '%s' ${JSON.stringify(payload)} > /tmp/body.json`,
-      `code=$(wget -q -O- --server-response`,
-      `--header='content-type: application/json'`,
-      `--header='x-github-event: ${delivery.event}'`,
-      `--header='x-hub-signature-256: ${signature}'`,
-      `--post-file=/tmp/body.json http://127.0.0.1:${APP_PORT}/webhook 2>&1 | head -1)`,
-      `echo "$code"`,
-    ].join(" ");
-    await runner.run("kubectl", ["--context", context, "-n", NAMESPACE, "exec", podName, "--", "sh", "-c", script]);
+    // real ones (no port-forward in the path). The client is `node`, which both
+    // images carry; `wget` is not installed in the App image, and adding it
+    // would be a test-only dependency in a production image.
+    const post = [
+      "fetch(process.argv[1], {",
+      "  method: 'POST',",
+      "  headers: {",
+      "    'content-type': 'application/json',",
+      `    'x-github-event': '${delivery.event}',`,
+      `    'x-hub-signature-256': '${signature}',`,
+      "  },",
+      "  body: process.argv[2],",
+      "}).then((response) => { console.log('HTTP ' + response.status); process.exit(response.ok ? 0 : 1); });",
+    ].join("\n");
+    const result = await runner.run("kubectl", [
+      "--context",
+      context,
+      "-n",
+      NAMESPACE,
+      "exec",
+      podName,
+      "--",
+      "node",
+      "-e",
+      post,
+      `http://127.0.0.1:${APP_PORT}/webhook`,
+      payload,
+    ]);
+    if (!result.stdout.includes("HTTP 200")) {
+      throw new Error(`webhook ${delivery.event}/${delivery.action} was not accepted: ${result.stdout.trim()}`);
+    }
     await delay(500);
   }
 }
@@ -473,6 +618,9 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
   const observed: string[] = [];
   for (const ticketNumber of TICKET_NUMBERS) {
     const jobName = `agent-2017fighting-remote-agent-${ticketNumber}`;
+    // If the App has already reported a pass failure, the Job will never appear:
+    // report the App's own line now instead of timing out on "Job absent".
+    await abortOnAppFailure(runner, context, `claim of ticket #${ticketNumber}`);
     await poll<K8sJobObject | null>({
       description: `Job ${jobName} exists (ticket #${ticketNumber} claimed)`,
       timeoutMs: options.timeoutMs,
@@ -548,4 +696,83 @@ async function assertFinalWorld(runner: Runner, context: string, options: RunOpt
   // 4. The pods that ran are still identifiable, and none is crash-looping.
   const pods = await kubectlJson<K8sObjectList<K8sPodObject>>(runner, context, NAMESPACE, "pod");
   if (pods === null) throw new Error("no pods in the namespace at the end of the run");
+
+  // 5. The GitHub-side end state. This is the half the ticket's acceptance
+  //    criteria name explicitly — both tickets closed, the spec moved out of the
+  //    gate, one ready PR on the spec branch whose body carries `Closes #<spec>`
+  //    — and it can only be asserted against the stub's own world.
+  const state = await readStubState(runner, context);
+  for (const ticketNumber of TICKET_NUMBERS) {
+    const ticket = state.issues.find((issue) => issue.number === ticketNumber);
+    if (ticket === undefined) throw new Error(`ticket #${ticketNumber} is missing from the world`);
+    if (ticket.state !== "closed") {
+      throw new Error(`ticket #${ticketNumber} is ${ticket.state}, expected closed (T4)`);
+    }
+    if (ticket.labels.includes("agent:in-progress")) {
+      throw new Error(`ticket #${ticketNumber} still carries agent:in-progress after being closed`);
+    }
+  }
+
+  const spec = state.issues.find((issue) => issue.number === SPEC_NUMBER);
+  if (spec === undefined) throw new Error("the spec is missing from the world");
+  if (!spec.labels.includes("ready-for-human")) {
+    throw new Error(`spec #${SPEC_NUMBER} labels are ${JSON.stringify(spec.labels)}, expected ready-for-human`);
+  }
+  if (spec.labels.includes("ready-for-agent")) {
+    throw new Error(`spec #${SPEC_NUMBER} still carries ready-for-agent; the closeout must move it out of the gate`);
+  }
+  if (spec.labels.includes("agent:in-progress")) {
+    throw new Error(`spec #${SPEC_NUMBER} carries agent:in-progress; a spec never gets that label`);
+  }
+
+  const specBranch = `agent/spec-${SPEC_NUMBER}`;
+  const prs = state.pullRequests.filter((pr) => pr.headBranch === specBranch);
+  if (prs.length !== 1) {
+    throw new Error(`expected exactly one PR on ${specBranch}, found ${prs.length}`);
+  }
+  const pr = prs[0]!;
+  if (pr.draft) throw new Error(`the PR on ${specBranch} is a draft; the contract says ready (spec §0)`);
+  if (pr.baseBranch !== "main") throw new Error(`the PR targets ${pr.baseBranch}, expected main`);
+  const closesCount = pr.body.match(new RegExp(`Closes #${SPEC_NUMBER}\\b`, "g"))?.length ?? 0;
+  if (closesCount !== 1) {
+    throw new Error(`the PR body must carry exactly one "Closes #${SPEC_NUMBER}", found ${closesCount}`);
+  }
+
+  // 6. The git traffic was real: at least one clone and one push went through
+  //    `git http-backend`, not a mocked object.
+  const services = new Set(state.gitOperations.filter((op) => op.exitCode === 0).map((op) => op.service));
+  if (!services.has("upload-pack")) throw new Error("no successful git upload-pack: the clone was not real git");
+  if (!services.has("receive-pack")) throw new Error("no successful git receive-pack: the push was not real git");
+
+  runner.section("assert", "final world: GitHub side");
+  runner.write(
+    [
+      `tickets closed: ${TICKET_NUMBERS.join(", ")}`,
+      `spec labels: ${JSON.stringify(spec.labels)}`,
+      `PR: #${pr.number} ${pr.headBranch} -> ${pr.baseBranch} (draft=${pr.draft})`,
+      `PR body carries Closes #${SPEC_NUMBER}: yes (once)`,
+      `real git services observed: ${[...services].sort().join(", ")}`,
+    ].join("\n"),
+  );
+}
+
+interface StubState {
+  issues: Array<{ number: number; state: string; labels: string[]; comments: string[] }>;
+  pullRequests: Array<{ number: number; state: string; draft: boolean; headBranch: string; baseBranch: string; body: string }>;
+  gitOperations: Array<{ service: string; exitCode: number }>;
+}
+
+/** Read the stub's final world over the cluster network, from the App's own pod. */
+async function readStubState(runner: Runner, context: string): Promise<StubState> {
+  const result = await runner.run(
+    "kubectl",
+    ["--context", context, "-n", NAMESPACE, "exec", "deploy/stub-github", "--",
+     "node", "-e",
+     'fetch("http://127.0.0.1:8080/__state").then((r) => r.text()).then((t) => process.stdout.write(t))'],
+    { allowFailure: true },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`could not read the stub's final world: ${result.stderr || result.stdout}`);
+  }
+  return JSON.parse(result.stdout) as StubState;
 }

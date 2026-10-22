@@ -8,6 +8,7 @@ import {
   JOB_ONLY_ENV_KEYS,
   PROMPTS_CONFIGMAP_NAME,
   TOKEN_MOUNT_PATH,
+  SEED_ENTRYPOINT,
   TOKEN_SECRET_KEY,
   renderJobManifest,
 } from "../src/renders/job-template.js";
@@ -34,6 +35,21 @@ function manifest(): K8sJobManifest {
   });
 }
 
+describe("seed container entrypoint", () => {
+  it("names the seed entrypoint explicitly, so it never inherits the image's runner CMD", () => {
+    const jobManifest = manifest();
+    const seed = jobManifest.podTemplate.initContainers[0]!;
+    // The Job image's CMD is the runner. Without an explicit command the init
+    // container would run the runner, which validates runner-only env and exits
+    // with "missing required env: AGENT_ROLE, ..." — every Job then loops to
+    // BackoffLimitExceeded and no ticket ever starts.
+    expect(seed.command).toEqual(["node", SEED_ENTRYPOINT]);
+    expect(SEED_ENTRYPOINT).toMatch(/seed\.mjs$/);
+    // And the runner container must NOT pin seed's entrypoint.
+    expect(jobManifest.podTemplate.containers[0]!.command).toBeUndefined();
+  });
+});
+
 describe("job template: identity and labels", () => {
   it("is named `agent-<repo-slug>-<issue#>` with the PVC and Secret derived from it", () => {
     const job = manifest();
@@ -50,13 +66,17 @@ describe("job template: identity and labels", () => {
     });
   });
 
-  it("carries the provenance label surface", () => {
+  it("carries the provenance surface: legal labels, identity in the annotations", () => {
+    // A label value may not contain `/` or `#` (the API server answers 422), so
+    // `owner/name` and `owner/name#n` live in the annotations (ADR-0011).
     expect(manifest().labels).toEqual({
       "app.kubernetes.io/managed-by": "remote-agent",
-      "remote-agent/ticket": `${REPO}#35`,
       "remote-agent/spec": "33",
-      "remote-agent/repo": REPO,
       "remote-agent/role": "implement-ticket",
+    });
+    expect(manifest().annotations).toEqual({
+      "remote-agent/repo": REPO,
+      "remote-agent/ticket": `${REPO}#35`,
     });
   });
 
@@ -342,8 +362,11 @@ describe("Ticket PVC created at claim", () => {
     });
     expect(pvc.labels).toEqual({
       "app.kubernetes.io/managed-by": "remote-agent",
-      "remote-agent/ticket": `${REPO}#35`,
       "remote-agent/spec": "33",
+    });
+    expect(pvc.annotations).toEqual({
+      "remote-agent/repo": REPO,
+      "remote-agent/ticket": `${REPO}#35`,
     });
   });
 });
