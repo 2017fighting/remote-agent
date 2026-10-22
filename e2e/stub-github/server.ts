@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { parseScenario, StubWorld } from "./state.js";
+import { parseScenario, StubWorld, type RecordedGitOperation } from "./state.js";
 import { routeRest, pullsByBranchResponse, type RestContext } from "./rest.js";
 import { serveGitRequest } from "./git-backend.js";
 
@@ -40,6 +40,12 @@ export interface StubGitHub {
   server: Server;
   port: number;
   world: StubWorld;
+  /**
+   * Every git operation the stub served, in order. This is the evidence for the
+   * scenario's "the git work was real" assertion (spec #33 #41 AC 6): the
+   * operations came from `git http-backend` processes, with their exit codes.
+   */
+  gitOperations: RecordedGitOperation[];
   close(): Promise<void>;
 }
 
@@ -61,6 +67,8 @@ export async function startStubGitHub(options: StubGitHubOptions): Promise<StubG
     });
   });
 
+  const gitOperations: RecordedGitOperation[] = [];
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = req.url ?? "/";
     const auth = parseBasicAuth(req.headers.authorization);
@@ -73,6 +81,9 @@ export async function startStubGitHub(options: StubGitHubOptions): Promise<StubG
         projectRoot: options.projectRoot,
         repo: scenario.repo,
         token: options.token,
+        onOperation: (operation) => {
+          gitOperations.push({ ...operation, at: new Date().toISOString() });
+        },
       },
       { method: req.method ?? "GET", path: url, headers: req.headers, body, ...(auth === undefined ? {} : { auth }) },
     );
@@ -113,6 +124,7 @@ export async function startStubGitHub(options: StubGitHubOptions): Promise<StubG
     server,
     port,
     world,
+    gitOperations,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
