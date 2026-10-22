@@ -497,17 +497,37 @@ async function sendWebhooks(
     const payload = JSON.stringify({ action: delivery.action, issue: { number: SPEC_NUMBER } });
     const signature = "sha256=" + createHmac("sha256", WEBHOOK_SECRET).update(payload).digest("hex");
     // Deliver from inside the cluster so the signature and the route are the
-    // real ones (no port-forward in the path).
-    const script = [
-      `printf '%s' ${JSON.stringify(payload)} > /tmp/body.json`,
-      `code=$(wget -q -O- --server-response`,
-      `--header='content-type: application/json'`,
-      `--header='x-github-event: ${delivery.event}'`,
-      `--header='x-hub-signature-256: ${signature}'`,
-      `--post-file=/tmp/body.json http://127.0.0.1:${APP_PORT}/webhook 2>&1 | head -1)`,
-      `echo "$code"`,
-    ].join(" ");
-    await runner.run("kubectl", ["--context", context, "-n", NAMESPACE, "exec", podName, "--", "sh", "-c", script]);
+    // real ones (no port-forward in the path). The client is `node`, which both
+    // images carry; `wget` is not installed in the App image, and adding it
+    // would be a test-only dependency in a production image.
+    const post = [
+      "fetch(process.argv[1], {",
+      "  method: 'POST',",
+      "  headers: {",
+      "    'content-type': 'application/json',",
+      `    'x-github-event': '${delivery.event}',`,
+      `    'x-hub-signature-256': '${signature}',`,
+      "  },",
+      "  body: process.argv[2],",
+      "}).then((response) => { console.log('HTTP ' + response.status); process.exit(response.ok ? 0 : 1); });",
+    ].join("\n");
+    const result = await runner.run("kubectl", [
+      "--context",
+      context,
+      "-n",
+      NAMESPACE,
+      "exec",
+      podName,
+      "--",
+      "node",
+      "-e",
+      post,
+      `http://127.0.0.1:${APP_PORT}/webhook`,
+      payload,
+    ]);
+    if (!result.stdout.includes("HTTP 200")) {
+      throw new Error(`webhook ${delivery.event}/${delivery.action} was not accepted: ${result.stdout.trim()}`);
+    }
     await delay(500);
   }
 }

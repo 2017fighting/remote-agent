@@ -262,7 +262,9 @@ export function renderAppDeployment(input: AppDeploymentInput): Record<string, u
                 { name: "MAX_JOBS_GLOBAL", value: "3" },
                 { name: "MAX_JOBS_PER_REPO", value: "2" },
               ],
-              readinessProbe: { httpGet: { path: "/webhook", port: 8080 }, initialDelaySeconds: 1, periodSeconds: 1 },
+              // TCP, not HTTP: the App's only HTTP surface is `POST /webhook`
+              // (ADR-0002), so an HTTP probe on that path would 404 forever.
+              readinessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 1, periodSeconds: 1 },
             },
           ],
         },
