@@ -3,7 +3,7 @@
 **这是一份 prototype：throwaway，永不 merge。** 它回答一个问题——「v1 的五份 prompt 写出来长什么样」。定下来的东西以文字结论回到 ticket 的 resolution 与 `docs/agents/prompt-checklist.md`，不会以这个目录的形式进入 main。
 
 - 分支：`prototype/prompts`（不进 main，对照 `research/*` 的处理）
-- 初稿日期 / clone 基线：`main@8363367`；定稿回写：`main@8ef77ec`（[#24](https://github.com/2017fighting/remote-agent/issues/24)）
+- 初稿日期 / clone 基线：`main@8363367`；`_common` 与角色模板定稿回写：`main@8ef77ec`（[#24](https://github.com/2017fighting/remote-agent/issues/24)）；review 两轴定稿：本分支（[#25](https://github.com/2017fighting/remote-agent/issues/25)，回写 `main` 见该票）
 - 五份模板 = [ADR-0004](../../docs/adr/0004-prompts-live-in-configmap.md) 里 ConfigMap `remote-agent-prompts` 的五个键，逐条对着 [#16 清单](../../docs/agents/prompt-checklist.md) 的十一条写
 - **语言（A1，#24 已定）：五份模板英文；agent 产出（commentBody / prBody / warnings）同英文。** 定稿五份均为英文。
 
@@ -20,7 +20,7 @@
 正文里的行内标记：
 
 - `[P1]`–`[P4]`：**替 agent 预先回答了它本来会问用户的分支**（见「预答图例」），清单第 1、2、11 条要求的位置。
-- `[A…]`：批注点编号。#24 之前的行内标记已随定稿清除（正文即定稿）；#25 范围内的标记（A10 / A15 / A17）在两份 review 模板里保留。
+- `[A…]`：批注点编号。已全部随定稿清除（#14 / #24 / #25 共 17 点）：正文即定稿，无行内标记残留。
 
 ## 已定（resolution 汇总）
 
@@ -42,6 +42,10 @@
 | A12 spec role 的 ticket 图 | **App 全文渲染**：每张 sub-issue 的标题 + 正文 + **评论按时间序**（评论里有每轮 run 报告与人的修订，正是验收面）。一 spec 一次、token 花得起；不给 agent `gh`——installation token 自带 issues:write 降不了权，只读要新建最小权限凭证，且连破 #14-A2 / 清单第 10 条 / ADR-0002 三处已定 | #24 |
 | A13 e2e 不做 | **不写**：整段「没有 e2e 这一步」从 implement-spec 删除。pi-web 的 `test` 只含单测不链 e2e，点名 `test:e2e` 反而指路；「撤销 e2e」的决定已落在 #16 清单第 5 条，不需要 prompt 复述 | #24 |
 | A14 prBody 三段 | **详细写法留 implement-spec 模板**；`finish_spec` 工具 schema 只留 `prBody: string` + 一句「按角色模板三段写」。形状归 prompt（改文案不重建镜像），存在性与必填归工具 | #24 |
+| A10 reviewer 的 spec 正文 | **`code_review` 工具注入**：Spec 轴会话创建时随固定点一起进首条消息（模板新增 `{{spec_body}}` 占位），不落文件——无生命周期、无 `.gitignore`、不依赖模型记得去读；正文由 App 取好经 Job 参数交给 runner（#14-A2 同路）。Standards 轴不注入 spec | #25 |
+| A17a standards 清单谁扫 | **运行期 runner 扫工作副本**：`code_review` 被调时扫即将被 review 的那棵树；候选文件名表（含 `CODING_STANDARDS.md` / `CONTRIBUTING.md`）是 runner 代码常量（工具自述层，随镜像走）。静态写死 ConfigMap 跨 target repo 必错；App 经 API 扫要多一条 contents:read 依赖，换不来本地没有的东西 | #25 |
+| A17b smell baseline 载体 | **维持单份在 `review-standards`**：核实 #14 初稿与 #24 定稿里十二条都只此一份（票里「两份各一份会漂移」不成立，印象来自清单第 7 条的松话，已就地改准）；概念上它只是 Standards 轴的材料。不添第 6 个 ConfigMap 键、不动 ADR-0004、不烧镜像 | #25 |
+| A15 子 agent 禁令 | **implementer 不写＋工具封一轮**：implementer 工具表里没有 subagent 工具（durable 无内置、runner 也不给，#21），禁令只写进两份 review 模板当保险丝（拦断靠工具表）；`code_review` 同一 run 第二次调用直接报错。原则：**工具表先行，prompt 只为真实持有的工具写禁令** | #25 |
 
 ## 预答图例（P）
 
@@ -62,14 +66,13 @@
 | ticket 图（spec role）：每票标题 + 正文 + 评论全文，时间序 | App 读 sub-issues 与评论后渲染（A12，#24） | `implement-spec`（经 `_common` 的 `{{work_body}}` 之外另注入） |
 | `{{fixed_point}}` | merge-base 字面值（ticket role = 本次运行起点；spec role = 分支起点；取值与来源归 #17） | `_common`、两份 `review-*` |
 | `{{ticket_number}}` / `{{spec_number}}` | 就是 `{{work_ref}}` 的编号部分 | 角色模板 |
-| `{{spec_ref}}` + spec 正文 / standards 清单 | `code_review` 工具起 reviewer conversation 时给（diff 与 commit 列表 reviewer 自己用 `bash` 取，A16） | 两份 `review-*` |
+| `{{spec_ref}}` + `{{spec_body}}`（A10，Spec 轴独有） | `code_review` 工具注入 reviewer conversation 的首条消息（diff 与 commit 列表 reviewer 自己用 `bash` 取，A16） | `review-spec` |
+| standards 文件清单（A17a） | `code_review` 被调时 runner 扫工作副本得出，随首条消息注入 Standards 轴（仓库没有成文标准时为空表） | `review-standards` |
 | 模型、thinking 档位、reviewer 模型、凭证、卷布局、分支名 | **不进 prompt**（清单第 10 条），归 #17 / #20 | — |
 
-## 仍开着（[#25](https://github.com/2017fighting/remote-agent/issues/25)）
+## 仍开着
 
-- **A10** reviewer 的 spec 正文从哪来（工具注入 vs 落文件让 reviewer `read`）
-- **A15** implementer 要不要也写「不要开子 agent」（取决于 runner 给 implementer 的工具表）
-- **A17** standards 清单谁扫（运行期 vs 静态）＋ smell baseline 十二条的载体（两份重复 vs 第 6 个 ConfigMap 键 vs 镜像）
+无——17 个批注点全部拍板（#14 四条、#24 十条、#25 四条，见上表）。五份模板即 v1 定稿：`_common` 与两份角色模板英文（#24-A1），两份 review 模板亦随 #25 定稿为英文。
 
 ## 这份 prototype 不覆盖
 
