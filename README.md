@@ -28,9 +28,9 @@ WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3  # ⚠�
 ## 我们需要用到的issue label
 
 - `agent:implement`: 标记这个 issue(spec or ticket) 需要由 remote agent 进行实现；**人写，App 永不删**（它记的是「人授权过」，不是「此刻在跑」）
-- `agent:in-progress`: `github app` 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
-- `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 `github app` 设置；**没有自动重试**，人改 label 是唯一重入方式
-- `agent:blocked`: agent 自述没做完、需要人做决定，由 `github app` 按 run result 设置
+- `agent:in-progress`: App 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
+- `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 App 设置；**没有自动重试**，人改 label 是唯一重入方式
+- `agent:blocked`: agent 自述没做完、需要人做决定，由 App 按 run result 设置
 
 ## implement整体流程
 
