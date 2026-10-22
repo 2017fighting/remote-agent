@@ -70,6 +70,10 @@ describe("pass ordering: Claim before reclamation", () => {
     const k8s = new FakeK8s({
       pvcs: [ticketPvc(REPO, CLAIMABLE, { expiresAt: daysFromNow(-1) })],
     });
+    // The API server hands out copies, not live references: without a re-read,
+    // reclamation would judge the pass-start snapshot (expiry still present) and
+    // delete the volume the pass just claimed.
+    k8s.listPvcs = async () => k8s.pvcs.map((pvc) => structuredClone(pvc));
 
     await runReconcilePass({ github, k8s, config: testConfig(), now: () => NOW }, "webhook");
 

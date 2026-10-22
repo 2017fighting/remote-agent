@@ -157,8 +157,9 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   const { renewed } = await renewTokens({ github, k8s, now }, jobs);
 
   // 7. Reclamation: expired volumes + their Secrets, then the orphan fallback.
-  //    Runs last so the writes above are already in the world it reads.
-  const { stats } = await reclaimVolumes({ k8s, now }, pvcs, jobs);
+  //    Runs last and re-reads the volumes/Jobs it judges, so the writes above
+  //    are already in the world it sees.
+  const { stats } = await reclaimVolumes({ k8s, now });
 
   return {
     slotsUsed: usage.total,

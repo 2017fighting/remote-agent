@@ -6,14 +6,17 @@ import {
   volumeStats,
 } from "./planners/pvc-steward.js";
 import { isNotFound } from "./ports/errors.js";
-import type { K8sJob, K8sPort, K8sPvc } from "./ports/K8sPort.js";
+import type { K8sPort, K8sPvc } from "./ports/K8sPort.js";
 
 /**
  * Reclamation step (ADR-0011, spec #33 §2 step 6). Runs **after** Claim and
- * outcome handling in the same pass, so the labels and the `expires-at` clock
- * are already at their end-of-pass values before anything is deleted: a volume
- * claimed this pass has had its expiry cleared, and a volume whose outcome was
- * judged this pass has had its expiry written.
+ * outcome handling in the same pass, and re-reads the volumes and Jobs it
+ * judges: the labels, the Job objects and the `expires-at` clock are then at
+ * their end-of-pass values before anything is deleted. A volume claimed this
+ * pass has had its expiry cleared and has a live Job under its own name; a
+ * volume whose outcome was judged this pass carries a fresh retention clock.
+ * Judging the pass-start snapshot instead would let the same pass claim a
+ * volume and delete it, or delete a volume whose outcome just moved its clock.
  *
  * Two objects per reclaimed ticket, and nothing else: the Ticket PVC and its
  * same-named per-Job Secret (`agent-<repo-slug>-<issue#>-token`). The Job is
@@ -38,9 +41,11 @@ export interface ReclaimReport {
   stats: VolumeStats;
 }
 
-export async function reclaimVolumes(deps: ReclaimDeps, pvcs: K8sPvc[], jobs: K8sJob[]): Promise<ReclaimReport> {
-  // The Job is terminal-or-not is the only Job fact reclamation reads; Jobs are
-  // never written here.
+export async function reclaimVolumes(deps: ReclaimDeps): Promise<ReclaimReport> {
+  // Read here rather than reusing the pass-start snapshot: Claim may have
+  // created a Job and cleared an expiry since. Whether a Job is terminal is the
+  // only Job fact this step reads, and Jobs are never written here.
+  const [pvcs, jobs] = await Promise.all([deps.k8s.listPvcs(), deps.k8s.listJobs()]);
   const liveJobNames = new Set(jobs.filter((job) => !job.finished).map((job) => job.name));
 
   const remaining: K8sPvc[] = [];
