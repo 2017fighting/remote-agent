@@ -1,5 +1,5 @@
 import { readAppConfig, type AppConfig, type EnvSource } from "../src/config.js";
-import type { K8sJob, K8sJobManifest, K8sPvc, K8sPvcManifest } from "../src/ports/K8sPort.js";
+import type { K8sJobManifest, K8sPvc, K8sPvcManifest } from "../src/ports/K8sPort.js";
 
 /** App config with code defaults, optionally overridden by env (tests read config the same way production does). */
 export function testConfig(env: EnvSource = {}): AppConfig {
@@ -7,23 +7,6 @@ export function testConfig(env: EnvSource = {}): AppConfig {
 }
 
 export const NAMESPACE = "remote-agent";
-
-/** A live Job object in the fake world (read shape). */
-export function existingJob(input: {
-  name: string;
-  labels?: Record<string, string>;
-  annotations?: Record<string, string>;
-  finished?: boolean;
-}): K8sJob {
-  return {
-    name: input.name,
-    namespace: NAMESPACE,
-    labels: input.labels ?? {},
-    annotations: input.annotations ?? {},
-    conditions: [],
-    finished: input.finished ?? false,
-  };
-}
 
 /** A minimal Job manifest, for fakes tests that only care about create-if-absent. */
 export function jobManifest(name: string): K8sJobManifest {
