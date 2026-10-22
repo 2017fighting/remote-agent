@@ -1,4 +1,4 @@
-import { secretName } from "@remote-agent/shared";
+import { ANNOTATIONS, secretName } from "@remote-agent/shared";
 import { LABEL_AGENT_IN_PROGRESS } from "./planners/gate.js";
 import { renderJobManifest, renderTicketPvc, type AgentRole } from "./renders/job-template.js";
 import { renderTokenSecret } from "./renders/token-steward.js";
@@ -19,6 +19,11 @@ import type { K8sPort } from "./ports/K8sPort.js";
  * Existence is probed by deterministic name (RBAC has no `secrets list`), which
  * is also what makes a replay free: on an unchanged world the PVC and the
  * Secret are already there, so nothing is created and no token is minted.
+ *
+ * The PVC probe does one more thing on the reuse path: it clears
+ * `remote-agent/expires-at` (ADR-0011 — set when the outcome was judged, cleared
+ * when the volume is claimed again). The clear is a no-op when the key is
+ * absent, so the replay stays write-free.
  *
  * Two error classes carry product meaning:
  * - `409 AlreadyExists` is **success** — every create is create-if-absent, so a
@@ -63,9 +68,13 @@ export async function claimTicket(input: ClaimTicketInput): Promise<ClaimResult>
   });
 
   try {
-    // 1. Ticket PVC — long-lived, one per ticket (ADR-0011).
+    // 1. Ticket PVC — long-lived, one per ticket (ADR-0011). A volume reused
+    //    from a judged run still carries `remote-agent/expires-at`; Claim is
+    //    where that retention clock stops (an absent value = not deletable).
     if ((await k8s.getPvc(pvc.name)) === null) {
       await createIfAbsent(() => k8s.createPvc(pvc));
+    } else {
+      await k8s.clearPvcAnnotation(pvc.name, ANNOTATIONS.expiresAt);
     }
 
     // 2. Per-Job Secret — mint only when absent, so a replay mints nothing.

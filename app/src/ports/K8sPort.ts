@@ -34,6 +34,19 @@ export interface K8sPod {
   phase: string;
   /** True while the pod is terminating; Terminating still holds its Slot. */
   deleting: boolean;
+  /**
+   * Container statuses as the kubelet reported them. Pod state is **not** an
+   * outcome signal (docs/architecture.md §4.4) — it is evidence, quoted into the
+   * error comment when no run result exists.
+   */
+  containerStatuses?: K8sContainerStatus[];
+}
+
+/** One container's terminal state: `OOMKilled`, `Error`, `Completed`, and its exit code. */
+export interface K8sContainerStatus {
+  name: string;
+  reason?: string;
+  exitCode?: number;
 }
 
 export interface K8sSecret {
@@ -158,5 +171,10 @@ export interface K8sPort {
   getPvc(name: string): Promise<K8sPvc | null>;
   listPvcs(): Promise<K8sPvc[]>;
   patchPvcAnnotations(name: string, annotations: Record<string, string>): Promise<K8sPvc>;
+  /**
+   * Remove one annotation key (Claim clears `remote-agent/expires-at`). Absent
+   * key = no write, so a replayed Claim issues nothing.
+   */
+  clearPvcAnnotation(name: string, key: string): Promise<K8sPvc>;
   deletePvc(name: string): Promise<void>;
 }

@@ -24,6 +24,11 @@ export class FakeGitHub implements GitHubPort {
   private nextCommentId = 1;
   private nextPrNumber = 1000;
   private nextTokenId = 1;
+  /**
+   * Numbers handed out by `createIssue`. Seeded above every issue the world
+   * starts with so a created ticket never collides with a fixture number.
+   */
+  nextIssueNumber = 100;
 
   constructor(world?: {
     issues?: GitHubIssue[];
@@ -32,7 +37,10 @@ export class FakeGitHub implements GitHubPort {
     subIssues?: Array<{ ownerRepo: string; specNumber: number; issueNumbers: number[] }>;
     blockers?: Array<{ ownerRepo: string; issueNumber: number; blockerNumbers: number[] }>;
   }) {
-    if (world?.issues) this.issues.push(...world.issues);
+    if (world?.issues) {
+      this.issues.push(...world.issues);
+      this.nextIssueNumber = Math.max(this.nextIssueNumber, ...world.issues.map((i) => i.number + 1));
+    }
     if (world?.comments) {
       this.comments.push(...world.comments);
       this.nextCommentId = world.comments.length + 1;
@@ -125,6 +133,25 @@ export class FakeGitHub implements GitHubPort {
       createdAt: new Date().toISOString(),
     });
     this.record(`addComment ${ownerRepo}#${issueNumber}`);
+  }
+
+  async createIssue(input: {
+    ownerRepo: string;
+    title: string;
+    body: string;
+    labels: string[];
+  }): Promise<GitHubIssue> {
+    const created: GitHubIssue = {
+      ownerRepo: input.ownerRepo,
+      number: this.nextIssueNumber++,
+      state: "open",
+      title: input.title,
+      body: input.body,
+      labels: [...input.labels],
+    };
+    this.issues.push(created);
+    this.record(`createIssue ${input.ownerRepo} ${input.title} +[${input.labels}]`);
+    return created;
   }
 
   async closeIssue(ownerRepo: string, issueNumber: number): Promise<void> {

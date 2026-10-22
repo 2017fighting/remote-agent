@@ -31,6 +31,12 @@ interface Case {
   blocker?: { open: boolean };
   /** A Job object under the ticket's deterministic name. */
   existingJob?: "running" | "terminal";
+  /**
+   * `agent:in-progress` is the one label the pass acts on rather than skipping:
+   * with no Job under the deterministic name it is the T6e fallback (an error),
+   * so the "no action" assertion does not apply to it.
+   */
+  inProgress?: boolean;
 }
 
 const cases: Case[] = [
@@ -39,7 +45,7 @@ const cases: Case[] = [
   { name: "ticket has an open blocker", blocker: { open: true } },
   { name: "ticket missing ready-for-agent", ticketLabels: ["agent:implement"] },
   { name: "ticket missing agent:implement", ticketLabels: ["ready-for-agent"] },
-  { name: "ticket already agent:in-progress", ticketLabels: [...GATE_LABELS, "agent:in-progress"] },
+  { name: "ticket already agent:in-progress", ticketLabels: [...GATE_LABELS, "agent:in-progress"], inProgress: true },
   { name: "ticket agent:blocked", ticketLabels: ["ready-for-human", "agent:implement", "agent:blocked"] },
   { name: "ticket agent:error", ticketLabels: ["ready-for-human", "agent:implement", "agent:error"] },
   { name: "spec out of the gate (no agent:implement)", specLabels: ["ready-for-agent"] },
@@ -97,6 +103,14 @@ describe("Gate: each condition missing alone means no action", () => {
       }
 
       expect(k8s.writeLog, "no k8s writes").toEqual([]);
+      if (c.inProgress) {
+        // T6e: in-progress with no Job is the App's availability fallback.
+        expect(github.writeLog).toContain(
+          `editLabels ${REPO}#35 +[ready-for-human,agent:error] -[ready-for-agent,agent:in-progress]`,
+        );
+        expect(github.comments, "one evidence comment").toHaveLength(1);
+        return;
+      }
       expect(github.writeLog, "no GitHub writes").toEqual([]);
       expect(github.comments, "no comments").toEqual([]);
       expect((await github.getIssue(REPO, 35))?.labels).toEqual(c.ticketLabels ?? GATE_LABELS);

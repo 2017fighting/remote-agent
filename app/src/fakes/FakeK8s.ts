@@ -53,11 +53,35 @@ export class FakeK8s implements K8sPort {
   }
 
   async getJob(name: string): Promise<K8sJob | null> {
-    return this.jobs.find((j) => j.name === name) ?? null;
+    const job = this.jobs.find((j) => j.name === name);
+    return job === undefined ? null : this.withAnnotationReadLog(job);
   }
 
   async listJobs(): Promise<K8sJob[]> {
-    return [...this.jobs];
+    return this.jobs.map((job) => this.withAnnotationReadLog(job));
+  }
+
+  /**
+   * Counts reads of a Job's annotations, per key, so a test can pin the
+   * "annotation is consumed exactly once" discipline (ADR-0007 / ADR-0013)
+   * without reaching into the decision code.
+   */
+  jobAnnotationReads: Array<{ job: string; key: string }> = [];
+
+  private withAnnotationReadLog(job: K8sJob): K8sJob {
+    const readLog = this.jobAnnotationReads;
+    const annotations = new Proxy(job.annotations, {
+      get(target, key, receiver) {
+        if (typeof key === "string") readLog.push({ job: job.name, key });
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    return new Proxy(job, {
+      get(target, key, receiver) {
+        if (key === "annotations") return annotations;
+        return Reflect.get(target, key, receiver);
+      },
+    });
   }
 
   async createJob(job: K8sJobManifest): Promise<K8sJob> {
@@ -101,8 +125,11 @@ export class FakeK8s implements K8sPort {
   }
 
   async getPodLog(podName: string): Promise<string> {
-    return `fake log tail for ${podName}\n`;
+    return this.podLogs.get(podName) ?? `fake log tail for ${podName}\n`;
   }
+
+  /** Container log tails by pod name; unset pods return a stub line. */
+  podLogs = new Map<string, string>();
 
   async createSecret(secret: K8sSecret): Promise<K8sSecret> {
     const existing = this.secrets.find((s) => s.name === secret.name);
@@ -168,6 +195,16 @@ export class FakeK8s implements K8sPort {
       pvc.annotations = { ...pvc.annotations, ...annotations };
       this.record(`patchPvcAnnotations ${name}`);
     }
+    return pvc;
+  }
+
+  async clearPvcAnnotation(name: string, key: string): Promise<K8sPvc> {
+    const pvc = this.pvcs.find((p) => p.name === name);
+    if (!pvc) throw new Error(`pvc not found: ${name}`);
+    if (pvc.annotations[key] === undefined) return pvc;
+    const { [key]: _removed, ...rest } = pvc.annotations;
+    pvc.annotations = rest;
+    this.record(`clearPvcAnnotation ${name} ${key}`);
     return pvc;
   }
 

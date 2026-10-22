@@ -61,6 +61,17 @@ export interface GitHubPort {
   editLabels(ownerRepo: string, issueNumber: number, add: string[], remove: string[]): Promise<void>;
   addComment(ownerRepo: string, issueNumber: number, body: string): Promise<void>;
   closeIssue(ownerRepo: string, issueNumber: number): Promise<void>;
+  /**
+   * Create an issue in the target repo — the App's `newTickets` path (S3N / T4).
+   * Labels are passed at creation so a new ticket is born in the right half of
+   * the Gate (`ready-for-agent` vs `ready-for-human`).
+   */
+  createIssue(input: {
+    ownerRepo: string;
+    title: string;
+    body: string;
+    labels: string[];
+  }): Promise<GitHubIssue>;
   createPullRequest(input: {
     ownerRepo: string;
     title: string;
