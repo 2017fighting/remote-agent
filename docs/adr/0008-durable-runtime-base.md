@@ -5,7 +5,7 @@
 ## 硬约束（选型的后果，不是实现细节）
 
 - **单写者**：durable 自身没有任何跨进程锁（`README`：「One process owns a storage at a time; there is no cross-process locking」）。防线只能建在 k8s 上——Ticket PVC 用 `ReadWriteOncePod`、Job 用 `parallelism: 1`、旧进程在 `terminationGracePeriodSeconds` 内 `harness.close()` 后退出（v1 取 120s，见 [ADR-0010](0010-job-resource-budget.md)）。
-- **sqlite 必须落块卷**：durable 的 SQLite 后端是 WAL + `synchronous = NORMAL`，NFS 上的锁与共享内存语义退化（home-ops 已把 SQLite-on-NFS 记为接受的降级）。Ticket PVC 固定 `truenas-iscsi-retain`，不用 `truenas-nfs-retain`。
+- **sqlite 必须落块卷**：durable 的 SQLite 后端是 WAL + `synchronous = NORMAL`，NFS 上的锁与共享内存语义退化（home-ops 已把 SQLite-on-NFS 记为接受的降级）。Ticket PVC 固定 `truenas-iscsi-delete`（薄置备，回收规则见 [ADR-0011](0011-ticket-pvc-recycling.md)），不用 `truenas-nfs-retain`。
 - **终态只有三种**：Job `Complete`（runner 自述 done/blocked 后写了 annotation）、`backoffLimit` 耗尽、`activeDeadlineSeconds` 到点。pod 重启与 `resume()` 全程对 GitHub 不可见——runner 被 SIGTERM 时只 `harness.close()` 然后非零退出，**不写 annotation**。
 - **结果载体不变、证据换了**：Result tool + Job annotation 那一层保留（[ADR-0007](0007-run-result-contract.md)），砍掉的是「解析 pi json 流」那一层；outcome 的判定证据从 pi 的 `stopReason`/退出码换成 durable 的 `submission.wait()` 与 task outcome。
 

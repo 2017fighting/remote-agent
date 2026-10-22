@@ -67,8 +67,12 @@ _Avoid_: worker, pod, task
 _Avoid_: wrapper, entrypoint, pi 命令
 
 **Ticket PVC**:
-一个 ticket 一块、`ReadWriteOncePod`、比 Job 活得久的 PVC，里面同时装这个 ticket 的工作副本（`repo/`）、durable 的 session storage（`state/`）与 HOME 的缓存（`home/`）。
+一个 ticket 一块、`ReadWriteOncePod`、`truenas-iscsi-delete`（薄置备、`reclaimPolicy: Delete`）的 PVC，比 Job 活得久，里面同时装这个 ticket 的工作副本（`repo/`）、durable 的 session storage（`state/`）与 HOME 的缓存（`home/`）；它的生死由 App 按 Ticket PVC expiry 决定（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）。
 _Avoid_: 工作卷, workspace, job pvc
+
+**Ticket PVC expiry**:
+Ticket PVC 上的 `remote-agent/expires-at` annotation（RFC3339）：App 在判定 outcome 的那一次 reconcile 里写一次（`done` 7 天、`blocked` / `error` 30 天），Claim 时清掉；**不存在 = 这块卷不可删**。
+_Avoid_: ttl, 保留期, 过期时间
 
 **Seed**:
 init container 把工作副本装进 Ticket PVC 的那一步：问 `git ls-remote` 分支在不在、全量克隆、checkout `agent/spec-<n>`、写 marker。只碰 `repo/`，从不碰 `state/`。

@@ -228,7 +228,7 @@ annotation 只有 runner 在**终态**才写，所以 T6b/T6c/T6d/T6e 这四条�
 - `outcome=error` 与 `reason`（`backoff-exhausted` / `deadline-exceeded` / `no-result` / `no-job` / annotation 自带的值）；
 - Job 名、pod 名；
 - pod 终态证据（`OOMKilled` / `exitCode` / `DeadlineExceeded`）与容器日志末尾；
-- 这个 ticket 的 Ticket PVC 名（storage 里的对话全文在这儿）与 `kubectl logs` 指引。
+- 这个 ticket 的 Ticket PVC 名（storage 里的对话全文在这儿）与 `kubectl logs` 指引，以及**这块卷的保留期**（`remote-agent/expires-at`，[ADR-0011](adr/0011-ticket-pvc-recycling.md)：`blocked` / `error` 留 30 天）。要提醒的是卷上**可能有未 push 的 commit**——`backoffLimit` / `DeadlineExceeded` / `no-result` 三条路上 runner 可能还没 push，卷是那部分工作的唯一副本。
 
 `blocked` 与 `done` 走 agent 自述的 `commentBody`；agent 没给 `commentBody` 时 App 退回同一份模板。**`error` 没有自动重试，这条评论就是人唯一的入口提示。**
 
