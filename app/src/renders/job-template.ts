@@ -1,4 +1,4 @@
-import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
+import { JOB_ENV_KEYS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
 import type { AppConfig } from "../config.js";
 import { JOB_IMAGE } from "../job-image.js";
 import type { K8sContainer, K8sEnvVar, K8sJobManifest } from "../ports/K8sPort.js";
@@ -27,6 +27,19 @@ export const OMNIROUTE_DEFAULT_MODEL = "default";
 export const OMNIROUTE_REVIEW_MODEL = "review";
 /** The one sops secret the Job reads, and the one key it takes from it (never `envFrom`). */
 export const OMNIROUTE_API_KEY_SECRET = "remote-agent-secret";
+
+/**
+ * Job-side spellings the App emits that are not in the shared key index: the
+ * shared module is the contract both workspaces read, and widening it here
+ * would collide with the Job image ticket that owns the Job's env surface.
+ */
+export const JOB_ONLY_ENV_KEYS = {
+  /** Clone URL the seed clones from: `GIT_BASE_URL/<owner>/<name>.git`, composed by the App. */
+  gitRemoteUrl: "GIT_REMOTE_URL",
+} as const;
+
+/** Where the per-Job token is mounted as a file (ADR-0009: never env, never a URL). */
+export const TOKEN_MOUNT_PATH = "/mnt/credentials/token";
 
 /** The single key inside the per-Job token Secret, mounted as the token file. */
 export const TOKEN_SECRET_KEY = "token";
@@ -107,7 +120,7 @@ function renderSeedContainer(input: JobTemplateInput): K8sContainer {
     env: [
       { name: JOB_ENV_KEYS.targetRepo, value: targetRepo },
       { name: JOB_ENV_KEYS.specNumber, value: String(specNumber) },
-      { name: JOB_ENV_KEYS.gitRemoteUrl, value: gitRemoteUrl(config.gitBaseUrl, targetRepo) },
+      { name: JOB_ONLY_ENV_KEYS.gitRemoteUrl, value: gitRemoteUrl(config.gitBaseUrl, targetRepo) },
     ],
     volumeMounts: ticketVolumeMounts(),
     resources: { requests: SEED_REQUESTS },
@@ -123,7 +136,7 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     // push time — never as env (ADR-0009).
     volumeMounts: [
       ...ticketVolumeMounts(),
-      { name: "token", mountPath: JOB_MOUNT_PATHS.token, subPath: TOKEN_SECRET_KEY, readOnly: true },
+      { name: "token", mountPath: TOKEN_MOUNT_PATH, subPath: TOKEN_SECRET_KEY, readOnly: true },
     ],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
@@ -147,7 +160,7 @@ function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
     { name: JOB_ENV_KEYS.targetRepo, value: targetRepo },
     { name: JOB_ENV_KEYS.specNumber, value: String(specNumber) },
     { name: JOB_ENV_KEYS.gitBaseUrl, value: config.gitBaseUrl },
-    { name: JOB_ENV_KEYS.gitRemoteUrl, value: gitRemoteUrl(config.gitBaseUrl, targetRepo) },
+    { name: JOB_ONLY_ENV_KEYS.gitRemoteUrl, value: gitRemoteUrl(config.gitBaseUrl, targetRepo) },
     { name: JOB_ENV_KEYS.omniRouteBaseUrl, value: config.omniRouteBaseUrl },
     { name: JOB_ENV_KEYS.omniRouteModel, value: OMNIROUTE_DEFAULT_MODEL },
     { name: JOB_ENV_KEYS.omniRouteReviewModel, value: OMNIROUTE_REVIEW_MODEL },

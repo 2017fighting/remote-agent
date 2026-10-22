@@ -9,10 +9,6 @@ export const APP_ENV_KEYS = {
   jobTtlSecondsAfterFinished: "JOB_TTL_SECONDS_AFTER_FINISHED",
   githubApiBaseUrl: "GITHUB_API_BASE_URL",
   gitBaseUrl: "GIT_BASE_URL",
-  /** OmniRoute base URL handed to every Job as `OMNIROUTE_BASE_URL` (docs/deployment.md §9). */
-  omniRouteBaseUrl: "OMNIROUTE_BASE_URL",
-  /** Namespace the App creates Jobs / Secrets / Ticket PVCs in. */
-  namespace: "NAMESPACE",
   githubAppId: "GITHUB_APP_ID",
   githubAppClientId: "GITHUB_APP_CLIENT_ID",
   githubWebhookSecret: "GITHUB_WEBHOOK_SECRET",
@@ -27,8 +23,6 @@ export const JOB_ENV_KEYS = {
   targetRepo: "TARGET_REPO",
   specNumber: "SPEC_NUMBER",
   gitBaseUrl: "GIT_BASE_URL",
-  /** Clone URL the init container seeds from: `GIT_BASE_URL/<owner>/<name>.git`, composed by the App. */
-  gitRemoteUrl: "GIT_REMOTE_URL",
   omniRouteBaseUrl: "OMNIROUTE_BASE_URL",
   omniRouteModel: "OMNIROUTE_MODEL",
   omniRouteReviewModel: "OMNIROUTE_REVIEW_MODEL",

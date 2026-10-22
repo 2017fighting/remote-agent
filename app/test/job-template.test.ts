@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
+import { JOB_ENV_KEYS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
 import { runReconcilePass } from "../src/reconcile.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { K8sJobManifest } from "../src/ports/K8sPort.js";
 import { JOB_IMAGE } from "../src/job-image.js";
-import { TOKEN_SECRET_KEY, renderJobManifest } from "../src/renders/job-template.js";
+import {
+  JOB_ONLY_ENV_KEYS,
+  TOKEN_MOUNT_PATH,
+  TOKEN_SECRET_KEY,
+  renderJobManifest,
+} from "../src/renders/job-template.js";
 import { testConfig } from "./helpers.js";
 import { REPO, specWorld } from "./world.js";
 
@@ -87,7 +92,7 @@ describe("job template: env key surface", () => {
       JOB_ENV_KEYS.targetRepo,
       JOB_ENV_KEYS.specNumber,
       JOB_ENV_KEYS.gitBaseUrl,
-      JOB_ENV_KEYS.gitRemoteUrl,
+      JOB_ONLY_ENV_KEYS.gitRemoteUrl,
       JOB_ENV_KEYS.omniRouteBaseUrl,
       JOB_ENV_KEYS.omniRouteModel,
       JOB_ENV_KEYS.omniRouteReviewModel,
@@ -107,7 +112,7 @@ describe("job template: env key surface", () => {
   it("composes the target repo clone URL from GIT_BASE_URL (no token in the URL)", () => {
     const env = new Map(manifest().podTemplate.containers[0]!.env!.map((e) => [e.name, e]));
     expect(env.get(JOB_ENV_KEYS.gitBaseUrl)?.value).toBe("https://github.com");
-    expect(env.get(JOB_ENV_KEYS.gitRemoteUrl)?.value).toBe(`https://github.com/${REPO}.git`);
+    expect(env.get(JOB_ONLY_ENV_KEYS.gitRemoteUrl)?.value).toBe(`https://github.com/${REPO}.git`);
 
     const stub = renderJobManifest({
       config: testConfig({ GIT_BASE_URL: "http://stub-git.svc/" }),
@@ -118,7 +123,7 @@ describe("job template: env key surface", () => {
       workItemJson: "{}",
     });
     const stubEnv = new Map(stub.podTemplate.containers[0]!.env!.map((e) => [e.name, e]));
-    expect(stubEnv.get(JOB_ENV_KEYS.gitRemoteUrl)?.value).toBe(`http://stub-git.svc/${REPO}.git`);
+    expect(stubEnv.get(JOB_ONLY_ENV_KEYS.gitRemoteUrl)?.value).toBe(`http://stub-git.svc/${REPO}.git`);
   });
 
   it("takes OMNIROUTE_API_KEY from exactly one secret key, never envFrom", () => {
@@ -134,7 +139,7 @@ describe("job template: env key surface", () => {
 
   it("gives the seed container only what it needs to seed (no work item, no model config)", () => {
     const names = manifest().podTemplate.initContainers[0]!.env!.map((e) => e.name);
-    expect(names).toEqual([JOB_ENV_KEYS.targetRepo, JOB_ENV_KEYS.specNumber, JOB_ENV_KEYS.gitRemoteUrl]);
+    expect(names).toEqual([JOB_ENV_KEYS.targetRepo, JOB_ENV_KEYS.specNumber, JOB_ONLY_ENV_KEYS.gitRemoteUrl]);
   });
 });
 
@@ -156,7 +161,7 @@ describe("job template: volumes and mounts", () => {
     const mounts = manifest().podTemplate.containers[0]!.volumeMounts!;
     expect(mounts).toContainEqual({
       name: "token",
-      mountPath: JOB_MOUNT_PATHS.token,
+      mountPath: TOKEN_MOUNT_PATH,
       subPath: TOKEN_SECRET_KEY,
       readOnly: true,
     });

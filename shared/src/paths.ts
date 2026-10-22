@@ -8,12 +8,6 @@ export const VOLUME_PATHS = {
   seedError: "/mnt/agent/state/seed-error.json",
 } as const;
 
-/** Mounts that are not part of the Ticket PVC. */
-export const JOB_MOUNT_PATHS = {
-  /** The per-Job installation token, mounted as a file (ADR-0009): never in env, never in a URL. */
-  token: "/mnt/credentials/token",
-} as const;
-
 /** Marker inside App-posted GitHub comments: `<!-- remote-agent:<kind>:<job-name> -->`. */
 export const COMMENT_MARKER_PREFIX = "remote-agent:";
 

@@ -1,5 +1,15 @@
 import { APP_ENV_KEYS } from "@remote-agent/shared";
 
+/**
+ * App env keys that are not in the shared key index: the shared module is the
+ * contract both workspaces read, and this ticket does not widen it (another
+ * ticket owns that surface). Spellings follow `docs/deployment.md` §6 / §9.
+ */
+const APP_ONLY_ENV_KEYS = {
+  namespace: "NAMESPACE",
+  omniRouteBaseUrl: "OMNIROUTE_BASE_URL",
+} as const;
+
 /** App-side runtime configuration. Defaults live in code; env only overrides (spec #33 §4). */
 export interface AppConfig {
   /** Resync tick interval in seconds; must stay below the 30-min token renewal threshold (ADR-0014). */
@@ -53,8 +63,8 @@ export function readAppConfig(env: EnvSource = process.env): AppConfig {
     maxJobsPerRepo: readNonNegativeInt(env, APP_ENV_KEYS.maxJobsPerRepo, DEFAULT_MAX_JOBS_PER_REPO),
     githubApiBaseUrl: readString(env, APP_ENV_KEYS.githubApiBaseUrl, DEFAULT_GITHUB_API_BASE_URL),
     gitBaseUrl: readString(env, APP_ENV_KEYS.gitBaseUrl, DEFAULT_GIT_BASE_URL),
-    namespace: readString(env, APP_ENV_KEYS.namespace, DEFAULT_NAMESPACE),
-    omniRouteBaseUrl: readString(env, APP_ENV_KEYS.omniRouteBaseUrl, DEFAULT_OMNIROUTE_BASE_URL),
+    namespace: readString(env, APP_ONLY_ENV_KEYS.namespace, DEFAULT_NAMESPACE),
+    omniRouteBaseUrl: readString(env, APP_ONLY_ENV_KEYS.omniRouteBaseUrl, DEFAULT_OMNIROUTE_BASE_URL),
     jobPvcSize: readString(env, APP_ENV_KEYS.jobPvcSize, DEFAULT_JOB_PVC_SIZE),
     jobActiveDeadlineSeconds: readPositiveInt(
       env,
