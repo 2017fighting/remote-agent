@@ -125,7 +125,7 @@ _Avoid_: clone, copy, overlay
 ### 外部边界
 
 **OmniRoute**:
-集群内 OpenAI 兼容的模型网关，向上游 provider 转发；Job 从不持有上游 key。
+集群内 OpenAI 兼容的模型网关，向上游 provider 转发；Job 持有它的地址与一把网关 key，从不持有任何上游 provider 的 key。
 _Avoid_: proxy, gateway, router, LLM API
 
 ### Labels
