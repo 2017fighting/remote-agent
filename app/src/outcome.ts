@@ -80,6 +80,9 @@ async function execute(
 ): Promise<void> {
   const { github } = deps;
   const name = jobName(issue.ownerRepo, issue.number);
+  // One judged-at instant per ticket, so the date quoted in the evidence
+  // comment and the value written to the PVC are the same one.
+  const judgedAt = deps.now();
 
   if (transition.kind === "done") {
     // Sub-issues before the close: the reverse order would leave a window with
@@ -117,14 +120,14 @@ async function execute(
         renderErrorComment({ jobName: name, reason: transition.reason, summary: transition.summary }),
       );
     } else {
-      const evidence = await gatherEvidence(deps, issue, job, pods, transition.reason);
+      const evidence = await gatherEvidence(deps, issue, job, pods, transition.reason, judgedAt);
       await postOnce(github, issue, "evidence", name, renderEvidenceComment(evidence));
     }
   }
 
   // `expires-at` is written in the same pass that judged the outcome, and only
   // when absent: an existing value is the retention clock already running.
-  await setExpiresAtIfAbsent(deps, issue, transition.kind);
+  await setExpiresAtIfAbsent(deps, issue, transition.kind, judgedAt);
 }
 
 /** T6b–T6e: the App's own account of a run that left no readable run result. */
@@ -134,6 +137,7 @@ async function gatherEvidence(
   job: K8sJob | null,
   pods: K8sPod[],
   reason: AppErrorReason,
+  judgedAt: Date,
 ) {
   const { k8s } = deps;
   const name = jobName(issue.ownerRepo, issue.number);
@@ -154,7 +158,7 @@ async function gatherEvidence(
     jobEvidence: jobEvidenceLines(job),
     logTail,
     pvcName: volume,
-    expiresAt: ticketPvcExpiresAt("error", deps.now()),
+    expiresAt: ticketPvcExpiresAt("error", judgedAt),
   };
 }
 
@@ -214,6 +218,7 @@ async function setExpiresAtIfAbsent(
   deps: OutcomeStepDeps,
   issue: GitHubIssue,
   outcome: "done" | "blocked" | "error",
+  judgedAt: Date,
 ): Promise<void> {
   const name = pvcName(issue.ownerRepo, issue.number);
   const pvc = await deps.k8s.getPvc(name);
@@ -221,6 +226,6 @@ async function setExpiresAtIfAbsent(
   if (pvc === null) return;
   if (pvc.annotations[ANNOTATIONS.expiresAt] !== undefined) return;
   await deps.k8s.patchPvcAnnotations(name, {
-    [ANNOTATIONS.expiresAt]: ticketPvcExpiresAt(outcome, deps.now()),
+    [ANNOTATIONS.expiresAt]: ticketPvcExpiresAt(outcome, judgedAt),
   });
 }
