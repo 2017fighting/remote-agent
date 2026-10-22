@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -16,7 +16,7 @@ import {
   renderAppRbac,
   renderJobRbac,
   renderNamespace,
-  renderOmniRouteSecret,
+  renderAppSecret,
   renderPromptsConfigMap,
   renderResourceQuota,
   renderStubService,
@@ -89,6 +89,21 @@ const APP_PORT = 8080;
 const WEBHOOK_SECRET = "e2e-webhook-secret";
 const INSTALLATION_TOKEN = "ghs_e2e_installation_token";
 const OMNIROUTE_API_KEY = "e2e-omniroute-key";
+
+/**
+ * The App's GitHub App signing key, generated per run.
+ *
+ * Production reads it from `remote-agent-secret` (docs/deployment.md §3) and the
+ * adapter rejects an empty one, so the harness has to supply a real RSA key of
+ * the shape GitHub issues — not a placeholder string. The stub does not verify
+ * the signature (there is no GitHub App behind it), but the key must parse,
+ * because `OctokitGitHub` signs a JWT with it before its first read.
+ */
+const APP_PRIVATE_KEY = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+}).privateKey;
 
 export interface RunOptions {
   keep: boolean;
@@ -164,7 +179,11 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       ...renderJobRbac(),
       renderResourceQuota(),
       await renderPromptsConfigMap(join(repoRoot, "prompts")),
-      renderOmniRouteSecret(OMNIROUTE_API_KEY),
+      renderAppSecret({
+        privateKey: APP_PRIVATE_KEY,
+        webhookSecret: WEBHOOK_SECRET,
+        omniRouteApiKey: OMNIROUTE_API_KEY,
+      }),
     ]);
 
     // The stubs read their scenario from a ConfigMap so they start with no
@@ -229,7 +248,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
         stubGitHubUrl,
         stubModelUrl,
         targetRepo: TARGET_REPO,
-        webhookSecret: WEBHOOK_SECRET,
       }),
     ]);
 

@@ -19,7 +19,8 @@ export const NAMESPACE = "remote-agent";
 export const APP_SERVICE_ACCOUNT = "remote-agent";
 export const JOB_SERVICE_ACCOUNT = "agent-job";
 export const PROMPTS_CONFIGMAP = "remote-agent-prompts";
-export const OMNIROUTE_SECRET = "remote-agent-secret";
+/** The one sops-equivalent Secret (docs/deployment.md §3); the App and the Job both read it. */
+export const APP_SECRET = "remote-agent-secret";
 
 /** docs/deployment.md §8 / ADR-0004: the five keys, verbatim from `prompts/`. */
 export const PROMPT_KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"] as const;
@@ -215,7 +216,6 @@ export interface AppDeploymentInput {
   stubModelUrl: string;
   /** `owner/name` the scenario targets. */
   targetRepo: string;
-  webhookSecret: string;
 }
 
 /**
@@ -223,6 +223,10 @@ export interface AppDeploymentInput {
  * is the whole test-vs-production difference: `GITHUB_API_BASE_URL`,
  * `GIT_BASE_URL` and `OMNIROUTE_BASE_URL` point at the stubs, and nothing else
  * about the process changes. `NAMESPACE` is where its RBAC applies.
+ *
+ * The two credentials are `secretKeyRef`s, not literals: production reads them
+ * from `remote-agent-secret` (docs/deployment.md §3), and the e2e must exercise
+ * that same wiring — a literal here would hide a missing Secret key.
  *
  * The resync interval is short so the harness's polling does not have to wait
  * five minutes for a tick; that is an env override the docs already allow
@@ -252,7 +256,8 @@ export function renderAppDeployment(input: AppDeploymentInput): Record<string, u
                 { name: "OMNIROUTE_BASE_URL", value: input.stubModelUrl },
                 { name: "GITHUB_APP_ID", value: "5390512" },
                 { name: "GITHUB_APP_CLIENT_ID", value: "Iv1.stub" },
-                { name: "GITHUB_WEBHOOK_SECRET", value: input.webhookSecret },
+                { name: "GITHUB_WEBHOOK_SECRET", valueFrom: { secretKeyRef: { name: APP_SECRET, key: "GITHUB_WEBHOOK_SECRET" } } },
+                { name: "GITHUB_APP_PRIVATE_KEY", valueFrom: { secretKeyRef: { name: APP_SECRET, key: "GITHUB_APP_PRIVATE_KEY" } } },
                 { name: "RESYNC_INTERVAL_SECONDS", value: "5" },
                 { name: "MAX_JOBS_GLOBAL", value: "3" },
                 { name: "MAX_JOBS_PER_REPO", value: "2" },
@@ -267,15 +272,28 @@ export function renderAppDeployment(input: AppDeploymentInput): Record<string, u
 }
 
 /**
- * The one sops-equivalent Secret the Job reads with `secretKeyRef`: exactly
- * `OMNIROUTE_API_KEY`, never `envFrom` (docs/deployment.md §3, user story 57).
+ * `remote-agent-secret` (docs/deployment.md §3): the three keys, exactly. The
+ * App reads the private key and the webhook secret; every Job reads only
+ * `OMNIROUTE_API_KEY`, by `secretKeyRef` (never `envFrom`).
+ *
+ * The values are e2e-only — a throwaway signing key, a random webhook secret
+ * and a fake gateway key — but the *shape* is production's, so a missing key
+ * fails here the way it would there.
  */
-export function renderOmniRouteSecret(apiKey: string): Record<string, unknown> {
+export function renderAppSecret(input: {
+  privateKey: string;
+  webhookSecret: string;
+  omniRouteApiKey: string;
+}): Record<string, unknown> {
   return {
     apiVersion: "v1",
     kind: "Secret",
-    metadata: { name: OMNIROUTE_SECRET, namespace: NAMESPACE },
+    metadata: { name: APP_SECRET, namespace: NAMESPACE },
     type: "Opaque",
-    stringData: { OMNIROUTE_API_KEY: apiKey },
+    stringData: {
+      GITHUB_APP_PRIVATE_KEY: input.privateKey,
+      GITHUB_WEBHOOK_SECRET: input.webhookSecret,
+      OMNIROUTE_API_KEY: input.omniRouteApiKey,
+    },
   };
 }
