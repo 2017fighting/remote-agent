@@ -46,40 +46,35 @@ export interface Scheduler {
  * runs at a time; triggers arriving during a pass merge into exactly one
  * subsequent pass. Depth is always 1 — it is a coalesce flag, not a buffer, and
  * no trigger content is stored. Holds no control-plane state between passes
- * (ADR-0001): the only fields are the running flag and the coalesce flag.
+ * (ADR-0001): the only fields are the flight and the single pending trigger.
  */
 export function createScheduler(config: AppConfig, deps: SchedulerDeps): Scheduler {
-  let running = false;
-  let merged = false;
-  let pendingTrigger: Trigger | null = null;
+  let flight: Promise<void> | null = null;
+  let pending: Trigger | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
   let started = false;
 
   function wake(trigger: Trigger): void {
-    if (running) {
-      merged = true;
-      pendingTrigger = trigger;
+    if (flight) {
+      pending = trigger;
       return;
     }
-    void runPass(trigger);
+    flight = runPass(trigger).then(() => {
+      flight = null;
+      const next = pending;
+      pending = null;
+      if (next) wake(next);
+    });
   }
 
   async function runPass(trigger: Trigger): Promise<void> {
-    running = true;
     try {
       const counters = await deps.reconcile(trigger);
       deps.onPassLog({ trigger, ...counters });
     } catch (error) {
+      // A failed pass logs one line and is never re-enqueued (ADR-0014); the
+      // next real trigger — at the latest the tick — naturally recalculates.
       deps.onPassError(trigger, error);
-    } finally {
-      running = false;
-      // A coalesced wake runs exactly one follow-up pass; failures never self-requeue.
-      if (merged) {
-        merged = false;
-        const next = pendingTrigger;
-        pendingTrigger = null;
-        if (next) void runPass(next);
-      }
     }
   }
 
@@ -89,8 +84,10 @@ export function createScheduler(config: AppConfig, deps: SchedulerDeps): Schedul
       if (started) return;
       started = true;
       await deps.listIssues();
-      // runPass never rejects (errors go to onPassError), so awaiting it is deterministic.
-      await runPass("startup");
+      // Route startup through wake() so it serializes with any trigger that
+      // arrived while the startup list was in flight.
+      wake("startup");
+      await flight;
       tickTimer = setInterval(() => wake("tick"), config.resyncIntervalSeconds * 1000);
     },
     stop(): void {

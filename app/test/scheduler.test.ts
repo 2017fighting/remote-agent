@@ -230,6 +230,41 @@ function release(gate: { resolve: (() => void) | null }): void {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  it("a webhook arriving during the startup list serializes behind the startup pass (single-flight)", async () => {
+    const passes: RecordedPass[] = [];
+    const gates: Array<() => void> = [];
+    let listGate: (() => void) | null = null;
+    const listStarted = new Promise<void>((resolve) => {
+      listGate = resolve;
+    });
+    const scheduler = createScheduler(config, {
+      reconcile: async (trigger) => {
+        passes.push({ trigger, startedAt: Date.now(), finishedAt: Date.now() });
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return zeroCounters();
+      },
+      listIssues: async () => {
+        listGate?.();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        return [];
+      },
+      onPassLog: () => {},
+      onPassError: () => {},
+    });
+    const startPromise = scheduler.start();
+    await listStarted; // list in flight, startup pass not yet started
+    scheduler.wake("webhook"); // arrives during the list
+    await vi.advanceTimersByTimeAsync(0);
+    // Exactly one pass is running; the other trigger holds the single pending slot.
+    expect(passes).toHaveLength(1);
+    const first = passes[0]!.trigger;
+    expect(["startup", "webhook"]).toContain(first);
+    for (const g of gates.splice(0)) g();
+    await startPromise;
+    // Both triggers ran exactly once, serialized, never concurrently.
+    expect(passes.map((p) => p.trigger).sort()).toEqual(["startup", "webhook"]);
+  });
+
   it("stop() ends the tick timer", async () => {
     const h = makeHarness();
     await startAndWait(h);
