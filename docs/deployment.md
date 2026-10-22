@@ -68,11 +68,72 @@ Job 名是动态生成的，RBAC 收窄不到 `resourceNames`，所以这是 nam
 
 ## 6. Job 模板与镜像
 
-- **pod 模板由 App 代码构造**（TypeScript + `@kubernetes/client-node`）：镜像、env、卷、`activeDeadlineSeconds`、SA、label 都在代码里，与 run result 契约、env 名、确定性命名同源，能进假客户端单测。home-ops 不存 Job YAML。
+- **pod 模板由 App 代码构造**（TypeScript + `@kubernetes/client-node`）：镜像、env、卷、`activeDeadlineSeconds`、SA、label 都在代码里（`app/src/renders/job-template.ts`），与 run result 契约、env 名、确定性命名同源，能进假客户端单测。home-ops 不存 Job YAML。
 - **镜像**：App 是 `ghcr.io/2017fighting/remote-agent`，Job 是 `ghcr.io/2017fighting/remote-agent-job`；两者同仓、同一个 Actions 工作流发布到 GHCR（[#5](https://github.com/2017fighting/remote-agent/issues/5)）。**Job 镜像的 tag 在构建时烧进 App 镜像**（Dockerfile `ARG` → 编译常量），home-ops 只在 `apps/remote-agent/helmrelease.yaml` 的 `image.tag` 一处写 tag。
 - **Kyverno `registry-proxy-cache`** 会把 `ghcr.io/...` 无条件改写成 Harbor 代理 → 新 namespace 自动吃到，不需要白名单或 pull secret。
 - **网络**：集群里没有任何 NetworkPolicy（默认全通）；`profile: proxy` 就是出网。Job 要能到 GitHub、GHCR 与集群内的 OmniRoute（§9）。
-- **Job env 的键面**：`AGENT_ROLE`、`AGENT_THINKING_LEVEL`、`OMNIROUTE_BASE_URL` / `OMNIROUTE_MODEL` / `OMNIROUTE_REVIEW_MODEL`（§9）、`OMNIROUTE_API_KEY`（`secretKeyRef`）。App 自己的 env（默认值在代码里）：`JOB_PVC_SIZE`、`JOB_ACTIVE_DEADLINE_SECONDS`、`JOB_BACKOFF_LIMIT`（[ADR-0010](adr/0010-job-resource-budget.md)）、`JOB_TTL_SECONDS_AFTER_FINISHED`（[ADR-0012](adr/0012-job-deletion-ttl.md)）、`RESYNC_INTERVAL_SECONDS`（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)）。
+
+### App 的 env 键面
+
+| key | 默认值 | 用途 |
+| --- | --- | --- |
+| `MAX_JOBS_GLOBAL` | `3` | 全局 Slot 上限 |
+| `MAX_JOBS_PER_REPO` | `2` | 每个 target repo 的 Slot 上限 |
+| `RESYNC_INTERVAL_SECONDS` | `300` | Resync tick 间隔；必须 < 1800（token 续期阈值），否则启动报错（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)） |
+| `JOB_PVC_SIZE` | `8Gi` | Ticket PVC 的 `requests.storage`（薄置备下是文件系统上限，[ADR-0010](adr/0010-job-resource-budget.md)） |
+| `JOB_ACTIVE_DEADLINE_SECONDS` | `10800` | Job 的 `activeDeadlineSeconds` |
+| `JOB_BACKOFF_LIMIT` | `4` | Job 的 `backoffLimit` |
+| `JOB_TTL_SECONDS_AFTER_FINISHED` | `1800` | 终态 Job 的保留窗 = App 的读取预算（[ADR-0012](adr/0012-job-deletion-ttl.md)） |
+| `NAMESPACE` | `remote-agent` | Jobs / Secrets / Ticket PVCs 建在哪里 |
+| `GITHUB_API_BASE_URL` | `https://api.github.com` | octokit 的 base URL（e2e 指向 stub） |
+| `GIT_BASE_URL` | `https://github.com` | 拼给 Job 的 `GIT_REMOTE_URL` 用它（e2e 指向 stub 的 git http-backend） |
+| `GITHUB_APP_ID` | 空 | octokit 鉴权；同时传给 Job 作为 agent commit 的 bot 身份（空是合法值：不带 app id 前缀） |
+| `OMNIROUTE_BASE_URL` | 集群内 FQDN（§9） | 注入每个 Job |
+| `PORT` | `8080`（镜像里写死） | webhook 监听端口；App 绑 `0.0.0.0:$PORT` |
+| `GITHUB_APP_PRIVATE_KEY` | — | octokit 鉴权；空值会在适配器构造时直接报错（`GITHUB_APP_PRIVATE_KEY is required`），来自 `remote-agent-secret`（§3） |
+| `GITHUB_WEBHOOK_SECRET` | — | HMAC 校验；来自 `remote-agent-secret`（代码不校验它非空，空值相当于用空 key 验签） |
+
+`GITHUB_APP_CLIENT_ID` 只在 `shared/src/env-keys.ts` 的键索引里声明（写进 `remote-agent-env` ConfigMap），v1 没有任何读者——不要在它上面做假设。
+
+### Job 的 env 键面（模板实际发射的）
+
+agent 容器（`runner`）：
+
+| key | 来源 | 用途 |
+| --- | --- | --- |
+| `AGENT_ROLE` | `implement-ticket` / `implement-spec` | 决定拼哪份 prompt、注入哪两个 Result tool |
+| `AGENT_THINKING_LEVEL` | 代码常量 `high` | 两个 role 都是 `high`（§9） |
+| `AGENT_WORK_ITEM` | App 渲染的 `WorkItemV1` JSON（≤ 512KB） | 正文逐字、评论旧→新（超预算时从最旧的开始换成一行占位） |
+| `TARGET_REPO` | `owner/name` | 目标仓 |
+| `SPEC_NUMBER` | spec 号 | 分支 `agent/spec-<n>` 与 `Closes #<n>` 的来源 |
+| `GIT_BASE_URL` | App 的 `GIT_BASE_URL` | 仅作记录，clone 用下面那条 |
+| `GIT_REMOTE_URL` | App 拼好：`GIT_BASE_URL/<owner>/<name>.git` | 播种与 push 都用它，**不带 token** |
+| `GITHUB_APP_ID` | App 的 `GITHUB_APP_ID` | commit 身份 `<app-id>+remote-agent[bot]@users.noreply.github.com` |
+| `OMNIROUTE_BASE_URL` / `OMNIROUTE_MODEL` / `OMNIROUTE_REVIEW_MODEL` | App 常量（§9） | 两个 conversation 的模型 |
+| `OMNIROUTE_API_KEY` | `secretKeyRef` → `remote-agent-secret` 的**同一个 key** | 网关 key（从不用 `envFrom`） |
+| `JOB_NAME` | **字面值**，就是 Job 名 | runner 往自己 Job 上 PATCH annotation 时的目标 |
+| `JOB_NAMESPACE` | `fieldRef: metadata.namespace` | 同上 |
+
+init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOTE_URL`——它只做 git，拿不到 work item 与模型配置（[ADR-0009](adr/0009-ticket-volume-seeding.md)）。
+
+### 三个卷，不多不少
+
+| 卷 | 类型 | 挂载 | 谁挂 |
+| --- | --- | --- | --- |
+| `ticket` | PVC，名字 = Job 名 | `/mnt/agent`（`repo/` · `state/` · `home/`） | seed + runner |
+| `token` | Secret，`agent-<repo-slug>-<issue#>-token` 的 `token` 键 | `/mnt/credentials/token`（`subPath`，只读） | seed + runner |
+| `prompts` | ConfigMap `remote-agent-prompts` | `/mnt/prompts`（只读） | **只 runner** |
+
+这三块就是镜像会读的全部输入面：少一个 volume，Job 会在第一个模型调用之前就死（seed 拿不到 token 或 runner 读不到 prompt 文件）。**任何一边加路径而不加另一边的断言，都会静默变成「Job 永远起不来」**——这正是 kind e2e 存在的理由（[e2e/README.md](../e2e/README.md)）。
+
+### 两个「不要改回去」的细节
+
+1. **`JOB_NAME` 必须是字面值，不能写成 `fieldRef: metadata.name`。** 容器里的 downward API 把 `metadata.name` 解成 **pod 名**，而 Job 的 pod 是 `<job-name>-<random5>`；runner 的 `deriveJobName()` 优先读 `JOB_NAME`，于是每次 run-result PATCH 都会打向一个不存在的 Job（404），App 随即判 `error(no-result)`——**每一个结果都丢**。`JOB_NAMESPACE` 用 `fieldRef` 是安全的。
+2. **init 容器必须显式写 `command`。** 两个容器共用一个镜像，镜像的 `CMD` 是 runner；不写 `command` 时 seed 会去跑 runner，在 runner-only 的 env 上启动失败，pod 一路 loop 到 `BackoffLimitExceeded`。
+
+### 其余代码常量（不走 env）
+
+`parallelism: 1`、`restartPolicy: Never`、`terminationGracePeriodSeconds: 120`、`fsGroup: 1000`、SA `agent-job`、PVC `ReadWriteOncePod` + SC `truenas-iscsi-delete`、agent 容器 requests `500m/2Gi` + memory limit `6Gi`、seed 容器 requests `100m/128Mi` 无 limit、`podFailurePolicy`：seed 容器 exit 78 → `FailJob`（[ADR-0009](adr/0009-ticket-volume-seeding.md) / [ADR-0010](adr/0010-job-resource-budget.md)）。
 
 ## 7. 护栏 quota
 
@@ -80,7 +141,9 @@ Job 名是动态生成的，RBAC 收窄不到 `resourceNames`，所以这是 nam
 
 ## 8. prompt 的载体
 
-ConfigMap `remote-agent-prompts`（放 `apps/remote-agent/`，与 App 同生命周期），作为只读卷挂进 Job。**键面以 [ADR-0004](adr/0004-prompts-live-in-configmap.md) 为准**：`_common`（所有 role 拼在最前）+ `implement-ticket` / `implement-spec` + `review-standards` / `review-spec`。（#12 当初的「一角色一个 key、`/prompts/${AGENT_ROLE}.md`」形态已被 `_common` 与两轴 review 取代；挂载路径与渲染顺序的最终形态归 spec 阶段。）
+ConfigMap `remote-agent-prompts`（放 `apps/remote-agent/`，与 App 同生命周期），作为**只读卷**挂进 Job 的 **runner** 容器（seed 不挂，它只做 git）。**键面以 [ADR-0004](adr/0004-prompts-live-in-configmap.md) 为准**，一个 key 一个文件：`_common`（所有 role 拼在最前）+ `implement-ticket` / `implement-spec` + `review-standards` / `review-spec`（reviewer conversation 两轴各一份）。
+
+挂载点与渲染顺序已经定：`JOB_MOUNT_PATHS.prompts` = `/mnt/prompts`（App 的 Job 模板与 Job 镜像 import 同一个常量），runner 先读 `_common`、再读 role 模板，拼起来后一次把 `{{...}}` 全部替掉（未知占位符直接报错，不把字面值交给模型）。repo 里的 `prompts/` 就是这份 key 面的逐字源。
 
 每条 prompt 义务的落点与内容见 [prompt 必写项清单](agents/prompt-checklist.md)。
 
