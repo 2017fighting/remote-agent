@@ -485,7 +485,8 @@ describe("outcome: step 2 runs before Claim (step 3) in one pass", () => {
     const claimIndex = github.writeLog.indexOf(`editLabels ${REPO}#${next} +[agent:in-progress] -[]`);
     expect(closeIndex).toBeGreaterThanOrEqual(0);
     expect(claimIndex).toBeGreaterThan(closeIndex);
-    // The finished ticket is out of the way, so the same pass already advanced.
+    // The judged ticket leaves T3 in the same pass the Frontier advances past it.
+    expect(await labelsOf(github, done)).toEqual(["agent:implement", "ready-for-agent"]);
     expect(await labelsOf(github, next)).toContain("agent:in-progress");
   });
 });

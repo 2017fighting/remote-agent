@@ -47,34 +47,28 @@ export interface OutcomeStepDeps {
   now: () => Date;
 }
 
-export interface OutcomeStepResult {
-  /** One entry per in-progress ticket that reached a terminal outcome. */
-  judged: Array<{ issue: GitHubIssue; transition: OutcomeTransition }>;
-}
-
 /** T4–T6e for every in-progress ticket in the world. */
 export async function handleOutcomes(
   deps: OutcomeStepDeps,
   issues: GitHubIssue[],
   jobsByName: ReadonlyMap<string, K8sJob>,
   pods: K8sPod[],
-): Promise<OutcomeStepResult> {
-  const judged: OutcomeStepResult["judged"] = [];
-
+): Promise<void> {
   for (const issue of issues) {
     if (!isInProgress(issue)) continue;
     const name = jobName(issue.ownerRepo, issue.number);
     const job = jobsByName.get(name) ?? null;
     const transition = judgeOutcome({ issue, job });
     if (transition.kind === "none") continue;
-
     await execute(deps, issue, job, pods, transition);
-    judged.push({ issue, transition });
   }
-
-  return { judged };
 }
 
+/**
+ * `agent:in-progress` on an **open** ticket is the whole entry condition for
+ * this step. A closed ticket is out of the state machine (T4 closed it); a
+ * stale label on one is not a run to judge.
+ */
 function isInProgress(issue: GitHubIssue): boolean {
   return issue.state === "open" && issue.labels.includes(LABEL_AGENT_IN_PROGRESS);
 }
