@@ -45,6 +45,51 @@ describe("FakeK8s create-if-absent (409 = success)", () => {
   });
 });
 
+describe("FakeK8s rejects what the API server rejects (422)", () => {
+  // The regression this pins: `remote-agent/ticket: owner/name#34` was accepted
+  // by the fake and rejected by k8s, so the suite was green on an object that
+  // could never be created.
+  it("rejects a label value containing '/' or '#'", async () => {
+    const k8s = new FakeK8s();
+    const manifest = jobManifest("agent-o-r-1");
+    manifest.labels = { "remote-agent/ticket": "o/r#1" };
+    await expect(k8s.createJob(manifest)).rejects.toMatchObject({ status: 422 });
+    expect(k8s.jobs).toHaveLength(0);
+
+    const pvc = pvcManifest("agent-o-r-1");
+    pvc.labels = { "remote-agent/repo": "o/r" };
+    await expect(k8s.createPvc(pvc)).rejects.toMatchObject({ status: 422 });
+
+    await expect(
+      k8s.createSecret({
+        name: "s",
+        namespace: "remote-agent",
+        labels: { "remote-agent/ticket": "o/r#1" },
+        annotations: {},
+        data: {},
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("rejects an over-long label value and a malformed key", async () => {
+    const k8s = new FakeK8s();
+    const tooLong = jobManifest("agent-o-r-2");
+    tooLong.labels = { "remote-agent/role": "r".repeat(64) };
+    await expect(k8s.createJob(tooLong)).rejects.toMatchObject({ status: 422 });
+
+    const badKey = pvcManifest("agent-o-r-3");
+    badKey.labels = { "Remote_Agent/role": "ok" };
+    await expect(k8s.createPvc(badKey)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("accepts an annotation value the label grammar would reject", async () => {
+    const k8s = new FakeK8s();
+    const manifest = jobManifest("agent-o-r-4");
+    manifest.annotations = { "remote-agent/repo": "o/r", "remote-agent/ticket": "o/r#1" };
+    await expect(k8s.createJob(manifest)).resolves.toMatchObject({ name: "agent-o-r-4" });
+  });
+});
+
 describe("FakeGitHub label edit and idempotence", () => {
   it("editLabels is set semantics and only records actual changes", async () => {
     const gh = new FakeGitHub({

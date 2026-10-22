@@ -63,11 +63,13 @@ export function managedJob(
     namespace: "remote-agent",
     labels: {
       "app.kubernetes.io/managed-by": "remote-agent",
-      "remote-agent/ticket": `${ownerRepo}#${issueNumber}`,
-      "remote-agent/repo": options.repoLabel ?? ownerRepo,
+      "remote-agent/spec": "33",
       "remote-agent/role": options.role ?? "implement-ticket",
     },
-    annotations: {},
+    annotations: {
+      "remote-agent/repo": options.repoLabel ?? ownerRepo,
+      "remote-agent/ticket": `${ownerRepo}#${issueNumber}`,
+    },
     conditions: [],
     finished: options.finished ?? false,
   };
@@ -113,10 +115,13 @@ export function ticketPvc(
   return {
     name: pvcName(ownerRepo, issueNumber),
     namespace: "remote-agent",
-    annotations: options.expiresAt === undefined ? {} : { [ANNOTATIONS.expiresAt]: options.expiresAt },
+    annotations: {
+      ...(options.expiresAt === undefined ? {} : { [ANNOTATIONS.expiresAt]: options.expiresAt }),
+      [ANNOTATIONS.repo]: ownerRepo,
+      [ANNOTATIONS.ticket]: `${ownerRepo}#${issueNumber}`,
+    },
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${ownerRepo}#${issueNumber}`,
       [LABELS.spec]: String(options.spec ?? 33),
     },
     creationTimestamp: options.creationTimestamp,
@@ -132,11 +137,13 @@ export function tokenSecret(
   return {
     name: tokenSecretName(jobName(ownerRepo, issueNumber)),
     namespace: "remote-agent",
-    annotations:
-      options.tokenExpiresAt === undefined ? {} : { [ANNOTATIONS.tokenExpiresAt]: options.tokenExpiresAt },
+    annotations: {
+      ...(options.tokenExpiresAt === undefined ? {} : { [ANNOTATIONS.tokenExpiresAt]: options.tokenExpiresAt }),
+      [ANNOTATIONS.repo]: ownerRepo,
+      [ANNOTATIONS.ticket]: `${ownerRepo}#${issueNumber}`,
+    },
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${ownerRepo}#${issueNumber}`,
       [LABELS.spec]: "33",
     },
     data: { token: options.token ?? "ghs_existing" },

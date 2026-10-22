@@ -53,7 +53,7 @@ export async function renewTokens(deps: TokenRenewalDeps, jobs: K8sJob[]): Promi
     });
     if (decision.kind === "keep") continue;
 
-    const ownerRepo = job.labels[LABELS.repo];
+    const ownerRepo = job.annotations[ANNOTATIONS.repo];
     // Without the target repo there is nothing to scope a token to; the Job is
     // then not one the App can renew.
     if (ownerRepo === undefined) continue;

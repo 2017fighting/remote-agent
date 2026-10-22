@@ -1,4 +1,12 @@
-import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
+import {
+  ANNOTATIONS,
+  JOB_ENV_KEYS,
+  JOB_MOUNT_PATHS,
+  LABELS,
+  VOLUME_PATHS,
+  jobName,
+  secretName,
+} from "@remote-agent/shared";
 import type { AppConfig } from "../config.js";
 import { JOB_IMAGE } from "../job-image.js";
 import type { K8sContainer, K8sEnvVar, K8sJobManifest, K8sPvcManifest, K8sVolumeMount } from "../ports/K8sPort.js";
@@ -79,14 +87,19 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
   return {
     name,
     namespace: config.namespace,
+    // Identity goes in the annotations: `owner/name` and `owner/name#n` contain
+    // `/` and `#`, which a label value may not carry (the API server answers
+    // 422), and slugifying them would lose the repo token renewal mints
+    // against. Labels keep only the values k8s accepts (ADR-0011).
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${targetRepo}#${issueNumber}`,
       [LABELS.spec]: String(specNumber),
-      [LABELS.repo]: targetRepo,
       [LABELS.role]: role,
     },
-    annotations: {},
+    annotations: {
+      [ANNOTATIONS.repo]: targetRepo,
+      [ANNOTATIONS.ticket]: `${targetRepo}#${issueNumber}`,
+    },
     parallelism: 1,
     backoffLimit: config.jobBackoffLimit,
     activeDeadlineSeconds: config.jobActiveDeadlineSeconds,
@@ -236,10 +249,12 @@ export function renderTicketPvc(input: {
   return {
     name: jobName(targetRepo, issueNumber),
     namespace: config.namespace,
-    annotations: {},
+    annotations: {
+      [ANNOTATIONS.repo]: targetRepo,
+      [ANNOTATIONS.ticket]: `${targetRepo}#${issueNumber}`,
+    },
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${targetRepo}#${issueNumber}`,
       [LABELS.spec]: String(specNumber),
     },
     spec: {

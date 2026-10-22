@@ -50,13 +50,17 @@ describe("job template: identity and labels", () => {
     });
   });
 
-  it("carries the provenance label surface", () => {
+  it("carries the provenance surface: legal labels, identity in the annotations", () => {
+    // A label value may not contain `/` or `#` (the API server answers 422), so
+    // `owner/name` and `owner/name#n` live in the annotations (ADR-0011).
     expect(manifest().labels).toEqual({
       "app.kubernetes.io/managed-by": "remote-agent",
-      "remote-agent/ticket": `${REPO}#35`,
       "remote-agent/spec": "33",
-      "remote-agent/repo": REPO,
       "remote-agent/role": "implement-ticket",
+    });
+    expect(manifest().annotations).toEqual({
+      "remote-agent/repo": REPO,
+      "remote-agent/ticket": `${REPO}#35`,
     });
   });
 
@@ -342,8 +346,11 @@ describe("Ticket PVC created at claim", () => {
     });
     expect(pvc.labels).toEqual({
       "app.kubernetes.io/managed-by": "remote-agent",
-      "remote-agent/ticket": `${REPO}#35`,
       "remote-agent/spec": "33",
+    });
+    expect(pvc.annotations).toEqual({
+      "remote-agent/repo": REPO,
+      "remote-agent/ticket": `${REPO}#35`,
     });
   });
 });

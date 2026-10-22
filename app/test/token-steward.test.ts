@@ -41,13 +41,17 @@ describe("token steward: mint at claim", () => {
     ]);
   });
 
-  it("carries the provenance labels", async () => {
+  it("carries the provenance surface: legal labels, identity in the annotations", async () => {
     const { github, k8s } = oneTicket();
     await runReconcilePass({ github, k8s, config }, "webhook");
     expect(k8s.secrets[0]!.labels).toEqual({
       "app.kubernetes.io/managed-by": "remote-agent",
-      "remote-agent/ticket": `${REPO}#35`,
       "remote-agent/spec": "33",
+    });
+    expect(k8s.secrets[0]!.annotations).toEqual({
+      "remote-agent/repo": REPO,
+      "remote-agent/ticket": `${REPO}#35`,
+      "remote-agent/token-expires-at": expect.any(String),
     });
   });
 

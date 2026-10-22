@@ -25,10 +25,15 @@ export function renderTokenSecret(input: {
   return {
     name: secretName(targetRepo, issueNumber),
     namespace,
-    annotations: { [ANNOTATIONS.tokenExpiresAt]: minted.expiresAt },
+    annotations: {
+      [ANNOTATIONS.tokenExpiresAt]: minted.expiresAt,
+      // Identity is an annotation: `owner/name` is not a legal label value
+      // (ADR-0011); token renewal reads it from here.
+      [ANNOTATIONS.repo]: targetRepo,
+      [ANNOTATIONS.ticket]: `${targetRepo}#${issueNumber}`,
+    },
     labels: {
       [LABELS.managedBy]: LABELS.managedByValue,
-      [LABELS.ticket]: `${targetRepo}#${issueNumber}`,
       [LABELS.spec]: String(specNumber),
     },
     data: { [TOKEN_SECRET_KEY]: minted.token },
