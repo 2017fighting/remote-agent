@@ -114,7 +114,7 @@ spec 的收尾 Job（`implement-spec`）也是同一套：确定性名、同一�
 - `finish_spec`（`implement-spec`）：`{summary, prBody, commentBody?, newTickets?, warnings?}` → `done`
 - `blocked`（两个 role 都有）：`{summary, commentBody}` → `blocked`
 
-它们返回 `control: { terminate: true }` 让本次 run 就此收尾，一次 run 只能调一次。**`error` 不是 agent 能自述的**：它只由 runner / App 判（Job 非正常终态、读不到 annotation、label 与 Job 漂移），且**没有自动重试**。
+它们返回 `control: { terminate: true }` 让本次 run 就此收尾；同一轮调多个时**第一次调用生效**，所以一次 run 最多只写一条 annotation。**`error` 不是 agent 能自述的**：它只由 runner / App 判（Job 非正常终态、读不到 annotation、label 与 Job 漂移），且**没有自动重试**。
 
 一条硬顺序：**push 严格先于 annotation**。push 失败就不写结果、非零退出，k8s 起新 pod 同卷 `resume()` 到同一点再 push——所以卷上那部分工作不会因为没有结果而丢。
 

@@ -112,7 +112,7 @@ flowchart TD
 - **它不跑 e2e**。收尾 role 的验证是全量测试 + typecheck（仓库 prompt 里点名 lint 就跑）；`/implement-spec` 原文里没有 e2e，v1 不自行加（[prompt 必写项清单第 5 条](agents/prompt-checklist.md)）。代价明写：目标仓自己的 `test:e2e` 这次运行没人跑，结果交到 PR 让人看。
 - **`Closes #<spec>` 不由 commit 带**，而是 App 开 PR 时追加进 PR body（幂等：已含就不重复加）。agent 不开 PR、不调 `gh`（[ADR-0002](adr/0002-app-is-sole-github-writer.md)）。
 
-收尾 Job 判断有真阻塞时走 `agent:blocked`；判断还有活没干完时在 run result 里带 `newTickets`，App 在 spec 下**新建 sub-issue**（AFK 可实现就带 `ready-for-agent`，否则带 `ready-for-human`）且**不开 PR**——开 PR 等于宣称 spec 完整。新票下一轮 reconcile 会进 Frontier（它们带 `ready-for-agent` 但不带人的 `agent:implement`，所以 Frontier 为空、走 idle 分支）。
+收尾 Job 判断有真阻塞时走 `agent:blocked`；判断还有活没干完时在 run result 里带 `newTickets`，App 在 spec 下**新建 sub-issue**（AFK 可实现就带 `ready-for-agent`，否则带 `ready-for-human`）且**不开 PR**——开 PR 等于宣称 spec 完整。这些新票带 `ready-for-agent` 但不带人的 `agent:implement`，所以下一轮 spec 是「有 open sub-issue 但 Frontier 空」→ idle 分支、不写任何东西；等人授权后它们才进 Frontier。
 
 ## 4. 状态机
 
@@ -160,7 +160,7 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 | **T2** 已授权 · 在门内 | — | `open` · `[ready-for-agent, agent:implement]` | 人 | T1，或人从 T5/T6 重入（T8） | App：Claim + 起 Job（T3）；Slot 满或名下旧 Job 未删则等（label 一字不变，只写一条日志） |
 | **T3** 被占 · 跑着 | 非终态（`Pending` / `Running`） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | App（先 create-if-absent Job、后写 label，[ADR-0013](adr/0013-claim-gates-on-job-absence.md)） | T2 ∧ Slot 够 ∧ 名下无未删旧 Job | 见 T4–T6 |
 | **T3L** 自环 · pod 在重启 | 非终态（pod 重启，`resume()` 从 checkpoint 续） | **与 T3 一字不差** | k8s（无人写 GitHub） | 任何 pod 层失败 | 回到 T3，直到 Job 终态；`backoffLimit` 耗尽才走 T6b |
-| **T4** done | `Complete` · `{outcome:"done", summary, commentBody?, newTickets?}` | `closed` · `[ready-for-agent, agent:implement]` | App（关票、摘 `agent:in-progress`；`commentBody` 有则转成评论） | T3 ∧ Complete ∧ done | 终态，出局。`newTickets` 非空时**先建 sub-issue、再关票**（反过来会在两写之间留下「票已关、新票还没建」的空窗） |
+| **T4** done | `Complete` · `{outcome:"done", summary, commentBody?, warnings?, newTickets?}` | `closed` · `[ready-for-agent, agent:implement]` | App（关票、摘 `agent:in-progress`；`commentBody` 有则转成评论，`warnings` 总在最后） | T3 ∧ Complete ∧ done | 终态，出局。`newTickets` 非空时**先建 sub-issue、再关票**（反过来会在两写之间留下「票已关、新票还没建」的空窗） |
 | **T5** blocked | `Complete` · `{outcome:"blocked", commentBody}` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | App（摘 `ready-for-agent`、加 `ready-for-human`、加 `agent:blocked`、置评论） | T3 ∧ Complete ∧ blocked | 人重入（T8） |
 | **T6a** error · 自述 | `Complete` · `{outcome:"error", summary}` · **无 `reason`**（防御分支：ADR-0007 下 agent 只自述 done/blocked，载荷里也没有 `reason`——细分原因是 App 证据评论的事） | `open` · `[ready-for-human, agent:implement, agent:error]` + App 评论 | App | T3 ∧ Complete ∧ error | 人重入（T8） |
 | **T6b** error · backoff 耗尽 | `Failed` · `reason=BackoffLimitExceeded` · **无 annotation** | 同 T6a | App | T3L 超过 `backoffLimit` | 人重入（T8） |
@@ -214,7 +214,7 @@ Job: Running
 | **S1** 循环中 · 在门内 | 本 spec 下某张 ticket 的 Job（也可能此刻没有 Job） | `open` · `[ready-for-agent, agent:implement]`，**全程不变**——spec 上从不写 `agent:in-progress` | 人（只写过那一次 `agent:implement`） | S0，或人重入（S6） | 每轮 reconcile 三选一：frontier 非空 → Claim 一张 ticket（走 ticket 的 T2→T3）；frontier 空 **∧** 无 open sub-issue → 起收尾 Job（S2）；有 open sub-issue 但 frontier 空（票都 blocked / error）→ 什么都不做，只写日志。Slot 满 → Defer |
 | **S2** 收尾中 | 收尾 Job（`implement-spec`）非终态 | 同 S1 | App（create-if-absent，确定性 Job 名） | S1 的第二个分支 | Job 终态 → S3 / S3N / S4 / S5 |
 | **S3** 已开 PR | `Complete` · `{outcome:"done", newTickets:[]}` | `open` · `[ready-for-human, agent:implement]` + PR（**PR body** 末尾带 `Closes #<spec>` 与证据；commit 不带） | App（摘 `ready-for-agent`、加 `ready-for-human`、开 PR 并追加 `Closes`；PR 按分支 `agent/spec-<n>` 唯一，重复开是幂等跳过） | S2 ∧ done ∧ 无 newTickets | 人 merge → PR body 里的 `Closes` 自动关票（出局） |
-| **S3N** 回填新票 | `Complete` · `{outcome:"done", newTickets:[…]}` | `open` · `[ready-for-agent, agent:implement]`（不变） | App（建 sub-issue，**不开 PR**） | S2 ∧ done ∧ newTickets 非空 | 回到 S1，新票进 frontier |
+| **S3N** 回填新票 | `Complete` · `{outcome:"done", newTickets:[…]}` | `open` · `[ready-for-agent, agent:implement]`（不变） | App（建 sub-issue，**不开 PR**） | S2 ∧ done ∧ newTickets 非空 | 回到 S1；新票带 `ready-for-agent` 但没 `agent:implement`，所以走 idle 分支，等人授权后才进 Frontier |
 | **S4** 阻塞 | `Complete` · `{outcome:"blocked", commentBody}` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | App | S2 ∧ blocked | 人重入（S6） |
 | **S5** 出错 | `Failed(BackoffLimitExceeded)` / `Failed(DeadlineExceeded)` / `Complete` 无 annotation / Job 不存在（漂移） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | App | S2 ∧ 上述任一 | 人重入（S6） |
 | **S6** 人重入 | — | `open` · `[ready-for-agent, agent:implement]` | 人（摘 `agent:blocked` / `agent:error`，`ready-for-human` → `ready-for-agent`） | S4 / S5 | 回到 S1 |
