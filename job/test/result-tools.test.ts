@@ -90,10 +90,11 @@ describe("#40 role → tool table", () => {
     await run(depsFor(fixture, recorded));
 
     const tools = await implementerTools(fixture);
-    expect(tools).toContain("finish_ticket");
-    expect(tools).toContain("blocked");
+    expect(tools).toEqual(["read", "write", "edit", "bash", "finish_ticket", "blocked", "code_review"]);
+    // The reviewer's own extension is removed from the implementer: no `grep`, and
+    // no reviewer-only table leaking into the implementer's agent.
+    expect(tools).not.toContain("grep");
     expect(tools).not.toContain("finish_spec");
-    expect(tools).toContain("code_review");
   });
 
   it("gives the spec role finish_spec + blocked and not finish_ticket", async () => {
@@ -103,8 +104,8 @@ describe("#40 role → tool table", () => {
     await run(depsFor(fixture, recorded, { env: specEnv(fixture) }));
 
     const tools = await implementerTools(fixture, specEnv(fixture));
-    expect(tools).toContain("finish_spec");
-    expect(tools).toContain("blocked");
+    expect(tools).toEqual(["read", "write", "edit", "bash", "finish_spec", "blocked", "code_review"]);
+    expect(tools).not.toContain("grep");
     expect(tools).not.toContain("finish_ticket");
   });
 });
@@ -417,6 +418,45 @@ describe("#40 the review round is durable", () => {
       await harness.close(BACKGROUND_CONTEXT);
     }
     expect(await reviewerConversations(fixture)).toHaveLength(2);
+  });
+});
+
+describe("#40 the reviewer's own tools", () => {
+  it("lets a reviewer conversation grep the working copy it was given", async () => {
+    fixture = await runnerFixture();
+    const fixedPoint = await git(["rev-parse", "HEAD"], fixture.worktree);
+    await commitWork(fixture, "work.txt");
+    const recorded: Recorded = { events: [], results: [] };
+    const { fauxAssistantMessage, fauxToolCall } = await import("./support/runner-fixture.js");
+    // Spec axis greps first, then answers; the Standards axis answers directly.
+    fixture.script([
+      codeReviewCall(fixedPoint),
+      fauxAssistantMessage([fauxToolCall("grep", { pattern: "worktree" }, { id: "g1" })], { stopReason: "toolUse" }),
+      reviewerReport("spec: used grep"),
+      reviewerReport("standards: ok"),
+      finishTicketCall("reviewed"),
+    ]);
+    await run(depsFor(fixture, recorded, { standardsFiles: async () => [] }));
+
+    // The grep result reached the reviewer transcript with a real match, not an error.
+    const harness = await Harness.open(
+      await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+      { models: fixture.models, registry: createRegistry() },
+      BACKGROUND_CONTEXT,
+    );
+    try {
+      const root = await harness.root(BACKGROUND_CONTEXT);
+      const page = await harness.commit((tx) => tx.scanConversations({}, 100), BACKGROUND_CONTEXT);
+      const reviewer = page.items.find((record) => record.id !== root.id);
+      const conversation = await harness.conversation(reviewer!.id, BACKGROUND_CONTEXT);
+      const entries = await conversation!.entries({}, 100, undefined, BACKGROUND_CONTEXT);
+      const result = entries.items.find((entry) => entry.kind === "pi.tool-result");
+      const message = result?.model?.[0] as { content?: { text?: string }[] } | undefined;
+      expect(message?.content?.[0]?.text).toContain("README.md");
+      expect(recorded.results[0]).toMatchObject({ outcome: "done" });
+    } finally {
+      await harness.close(BACKGROUND_CONTEXT);
+    }
   });
 });
 
