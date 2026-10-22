@@ -126,6 +126,8 @@ init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOT
 
 这三块就是镜像会读的全部输入面：少一个 volume，Job 会在第一个模型调用之前就死（seed 拿不到 token 或 runner 读不到 prompt 文件）。**任何一边加路径而不加另一边的断言，都会静默变成「Job 永远起不来」**——这正是 kind e2e 存在的理由（[e2e/README.md](../e2e/README.md)）。
 
+一个已知的重复拼写：token 的挂载路径在 `app/src/renders/job-template.ts` 里是 `TOKEN_MOUNT_PATH`，在 `shared/src/paths.ts` 里是 `JOB_MOUNT_PATHS.token`（Job 镜像读后者）。两者今天都是 `/mnt/credentials/token`，但**没有任何测试把它们绑在一起**（prompts 那条路径是 import 同一个常量、有测试钉住的）。改任一处时两处都要改。
+
 ### 两个「不要改回去」的细节
 
 1. **`JOB_NAME` 必须是字面值，不能写成 `fieldRef: metadata.name`。** 容器里的 downward API 把 `metadata.name` 解成 **pod 名**，而 Job 的 pod 是 `<job-name>-<random5>`；runner 的 `deriveJobName()` 优先读 `JOB_NAME`，于是每次 run-result PATCH 都会打向一个不存在的 Job（404），App 随即判 `error(no-result)`——**每一个结果都丢**。`JOB_NAMESPACE` 用 `fieldRef` 是安全的。
