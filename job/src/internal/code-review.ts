@@ -50,6 +50,9 @@ export function codeReviewTool(options: CodeReviewOptions): ToolRegistration {
     }),
     // Two calls in one round run in call order, so the first round is the one that sticks.
     executionMode: "sequential",
+    // Replay-safe: after a crash mid-round the call reruns, finds the round already
+    // claimed on the volume, and bounces instead of fanning out a second review.
+    replay: "safe",
     execute: async (args, api) => {
       if (await options.roundTaken(api)) return bounced("review already ran: fix and finish");
 

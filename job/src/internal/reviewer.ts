@@ -95,7 +95,7 @@ async function axisPrompt(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: stri
 }
 
 /** The real list, or an explicit empty table — never a placeholder the reviewer must resolve. */
-export function renderStandardsList(files: readonly string[]): string {
+function renderStandardsList(files: readonly string[]): string {
   if (files.length === 0) return "none (this repository has no written standards files; use the smell baseline only)";
   return files.map((file) => `- \`${file}\``).join("\n");
 }

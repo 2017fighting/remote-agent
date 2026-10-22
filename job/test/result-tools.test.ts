@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { run } from "../src/internal/runner.js";
@@ -9,6 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { specBodyFor } from "../src/internal/runner.js";
 import type { RunnerEnv } from "../src/internal/env.js";
 import { findStandardsFiles } from "../src/internal/standards-files.js";
+import { PROMPT_TEMPLATE_KEYS } from "../src/internal/prompt.js";
 import type { RunResultV1 } from "@remote-agent/shared";
 import {
   blockedCall,
@@ -470,6 +471,12 @@ describe("#40 prompt carrier", () => {
     // No slash command: durable has no such layer, so a `/implement` in a template
     // sends the model looking for a tool that does not exist (ADR-0004).
     expect(text).not.toMatch(/(^|\s)\/[a-z][a-z-]*/m);
+  });
+
+  it("carries the five keys as the ConfigMap's whole key surface", async () => {
+    const dir = await readdir(join(REPO_ROOT, "prompts"));
+    expect(dir.sort()).toEqual([...KEYS].sort());
+    expect([...PROMPT_TEMPLATE_KEYS].sort()).toEqual([...KEYS].sort());
   });
 
   it("keeps the two review templates free of sub-agent bans only where the tool table already holds", async () => {
