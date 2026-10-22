@@ -1,12 +1,16 @@
 import type { AppConfig } from "./config.js";
-import type { GitHubPort } from "./ports/GitHubPort.js";
+import type { GitHubIssue, GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sJob, K8sPod, K8sPort, K8sPvc } from "./ports/K8sPort.js";
-import { LABELS } from "@remote-agent/shared";
 import type { PassCounters, Trigger } from "./scheduler.js";
+import { planFrontier } from "./planners/frontier.js";
+import { labelGate } from "./planners/gate.js";
+import { admitSlot, countSlotUsage, occupySlot } from "./planners/slots.js";
+import { renderWorkItem, serializeWorkItem } from "./renders/work-item.js";
+import { claimTicket } from "./claim.js";
 
 export type { PassCounters };
 
-/** Everything one pass reads; rebuilt from scratch every pass (ADR-0001). Secrets are read by deterministic name (RBAC has no secrets list). */
+/** Everything one pass reads; rebuilt from scratch every pass (ADR-0001). */
 export interface WorldSnapshot {
   issues: Awaited<ReturnType<GitHubPort["listIssues"]>>;
   jobs: K8sJob[];
@@ -25,11 +29,15 @@ export interface ReconcileDeps {
 /**
  * One reconcile pass (spec #33 §2): read world → plan → execute → counters.
  * Stateless across passes — every pass rebuilds its view from GitHub and k8s;
- * nothing is cached between passes. In #34 the plan is always empty (planners
- * arrive in #35–#38), so the pass reads the world, holds its Slot accounting,
- * and executes no writes. Replayability therefore holds trivially now and
- * every later ticket must keep it: a second pass over an unchanged world must
- * produce zero new external writes.
+ * nothing is cached between passes.
+ *
+ * This ticket implements step 3, Claim: specs in ascending number order each
+ * contribute at most one candidate — their Frontier — and tickets are claimed
+ * until a Slot is refused. Outcome handling, spec advance/closeout and
+ * reclamation arrive in #36–#38.
+ *
+ * Replayability is a hard requirement: a second pass over an unchanged world
+ * issues zero new external writes.
  */
 export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): Promise<PassCounters> {
   const { github, k8s, config } = deps;
@@ -44,36 +52,111 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   const world: WorldSnapshot = { issues, jobs, pods, pvcs };
   deps.onWorldRead?.(world);
 
-  // 2. Plan. This ticket has no planners yet; the plan is always empty.
-  // 3. Execute. An empty plan performs no writes.
-  // 4. Counters. Slots: a managed Job holds a Slot while it has any
-  //    non-terminal pod (Terminating counts — spec #33 §1 `slots`).
-  const slotsUsed = countUsedSlots(jobs, pods);
-  const slotsMax = config.maxJobsGlobal;
+  // 2. Slot occupancy from the pods the world already has (Terminating counts).
+  let usage = countSlotUsage(jobs, pods);
+  let deferred = 0;
+  let waiting = 0;
+
+  // 3. Candidates: specs ascending by number, each contributing its Frontier.
+  const jobsByName = new Map(world.jobs.map((job) => [job.name, job]));
+  const candidates: Array<{ spec: GitHubIssue; ticket: GitHubIssue }> = [];
+  for (const spec of specsInOrder(world.issues)) {
+    const plan = await planSpec(deps, spec, jobsByName);
+    if (plan.kind === "claimable") candidates.push({ spec, ticket: plan.ticket });
+    else if (plan.kind === "waiting") waiting += 1;
+  }
+
+  // 4. Execute claims serially until a Slot is refused or a claim fails.
+  for (const candidate of candidates) {
+    const { spec, ticket } = candidate;
+    const decision = admitSlot(usage, ticket.ownerRepo, config);
+    if (decision.kind === "defer") {
+      // Defer (docs/architecture.md §5): no Job, no label change, no comment —
+      // only the `deferred` counter. The next wake retries naturally.
+      deferred += 1;
+      continue;
+    }
+
+    const workItemJson = serializeWorkItem(
+      renderWorkItem({
+        issue: ticket,
+        specNumber: spec.number,
+        comments: await github.listComments(ticket.ownerRepo, ticket.number),
+      }),
+    );
+
+    const result = await claimTicket({
+      config,
+      github,
+      k8s,
+      targetRepo: ticket.ownerRepo,
+      issueNumber: ticket.number,
+      specNumber: spec.number,
+      role: "implement-ticket",
+      workItemJson,
+    });
+
+    if (result.kind === "failed") {
+      // Stop the pass at this ticket; the next pass recomputes from world state.
+      throw result.error;
+    }
+    if (result.kind === "quota-exceeded") {
+      // Normal branch: no Job, no label, no comment, no `agent:error`. The next
+      // pass recomputes; a quota that is still full simply says no again.
+      continue;
+    }
+    // The Job now exists, so it holds a Slot for the rest of this pass even
+    // before its pod shows up: admitting serially must not overshoot the cap.
+    usage = occupySlot(usage, result.jobName, ticket.ownerRepo);
+  }
 
   return {
-    slotsUsed,
-    slotsMax,
-    deferred: 0,
+    slotsUsed: usage.total,
+    slotsMax: config.maxJobsGlobal,
+    deferred,
     renewed: 0,
-    waiting: 0,
+    waiting,
   };
 }
 
-function countUsedSlots(jobs: K8sJob[], pods: K8sPod[]): number {
-  const managedJobNames = new Set(
-    jobs
-      .filter((j) => j.labels[LABELS.managedBy] === LABELS.managedByValue)
-      .map((j) => j.name),
-  );
-  const holders = new Set<string>();
-  for (const pod of pods) {
-    if (!pod.ownerJobName) continue;
-    if (!managedJobNames.has(pod.ownerJobName)) continue;
-    // Only non-terminal pods hold a Slot; a Terminating pod still counts
-    // (spec #33 §1 `slots`).
-    if (pod.phase === "Succeeded" || pod.phase === "Failed") continue;
-    holders.add(pod.ownerJobName);
+/** Candidate order is spec number ascending (determinism, spec #33 §2). */
+function specsInOrder(issues: GitHubIssue[]): GitHubIssue[] {
+  return issues.filter((issue) => issue.state === "open").sort((a, b) => a.number - b.number);
+}
+
+/**
+ * What one spec wants this pass. `closeout-ready` and `out-of-gate` are already
+ * computed here (they are the S1 branches) but only Claim acts on them today:
+ * spec advance / closeout is #38.
+ */
+type SpecPlan =
+  | { kind: "claimable"; ticket: GitHubIssue }
+  /** Open sub-issues exist but none passes the Claim-gate: log only. */
+  | { kind: "waiting" }
+  | { kind: "closeout-ready" }
+  | { kind: "out-of-gate" };
+
+/** A spec only drives work while it is itself in the label gate (S1). */
+async function planSpec(
+  deps: ReconcileDeps,
+  spec: GitHubIssue,
+  jobsByName: ReadonlyMap<string, K8sJob>,
+): Promise<SpecPlan> {
+  const subIssues = await deps.github.listSubIssues(spec.ownerRepo, spec.number);
+  if (subIssues.length === 0) return { kind: "out-of-gate" };
+
+  const specBlockers = await deps.github.listBlockers(spec.ownerRepo, spec.number);
+  const openSpecBlockers = specBlockers.filter((blocker) => blocker.state === "open").length;
+  if (!labelGate(spec, openSpecBlockers).passed) return { kind: "out-of-gate" };
+
+  const openBlockerCounts = new Map<number, number>();
+  for (const issue of subIssues) {
+    const blockers = await deps.github.listBlockers(spec.ownerRepo, issue.number);
+    openBlockerCounts.set(issue.number, blockers.filter((blocker) => blocker.state === "open").length);
   }
-  return holders.size;
+
+  const frontier = planFrontier({ ownerRepo: spec.ownerRepo, subIssues, openBlockerCounts, jobsByName });
+  if (frontier.kind === "has-frontier") return { kind: "claimable", ticket: frontier.ticket };
+  if (frontier.kind === "no-frontier-open-sub-issues") return { kind: "waiting" };
+  return { kind: "closeout-ready" };
 }

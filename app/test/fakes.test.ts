@@ -36,7 +36,7 @@ describe("FakeK8s create-if-absent (409 = success)", () => {
 
   it("records patch writes only when annotations actually change", async () => {
     const k8s = new FakeK8s({
-      secrets: [{ name: "s", namespace: "remote-agent", annotations: { "a": "1" }, data: {} }],
+      secrets: [{ name: "s", namespace: "remote-agent", annotations: { "a": "1" }, labels: {}, data: {} }],
     });
     await k8s.patchSecretAnnotations("s", { "a": "1" });
     expect(k8s.writeLog).toHaveLength(0);

@@ -40,6 +40,8 @@ export interface K8sSecret {
   name: string;
   namespace: string;
   annotations: Record<string, string>;
+  /** Provenance labels, same surface as Jobs / Ticket PVCs. */
+  labels: Record<string, string>;
   data: Record<string, string>;
 }
 
