@@ -67,7 +67,7 @@ describe("reconcile pass skeleton", () => {
     expect(github.issues[1]!.labels).toEqual(["ready-for-agent", "agent:implement"]);
   });
 
-  it("counts a held slot when a managed Job has a non-terminal pod", async () => {
+  it("counts a held slot when a managed Job has a non-terminal pod; terminal pods release it", async () => {
     const { github, k8s } = makeWorld();
     const job = await k8s.createJob({
       name: "agent-2017fighting-remote-agent-34",
@@ -81,9 +81,47 @@ describe("reconcile pass skeleton", () => {
       finished: false,
     });
     await k8s.createPvc({ name: job.name, namespace: "remote-agent", annotations: {}, labels: {} });
-    // No pods → no slots held yet in this ticket's simple world.
-    const result = await runReconcilePass({ github, k8s, config }, "tick");
-    expect(result.slotsUsed).toBe(0);
+
+    // No pods → no slots held.
+    expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
+
+    // A running pod holds one slot.
+    k8s.pods.push({
+      name: `${job.name}-pod`,
+      namespace: "remote-agent",
+      ownerJobName: job.name,
+      phase: "Running",
+      deleting: false,
+    });
+    expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(1);
+
+    // Terminating still counts as holding (spec §5).
+    k8s.pods[0]!.deleting = true;
+    expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(1);
+
+    // A terminal pod releases the slot.
+    k8s.pods[0]!.phase = "Succeeded";
+    expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
+  });
+
+  it("ignores pods owned by Jobs the App does not manage", async () => {
+    const { github, k8s } = makeWorld();
+    const foreign = await k8s.createJob({
+      name: "somebody-elses-job",
+      namespace: "remote-agent",
+      labels: {},
+      annotations: {},
+      conditions: [],
+      finished: false,
+    });
+    k8s.pods.push({
+      name: "foreign-pod",
+      namespace: "remote-agent",
+      ownerJobName: foreign.name,
+      phase: "Running",
+      deleting: false,
+    });
+    expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
   });
 
   it("replayability: two passes on the same world → the second pass makes zero new writes", async () => {

@@ -2,7 +2,9 @@ import type { AppConfig } from "./config.js";
 import type { GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sJob, K8sPod, K8sPort, K8sPvc } from "./ports/K8sPort.js";
 import { LABELS } from "@remote-agent/shared";
-import type { Trigger } from "./scheduler.js";
+import type { PassCounters, Trigger } from "./scheduler.js";
+
+export type { PassCounters };
 
 /** Everything one pass reads; rebuilt from scratch every pass (ADR-0001). Secrets are read by deterministic name (RBAC has no secrets list). */
 export interface WorldSnapshot {
@@ -10,14 +12,6 @@ export interface WorldSnapshot {
   jobs: K8sJob[];
   pods: K8sPod[];
   pvcs: K8sPvc[];
-}
-
-export interface PassCounters {
-  slotsUsed: number;
-  slotsMax: number;
-  deferred: number;
-  renewed: number;
-  waiting: number;
 }
 
 export interface ReconcileDeps {
@@ -76,6 +70,9 @@ function countUsedSlots(jobs: K8sJob[], pods: K8sPod[]): number {
   for (const pod of pods) {
     if (!pod.ownerJobName) continue;
     if (!managedJobNames.has(pod.ownerJobName)) continue;
+    // Only non-terminal pods hold a Slot; a Terminating pod still counts
+    // (spec #33 §1 `slots`).
+    if (pod.phase === "Succeeded" || pod.phase === "Failed") continue;
     holders.add(pod.ownerJobName);
   }
   return holders.size;
