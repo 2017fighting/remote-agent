@@ -14,6 +14,9 @@ export class OctokitGitHub implements GitHubPort {
     throw new Error(`OctokitGitHub.${method} not implemented (ticket #34 only defines ports)`);
   }
 
+  listIssues(): Promise<never> {
+    return this.notImplemented("listIssues");
+  }
   listSubIssues(): Promise<never> {
     return this.notImplemented("listSubIssues");
   }

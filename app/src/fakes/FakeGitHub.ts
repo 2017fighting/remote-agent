@@ -60,6 +60,10 @@ export class FakeGitHub implements GitHubPort {
     this.writeLog.push(entry);
   }
 
+  async listIssues(): Promise<GitHubIssue[]> {
+    return [...this.issues];
+  }
+
   async listSubIssues(ownerRepo: string, specNumber: number): Promise<GitHubIssue[]> {
     const numbers = this.subIssues.get(this.key(ownerRepo, specNumber)) ?? [];
     return numbers

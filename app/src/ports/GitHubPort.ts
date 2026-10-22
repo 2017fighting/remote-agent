@@ -42,6 +42,8 @@ export interface MintedToken {
 
 export interface GitHubPort {
   // --- reads ---
+  /** All known issues — the universe the App recomputes from each pass (startup list + passes). */
+  listIssues(): Promise<GitHubIssue[]>;
   /** A spec's sub-issues in their listed order (determinism source for Frontier). */
   listSubIssues(ownerRepo: string, specNumber: number): Promise<GitHubIssue[]>;
   /** Issues (blockers) that block the given issue; an open blocker holds it at the Gate. */
