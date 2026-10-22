@@ -1,4 +1,4 @@
-import { JOB_ENV_KEYS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
+import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
 import type { AppConfig } from "../config.js";
 import { JOB_IMAGE } from "../job-image.js";
 import type { K8sContainer, K8sEnvVar, K8sJobManifest, K8sPvcManifest, K8sVolumeMount } from "../ports/K8sPort.js";
@@ -40,6 +40,13 @@ export const JOB_ONLY_ENV_KEYS = {
 
 /** Where the per-Job token is mounted as a file (ADR-0009: never env, never a URL). */
 export const TOKEN_MOUNT_PATH = "/mnt/credentials/token";
+
+/**
+ * The prompt ConfigMap (ADR-0004 / docs/deployment.md §8). The Job image carries
+ * no prompt: the runner reads `_common` + its role template from this volume, so
+ * changing wording never rebuilds an image.
+ */
+export const PROMPTS_CONFIGMAP_NAME = "remote-agent-prompts";
 
 /** The single key inside the per-Job token Secret, mounted as the token file. */
 export const TOKEN_SECRET_KEY = "token";
@@ -102,9 +109,15 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
       securityContext: { fsGroup: POD_FS_GROUP },
       initContainers: [renderSeedContainer(input)],
       containers: [renderAgentContainer(input)],
+      // These three volumes are exactly the three surfaces the Job image reads:
+      // the Ticket PVC at /mnt/agent (repo/state/home), the token Secret at its
+      // file path, and the prompt ConfigMap at JOB_MOUNT_PATHS.prompts. Adding a
+      // volume here without a matching reader in the image (or the reverse) is
+      // the drift the kind e2e exists to catch.
       volumes: [
         { name: "ticket", persistentVolumeClaim: { claimName: name } },
         { name: "token", secret: { secretName: secretName(targetRepo, issueNumber) } },
+        { name: "prompts", configMap: { name: PROMPTS_CONFIGMAP_NAME } },
       ],
     },
   };
@@ -134,7 +147,9 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     name: AGENT_CONTAINER_NAME,
     image: JOB_IMAGE,
     env: renderJobEnv(input),
-    volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount()],
+    // The runner reads the prompt templates from the ConfigMap, so it — and not
+    // seed — carries the prompts mount (seed is git only, ADR-0009).
+    volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount(), promptsVolumeMount()],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
 }
@@ -155,6 +170,16 @@ function ticketVolumeMounts(): K8sVolumeMount[] {
  */
 function tokenVolumeMount(): K8sVolumeMount {
   return { name: "token", mountPath: TOKEN_MOUNT_PATH, subPath: TOKEN_SECRET_KEY, readOnly: true };
+}
+
+/**
+ * The prompt ConfigMap, one file per key at `JOB_MOUNT_PATHS.prompts` (ADR-0004).
+ * The runner's `readPromptFile()` opens `<promptsDir>/<key>`, so the path must be
+ * the same constant the Job image reads — importing it is what keeps the two
+ * from drifting.
+ */
+function promptsVolumeMount(): K8sVolumeMount {
+  return { name: "prompts", mountPath: JOB_MOUNT_PATHS.prompts, readOnly: true };
 }
 
 function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {

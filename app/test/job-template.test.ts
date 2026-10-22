@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { JOB_ENV_KEYS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
+import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
 import { runReconcilePass } from "../src/reconcile.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { K8sJobManifest } from "../src/ports/K8sPort.js";
 import { JOB_IMAGE } from "../src/job-image.js";
 import {
   JOB_ONLY_ENV_KEYS,
+  PROMPTS_CONFIGMAP_NAME,
   TOKEN_MOUNT_PATH,
   TOKEN_SECRET_KEY,
   renderJobManifest,
@@ -226,6 +227,34 @@ describe("job template: volumes and mounts", () => {
       subPath: TOKEN_SECRET_KEY,
       readOnly: true,
     });
+  });
+
+  /**
+   * The runner reads `_common` + its role template from `JOB_MOUNT_PATHS.prompts`
+   * and throws if they are absent (job/src/internal/prompt.ts). Without this
+   * volume and mount every real Job would die before its first model call, and
+   * the Job-entry seam would not see it because it builds its own prompts
+   * directory. The mount path is imported, not spelled, so a change to the
+   * constant cannot silently break the pairing.
+   */
+  it("mounts the prompts ConfigMap on the runner at the path the runner reads", () => {
+    const job = manifest();
+    expect(job.podTemplate.volumes).toContainEqual({
+      name: "prompts",
+      configMap: { name: PROMPTS_CONFIGMAP_NAME },
+    });
+    expect(job.podTemplate.containers[0]!.volumeMounts).toContainEqual({
+      name: "prompts",
+      mountPath: JOB_MOUNT_PATHS.prompts,
+      readOnly: true,
+    });
+    // The constant the runner resolves is the one the template mounts.
+    expect(JOB_MOUNT_PATHS.prompts).toBe("/mnt/prompts");
+  });
+
+  it("keeps the seed container git-only: no prompts mount", () => {
+    const seedMounts = manifest().podTemplate.initContainers[0]!.volumeMounts!;
+    expect(seedMounts.map((mount) => mount.name)).not.toContain("prompts");
   });
 });
 

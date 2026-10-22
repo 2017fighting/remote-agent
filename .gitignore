@@ -7,3 +7,6 @@ dist/
 # build and its entrypoint live here and must be committed.
 !scripts/
 !scripts/**
+
+# e2e stub bundles (built by e2e/build.mjs, not committed)
+e2e/dist/
