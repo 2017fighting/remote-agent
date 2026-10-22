@@ -15,8 +15,9 @@ import type { K8sJob, K8sPort } from "./ports/K8sPort.js";
  * - **The decision reads the annotation only** (see `planners/token-steward.ts`).
  *   `creationTimestamp` is never consulted: a patch does not move it, so it
  *   would degrade into re-minting every pass.
- * - **At most one mint per Secret per pass.** Jobs are unique by name, and the
- *   guard below makes the invariant explicit rather than incidental.
+ * - **At most one mint per Secret per pass.** Jobs are unique by name, so the
+ *   `renewedSecrets` guard is what makes the invariant explicit rather than
+ *   incidental.
  *
  * The mounted file lags a renewal by 1–1.5 minutes (kubelet sync), which is why
  * the threshold is 30 minutes and not something close to the 60-minute lifetime.
@@ -30,12 +31,8 @@ export interface TokenRenewalDeps {
   now: Date;
 }
 
-export interface TokenRenewalReport {
-  /** Secrets re-minted and patched in this pass. */
-  renewed: number;
-}
-
-export async function renewTokens(deps: TokenRenewalDeps, jobs: K8sJob[]): Promise<TokenRenewalReport> {
+/** How many Secrets were re-minted and patched in this pass (the `renewed` counter). */
+export async function renewTokens(deps: TokenRenewalDeps, jobs: K8sJob[]): Promise<number> {
   const renewedSecrets = new Set<string>();
   let renewed = 0;
 
@@ -70,5 +67,5 @@ export async function renewTokens(deps: TokenRenewalDeps, jobs: K8sJob[]): Promi
     renewed += 1;
   }
 
-  return { renewed };
+  return renewed;
 }

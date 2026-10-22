@@ -35,8 +35,6 @@ export interface ReclaimDeps {
 }
 
 export interface ReclaimReport {
-  /** Ticket PVCs deleted in this pass. */
-  deleted: number;
   /** Volume stats for the pass log line, computed on the post-reclamation world. */
   stats: VolumeStats;
 }
@@ -49,7 +47,6 @@ export async function reclaimVolumes(deps: ReclaimDeps): Promise<ReclaimReport> 
   const liveJobNames = new Set(jobs.filter((job) => !job.finished).map((job) => job.name));
 
   const remaining: K8sPvc[] = [];
-  let deleted = 0;
 
   for (const pvc of pvcs) {
     if (!isAppManaged(pvc)) {
@@ -64,10 +61,9 @@ export async function reclaimVolumes(deps: ReclaimDeps): Promise<ReclaimReport> 
     await deleteIfPresent(() => deps.k8s.deletePvc(pvc.name));
     // The credential dies with the volume it belongs to (ADR-0011).
     await deleteIfPresent(() => deps.k8s.deleteSecret(tokenSecretName(pvc.name)));
-    deleted += 1;
   }
 
-  return { deleted, stats: volumeStats(remaining) };
+  return { stats: volumeStats(remaining) };
 }
 
 async function deleteIfPresent(remove: () => Promise<void>): Promise<void> {

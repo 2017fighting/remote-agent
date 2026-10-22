@@ -154,7 +154,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   }
 
   // 6. Token renewal: only the Jobs still running can have a token in use.
-  const { renewed } = await renewTokens({ github, k8s, now }, jobs);
+  const renewed = await renewTokens({ github, k8s, now }, jobs);
 
   // 7. Reclamation: expired volumes + their Secrets, then the orphan fallback.
   //    Runs last and re-reads the volumes/Jobs it judges, so the writes above
