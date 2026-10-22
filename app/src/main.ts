@@ -26,7 +26,7 @@ export async function startApp(options?: {
   // Production adapters (behind ports). Stubs until their tickets land; the
   // App never talks to octokit or the k8s client directly.
   const github = options?.github ?? new OctokitGitHub({
-    appId: env["GITHUB_APP_ID"] ?? "",
+    appId: config.githubAppId,
     clientId: env["GITHUB_APP_CLIENT_ID"] ?? "",
     privateKey: env["GITHUB_APP_PRIVATE_KEY"] ?? "",
     apiBaseUrl: config.githubApiBaseUrl,

@@ -93,11 +93,71 @@ describe("job template: env key surface", () => {
       JOB_ENV_KEYS.specNumber,
       JOB_ENV_KEYS.gitBaseUrl,
       JOB_ONLY_ENV_KEYS.gitRemoteUrl,
+      JOB_ENV_KEYS.githubAppId,
       JOB_ENV_KEYS.omniRouteBaseUrl,
       JOB_ENV_KEYS.omniRouteModel,
       JOB_ENV_KEYS.omniRouteReviewModel,
       JOB_ENV_KEYS.omniRouteApiKey,
+      JOB_ENV_KEYS.jobName,
+      JOB_ENV_KEYS.jobNamespace,
     ]);
+  });
+
+  it("emits JOB_NAME and JOB_NAMESPACE with the sources the runner can trust", () => {
+    // The declared Job env surface and what the template emits must be the same
+    // set: the runner writes its run result on its own Job (ADR-0007), so both
+    // identifiers are part of the Job contract.
+    const env = manifest().podTemplate.containers[0]!.env!;
+
+    // The namespace is the pod's own, which the downward API reports.
+    expect(env).toContainEqual({
+      name: JOB_ENV_KEYS.jobNamespace,
+      valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } },
+    });
+    expect(env.filter((e) => e.valueFrom !== undefined).map((e) => e.name)).toEqual([JOB_ENV_KEYS.jobNamespace]);
+
+    // The Job name is a literal: downward-API `metadata.name` is the *pod* name.
+    expect(env).toContainEqual({ name: JOB_ENV_KEYS.jobName, value: jobName(REPO, 35) });
+  });
+
+  it("emits the Job name, never the pod name that `fieldRef: metadata.name` would give", () => {
+    // `deriveJobName()` in the runner prefers `JOB_NAME` over the deterministic
+    // rule, so a pod-style value (`<job>-abcde`) would make the run-result PATCH
+    // target a Job that does not exist. Pinning the value here makes a future
+    // switch back to `fieldRef: metadata.name` fail loudly instead of silently
+    // breaking every annotation write.
+    const env = new Map(manifest().podTemplate.containers[0]!.env!.map((e) => [e.name, e]));
+    const emitted = env.get(JOB_ENV_KEYS.jobName)!;
+    expect(emitted.value).toBe(jobName(REPO, 35));
+    expect(emitted.value).toBe(manifest().name);
+    expect(emitted.valueFrom).toBeUndefined();
+    expect(emitted.value).not.toMatch(/-[a-z0-9]{5}$/);
+  });
+
+  it("declares exactly the env keys it emits", () => {
+    // No declared-but-unemitted key (a runner fallback that is never exercised)
+    // and no emitted-but-undeclared key (a key with no contract). This is the
+    // assertion that keeps the surface self-enforcing for every future key.
+    const emitted = manifest().podTemplate.containers[0]!.env!.map((e) => e.name).sort();
+    const declared = Object.values(JOB_ENV_KEYS).sort();
+    expect(emitted).toEqual(declared);
+    expect(emitted).toHaveLength(14);
+  });
+
+  it("emits GITHUB_APP_ID so agent commits carry the bot identity (ADR-0009)", () => {
+    const env = new Map(manifest().podTemplate.containers[0]!.env!.map((e) => [e.name, e]));
+    expect(env.get(JOB_ENV_KEYS.githubAppId)?.value).toBe("");
+
+    const withAppId = renderJobManifest({
+      config: testConfig({ GITHUB_APP_ID: "5390512" }),
+      targetRepo: REPO,
+      issueNumber: 35,
+      specNumber: 33,
+      role: "implement-ticket",
+      workItemJson: "{}",
+    });
+    const appIdEnv = new Map(withAppId.podTemplate.containers[0]!.env!.map((e) => [e.name, e]));
+    expect(appIdEnv.get(JOB_ENV_KEYS.githubAppId)?.value).toBe("5390512");
   });
 
   it("sets the role, thinking level, work item and target repo values", () => {

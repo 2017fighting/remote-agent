@@ -40,6 +40,8 @@ describe("readAppConfig (App env read at startup)", () => {
     expect(config.jobTtlSecondsAfterFinished).toBe(1800);
     expect(config.namespace).toBe("remote-agent");
     expect(config.omniRouteBaseUrl).toBe("http://omniroute.omniroute.svc.cluster.local:20128/v1");
+    // Empty is the documented default: the runner commits without the id prefix.
+    expect(config.githubAppId).toBe("");
   });
 
   it("reads the four Job budget overrides and the deployment endpoints", () => {
@@ -69,6 +71,7 @@ describe("readAppConfig (App env read at startup)", () => {
         MAX_JOBS_PER_REPO: "1",
         GITHUB_API_BASE_URL: "http://stub-github.svc",
         GIT_BASE_URL: "http://stub-git.svc",
+        GITHUB_APP_ID: "5390512",
       }),
     );
     expect(config.resyncIntervalSeconds).toBe(60);
@@ -76,6 +79,7 @@ describe("readAppConfig (App env read at startup)", () => {
     expect(config.maxJobsPerRepo).toBe(1);
     expect(config.githubApiBaseUrl).toBe("http://stub-github.svc");
     expect(config.gitBaseUrl).toBe("http://stub-git.svc");
+    expect(config.githubAppId).toBe("5390512");
   });
 
   it("rejects a resync interval at or above the 1800s token renewal threshold (ADR-0014)", () => {

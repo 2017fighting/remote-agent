@@ -159,6 +159,7 @@ function tokenVolumeMount(): K8sVolumeMount {
 
 function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
   const { config, targetRepo, issueNumber, specNumber, role } = input;
+  const name = jobName(targetRepo, issueNumber);
   return [
     { name: JOB_ENV_KEYS.agentRole, value: role },
     { name: JOB_ENV_KEYS.agentThinkingLevel, value: AGENT_THINKING_LEVEL },
@@ -167,6 +168,9 @@ function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
     { name: JOB_ENV_KEYS.specNumber, value: String(specNumber) },
     { name: JOB_ENV_KEYS.gitBaseUrl, value: config.gitBaseUrl },
     { name: JOB_ONLY_ENV_KEYS.gitRemoteUrl, value: gitRemoteUrl(config.gitBaseUrl, targetRepo) },
+    // Bot identity for agent commits (ADR-0009). Empty is meaningful: the runner
+    // then commits as `remote-agent[bot]` without the app id prefix.
+    { name: JOB_ENV_KEYS.githubAppId, value: config.githubAppId },
     { name: JOB_ENV_KEYS.omniRouteBaseUrl, value: config.omniRouteBaseUrl },
     { name: JOB_ENV_KEYS.omniRouteModel, value: OMNIROUTE_DEFAULT_MODEL },
     { name: JOB_ENV_KEYS.omniRouteReviewModel, value: OMNIROUTE_REVIEW_MODEL },
@@ -174,6 +178,20 @@ function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
       name: JOB_ENV_KEYS.omniRouteApiKey,
       secretKeyRef: { name: OMNIROUTE_API_KEY_SECRET, key: JOB_ENV_KEYS.omniRouteApiKey },
     },
+    // The runner writes its run result on its own Job (ADR-0007), so it needs
+    // both identifiers. They come from different sources on purpose:
+    //
+    // `JOB_NAMESPACE` is the pod's own namespace, which the downward API reports.
+    //
+    // `JOB_NAME` is a literal, **not** `fieldRef: metadata.name`: in a container
+    // the downward API resolves `metadata.name` to the *pod* name, and a Job's
+    // pod is `<job-name>-<random5>`. `deriveJobName()` in the runner prefers
+    // `JOB_NAME` from env over the deterministic rule, so a pod name here would
+    // make every run-result PATCH target a Job that does not exist (404) and the
+    // App would judge each run `error`. The App already knows the one right
+    // value — the same `jobName()` rule the manifest's `metadata.name` uses.
+    { name: JOB_ENV_KEYS.jobName, value: name },
+    { name: JOB_ENV_KEYS.jobNamespace, valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
   ];
 }
 
