@@ -1,5 +1,4 @@
 import { ANNOTATIONS, jobName, pvcName } from "@remote-agent/shared";
-import type { AppConfig } from "./config.js";
 import type { GitHubIssue, GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sContainerStatus, K8sJob, K8sPod, K8sPort } from "./ports/K8sPort.js";
 import {
@@ -40,7 +39,6 @@ import {
  */
 
 export interface OutcomeStepDeps {
-  config: AppConfig;
   github: GitHubPort;
   k8s: K8sPort;
   /** Judged-at clock for `expires-at`; injected so tests can pin the date. */

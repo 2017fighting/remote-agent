@@ -63,7 +63,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   //    that are still in T3 — so a replay over the post-judge world cannot read
   //    it a second time.
   await handleOutcomes(
-    { config, github, k8s, now: deps.now ?? (() => new Date()) },
+    { github, k8s, now: deps.now ?? (() => new Date()) },
     issues,
     new Map(jobs.map((job) => [job.name, job])),
     pods,
