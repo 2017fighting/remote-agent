@@ -768,7 +768,7 @@ async function readStubState(runner: Runner, context: string): Promise<StubState
     "kubectl",
     ["--context", context, "-n", NAMESPACE, "exec", "deploy/stub-github", "--",
      "node", "-e",
-     'process.stdout.write(await (await fetch("http://127.0.0.1:8080/__state")).text())'],
+     'fetch("http://127.0.0.1:8080/__state").then((r) => r.text()).then((t) => process.stdout.write(t))'],
     { allowFailure: true },
   );
   if (result.exitCode !== 0) {
