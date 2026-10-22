@@ -209,9 +209,7 @@ export interface ReviewerConversation {
   id: number;
   /** The tool names the conversation's agent offers, in registry order. */
   tools: string[];
-  /** The rendered system prompt (`instructions`). */
-  systemPrompt: string;
-  /** The first user message the reviewer received. */
+  /** The first message the reviewer received: its rendered axis template. */
   firstMessage: string;
 }
 
@@ -239,7 +237,6 @@ export async function reviewerConversations(
       found.push({
         id: record.id,
         tools: agent.tools.map((tool) => tool.name),
-        systemPrompt: agent.instructions ?? "",
         firstMessage: messageText(user?.model?.[0]),
       });
     }

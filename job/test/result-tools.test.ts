@@ -276,19 +276,19 @@ describe("#40 code_review", () => {
     );
 
     const reviewers = await reviewerConversations(fixture);
-    const spec = reviewers.find((reviewer) => reviewer.systemPrompt.includes("# Spec axis"));
-    const standards = reviewers.find((reviewer) => reviewer.systemPrompt.includes("# Standards axis"));
+    const spec = reviewers.find((reviewer) => reviewer.firstMessage.includes("# Spec axis"));
+    const standards = reviewers.find((reviewer) => reviewer.firstMessage.includes("# Standards axis"));
     expect(spec).toBeDefined();
     expect(standards).toBeDefined();
     // Spec axis: its own template, the literal fixed point, the spec ref and body.
-    expect(spec!.systemPrompt).toContain(fixedPoint);
-    expect(spec!.systemPrompt).toContain("2017fighting/remote-agent#33");
-    expect(spec!.systemPrompt).toContain("SPEC BODY TEXT");
+    expect(spec!.firstMessage).toContain(fixedPoint);
+    expect(spec!.firstMessage).toContain("2017fighting/remote-agent#33");
+    expect(spec!.firstMessage).toContain("SPEC BODY TEXT");
     // Standards axis: its own template plus the real list, no spec text.
-    expect(standards!.systemPrompt).toContain(fixedPoint);
-    expect(standards!.systemPrompt).toContain("CODING_STANDARDS.md");
-    expect(standards!.systemPrompt).toContain("CONTRIBUTING.md");
-    expect(standards!.systemPrompt).not.toContain("SPEC BODY TEXT");
+    expect(standards!.firstMessage).toContain(fixedPoint);
+    expect(standards!.firstMessage).toContain("CODING_STANDARDS.md");
+    expect(standards!.firstMessage).toContain("CONTRIBUTING.md");
+    expect(standards!.firstMessage).not.toContain("SPEC BODY TEXT");
   });
 
   it("scans the working copy for standards files and reports an empty table when there are none", async () => {
@@ -307,9 +307,9 @@ describe("#40 code_review", () => {
     await run(depsFor(fixture, recorded));
 
     const reviewers = await reviewerConversations(fixture);
-    const standards = reviewers.find((reviewer) => reviewer.systemPrompt.includes("# Standards axis"));
-    expect(standards!.systemPrompt).toContain("CONTRIBUTING.md");
-    expect(standards!.systemPrompt).toContain("docs/CODING_STANDARDS.md");
+    const standards = reviewers.find((reviewer) => reviewer.firstMessage.includes("# Standards axis"));
+    expect(standards!.firstMessage).toContain("CONTRIBUTING.md");
+    expect(standards!.firstMessage).toContain("docs/CODING_STANDARDS.md");
   });
 
   it("bounces a bad fixed point without creating a reviewer conversation", async () => {

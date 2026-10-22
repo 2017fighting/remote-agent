@@ -35,9 +35,9 @@ export interface ReviewerDeps {
 
 /**
  * One review round: two independent reviewer conversations, one per axis, each
- * reading its own template as its system prompt (spec #33 §6). Neither sees the
- * other's report, and neither can reach a review tool: `reviewerExtension()` is
- * the conversation's whole tool table.
+ * reading its own template (spec #33 §6). Neither sees the other's report, and
+ * neither can reach a review tool: `reviewerExtension()` is the conversation's
+ * whole tool table.
  */
 export async function runReview(deps: ReviewerDeps, fixedPoint: string): Promise<ReviewReports> {
   const spec = await runAxis(deps, "spec", fixedPoint);
@@ -46,7 +46,7 @@ export async function runReview(deps: ReviewerDeps, fixedPoint: string): Promise
 }
 
 async function runAxis(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string): Promise<string> {
-  const instructions = await axisPrompt(deps, axis, fixedPoint);
+  const prompt = await axisPrompt(deps, axis, fixedPoint);
   const conversation = await deps.harness.createConversation(
     {
       // Foreground: the `code_review` call holds the round, so its own task owns
@@ -58,7 +58,6 @@ async function runAxis(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string)
         // Exactly one extension: the reviewer's three tools. No result tools, no
         // coding tools (write/edit), and no `code_review` itself.
         extensions: [reviewerExtension()],
-        instructions,
         cwd: deps.repo,
       },
     },
@@ -66,10 +65,10 @@ async function runAxis(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string)
   );
   deps.log(`reviewer-open axis=${axis} conversation=${conversation.id}`);
 
-  const submission = await conversation.submit(
-    { type: "input", content: `Run the ${axis} review now; report only.` },
-    context,
-  );
+  // The axis template is the conversation's first message, the same way the
+  // implementer's prompt is: every injected value (fixed point, spec ref and body,
+  // standards list) arrives with it and no file has to be found (spec #33 §7).
+  const submission = await conversation.submit({ type: "input", content: prompt }, context);
   const settled = await submission.wait(context);
   if (settled.status !== "done" || settled.type !== "input") {
     throw new Error(`reviewer ${axis} ended without an answer: status=${settled.status}`);
