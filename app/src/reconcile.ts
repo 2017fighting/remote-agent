@@ -2,8 +2,9 @@ import type { AppConfig } from "./config.js";
 import type { GitHubIssue, GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sJob, K8sPod, K8sPort, K8sPvc } from "./ports/K8sPort.js";
 import type { PassCounters, Trigger } from "./scheduler.js";
+import { jobName } from "@remote-agent/shared";
 import { planFrontier } from "./planners/frontier.js";
-import { labelGate } from "./planners/gate.js";
+import { claimGate, labelGate } from "./planners/gate.js";
 import { admitSlot, countSlotUsage, occupySlot } from "./planners/slots.js";
 import { renderWorkItem, serializeWorkItem } from "./renders/work-item.js";
 import { claimTicket } from "./claim.js";
@@ -62,8 +63,11 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   const candidates: Array<{ spec: GitHubIssue; ticket: GitHubIssue }> = [];
   for (const spec of specsInOrder(world.issues)) {
     const plan = await planSpec(deps, spec, jobsByName);
+    // `waiting` counts tickets that are inside the label gate but held by a
+    // lingering Job object — the k8s half of the Claim-gate (ADR-0013). It is
+    // the same shape as Defer: no write, only this counter.
+    waiting += plan.waiting;
     if (plan.kind === "claimable") candidates.push({ spec, ticket: plan.ticket });
-    else if (plan.kind === "waiting") waiting += 1;
   }
 
   // 4. Execute claims serially until a Slot is refused or a claim fails.
@@ -128,13 +132,18 @@ function specsInOrder(issues: GitHubIssue[]): GitHubIssue[] {
  * What one spec wants this pass. `closeout-ready` and `out-of-gate` are already
  * computed here (they are the S1 branches) but only Claim acts on them today:
  * spec advance / closeout is #38.
+ *
+ * `waiting` is orthogonal to `kind`: it counts this spec's tickets that are
+ * inside the label gate but held back by a lingering Job object.
  */
 type SpecPlan =
-  | { kind: "claimable"; ticket: GitHubIssue }
+  | { kind: "claimable"; ticket: GitHubIssue; waiting: number }
   /** Open sub-issues exist but none passes the Claim-gate: log only. */
-  | { kind: "waiting" }
-  | { kind: "closeout-ready" }
-  | { kind: "out-of-gate" };
+  | { kind: "idle"; waiting: number }
+  /** Every sub-issue is closed — the closeout Job's turn (#38). */
+  | { kind: "closeout-ready"; waiting: number }
+  /** Not a spec, or its own label gate is closed: nothing to do. */
+  | { kind: "out-of-gate"; waiting: number };
 
 /** A spec only drives work while it is itself in the label gate (S1). */
 async function planSpec(
@@ -143,11 +152,11 @@ async function planSpec(
   jobsByName: ReadonlyMap<string, K8sJob>,
 ): Promise<SpecPlan> {
   const subIssues = await deps.github.listSubIssues(spec.ownerRepo, spec.number);
-  if (subIssues.length === 0) return { kind: "out-of-gate" };
+  if (subIssues.length === 0) return { kind: "out-of-gate", waiting: 0 };
 
   const specBlockers = await deps.github.listBlockers(spec.ownerRepo, spec.number);
   const openSpecBlockers = specBlockers.filter((blocker) => blocker.state === "open").length;
-  if (!labelGate(spec, openSpecBlockers).passed) return { kind: "out-of-gate" };
+  if (!labelGate(spec, openSpecBlockers).passed) return { kind: "out-of-gate", waiting: 0 };
 
   const openBlockerCounts = new Map<number, number>();
   for (const issue of subIssues) {
@@ -155,8 +164,22 @@ async function planSpec(
     openBlockerCounts.set(issue.number, blockers.filter((blocker) => blocker.state === "open").length);
   }
 
+  const waiting = subIssues.filter(
+    (issue) =>
+      claimGate({
+        issue,
+        openBlockerCount: openBlockerCounts.get(issue.number) ?? 0,
+        existingJob: jobsByName.get(jobName(spec.ownerRepo, issue.number)) ?? null,
+      }).passed === false &&
+      claimGate({
+        issue,
+        openBlockerCount: openBlockerCounts.get(issue.number) ?? 0,
+        existingJob: null,
+      }).passed,
+  ).length;
+
   const frontier = planFrontier({ ownerRepo: spec.ownerRepo, subIssues, openBlockerCounts, jobsByName });
-  if (frontier.kind === "has-frontier") return { kind: "claimable", ticket: frontier.ticket };
-  if (frontier.kind === "no-frontier-open-sub-issues") return { kind: "waiting" };
-  return { kind: "closeout-ready" };
+  if (frontier.kind === "has-frontier") return { kind: "claimable", ticket: frontier.ticket, waiting };
+  if (frontier.kind === "no-frontier-open-sub-issues") return { kind: "idle", waiting };
+  return { kind: "closeout-ready", waiting };
 }

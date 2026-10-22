@@ -38,16 +38,30 @@ describe("reconcile pass: counters", () => {
     expect(result.slotsMax).toBe(5);
   });
 
-  it("counts a spec with open sub-issues but no frontier as waiting", async () => {
+  it("counts a ticket held by a lingering Job object as waiting (ADR-0013), without any write", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({ jobs: [managedJob(REPO, 34)] });
+    const result = await runReconcilePass({ github, k8s, config }, "tick");
+    expect(result.waiting).toBe(1);
+    expect(result.deferred).toBe(0);
+    expect(result.slotsUsed).toBe(0);
+    expect(github.writeLog).toEqual([]);
+    expect(k8s.writeLog).toEqual([]);
+  });
+
+  it("does not count blocked, errored or already-claimed tickets as waiting", async () => {
+    // Those tickets need a human or are already running; "waiting" is only the
+    // ADR-0013 shape (in the gate, held by an old Job object).
     const cases: Record<string, string[]> = {
       blocked: ["ready-for-human", "agent:blocked", "agent:implement"],
       errored: ["ready-for-human", "agent:error", "agent:implement"],
       "already claimed": [...GATE_LABELS, "agent:in-progress"],
+      "not authorized yet": ["ready-for-agent"],
     };
     for (const [name, labels] of Object.entries(cases)) {
       const github = specWorld({ specNumber: 33, subIssueNumbers: [34], subIssueLabels: { 34: labels } });
       const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
-      expect(result.waiting, name).toBe(1);
+      expect(result.waiting, name).toBe(0);
       expect(result.deferred, name).toBe(0);
       expect(github.writeLog, name).toEqual([]);
     }
