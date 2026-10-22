@@ -1,3 +1,4 @@
+import type { WorkItemComment, WorkItemV1 } from "@remote-agent/shared";
 import type { GitHubComment, GitHubIssue } from "../ports/GitHubPort.js";
 
 /**
@@ -5,41 +6,28 @@ import type { GitHubComment, GitHubIssue } from "../ports/GitHubPort.js";
  * rendered as JSON and handed to the Job through one env var — no new object,
  * no new channel.
  *
+ * The wire shape is `WorkItemV1` from `@remote-agent/shared`: one definition for
+ * the App that renders it and the runner that parses it. This module only owns
+ * the App's half — what goes in, and the byte budget.
+ *
  * Budget is 512 KB. The body is always kept verbatim (it is the ticket's whole
  * acceptance surface); comments are dropped **oldest first** and replaced by a
  * single pointer line, so what survives is the most recent discussion.
- *
- * The wire shape is work item v1; the runner is its reader and lives in the Job
- * image, so the fields here are the ones the runner parses.
  */
 
 export const WORK_ITEM_MAX_BYTES = 512 * 1024;
 export const OMITTED_COMMENTS_PLACEHOLDER = "… earlier comments omitted, see GitHub";
 
-export interface WorkItemComment {
-  author: string;
-  body: string;
-  createdAt: string;
-}
-
-/** Work item v1 — the JSON payload of `AGENT_WORK_ITEM`. */
-export interface WorkItemV1 {
-  v: 1;
-  /** Target repo as `owner/name`. */
-  repo: string;
-  /** This issue's number (a ticket, or the spec itself for the spec role). */
-  number: number;
-  /** The spec this work item belongs to. */
-  specNumber: number;
-  title: string;
-  body: string;
-  /** Oldest first. */
-  comments: WorkItemComment[];
-}
-
 export interface WorkItemInput {
   issue: GitHubIssue;
   specNumber: number;
+  /**
+   * The parent spec's body, for a ticket's work item. The Spec axis of
+   * `code_review` compares the diff against it, so a ticket run without it
+   * reports "no spec available". Left absent for the spec role, whose `body`
+   * already is the spec body.
+   */
+  specBody?: string;
   /** Oldest first, as GitHubPort.listComments returns them. */
   comments: GitHubComment[];
 }
@@ -52,6 +40,8 @@ export function renderWorkItem(input: WorkItemInput): WorkItemV1 {
     specNumber: input.specNumber,
     title: input.issue.title,
     body: input.issue.body,
+    // Absent, not `undefined`: the spec role must not carry the key at all.
+    ...(input.specBody === undefined ? {} : { specBody: input.specBody }),
     comments: input.comments.map((comment) => ({
       author: comment.author ?? "",
       body: comment.body,
