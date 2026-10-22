@@ -2,6 +2,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { run } from "../src/internal/runner.js";
+import { ReviewRoundDoc } from "../src/internal/run-docs.js";
+import { Harness, createRegistry } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { specBodyFor } from "../src/internal/runner.js";
 import type { RunnerEnv } from "../src/internal/env.js";
 import { findStandardsFiles } from "../src/internal/standards-files.js";
@@ -379,6 +383,43 @@ describe("#40 code_review", () => {
   });
 });
 
+describe("#40 the review round is durable", () => {
+  it("records the round on the volume, so a later pod finds it taken", async () => {
+    fixture = await runnerFixture();
+    const fixedPoint = await git(["rev-parse", "HEAD"], fixture.worktree);
+    await commitWork(fixture, "work.txt");
+    const recorded: Recorded = { events: [], results: [] };
+    // The pod dies after the Result tool committed but before the push landed.
+    fixture.script(reviewScript(fixedPoint, [finishTicketCall()]));
+    await expect(
+      run(
+        depsFor(fixture, recorded, {
+          standardsFiles: async () => [],
+          push: async () => {
+            throw new Error("simulated push failure");
+          },
+        }),
+      ),
+    ).rejects.toThrow(/simulated push failure/);
+
+    // What the next pod reads: the round is committed with the same fixed point, so
+    // its `code_review` call bounces instead of fanning out a second time.
+    const harness = await Harness.open(
+      await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+      { models: fixture.models, registry: createRegistry() },
+      BACKGROUND_CONTEXT,
+    );
+    try {
+      const root = await harness.root(BACKGROUND_CONTEXT);
+      const round = await harness.snapshot(ReviewRoundDoc, root.id, BACKGROUND_CONTEXT);
+      expect(round).toMatchObject({ fixedPoint, spec: "spec: ok", standards: "standards: ok" });
+    } finally {
+      await harness.close(BACKGROUND_CONTEXT);
+    }
+    expect(await reviewerConversations(fixture)).toHaveLength(2);
+  });
+});
+
 describe("#40 prompt carrier", () => {
   const REPO_ROOT = join(import.meta.dirname, "..", "..");
   const KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"];
@@ -415,5 +456,42 @@ describe("#40 the Spec axis' comparison surface", () => {
 
   it("leaves a ticket run without a specBody empty rather than reusing the ticket body", () => {
     expect(specBodyFor("implement-ticket", { ...WORK_ITEM, body: "the ticket" })).toBe("");
+  });
+
+  it("reaches the reviewer through the real review-spec template: spec role uses its body", async () => {
+    fixture = await runnerFixture();
+    const fixedPoint = await git(["rev-parse", "HEAD"], fixture.worktree);
+    await commitWork(fixture, "work.txt");
+    const recorded: Recorded = { events: [], results: [] };
+    const env = specEnv(fixture, { ...WORK_ITEM, number: 33, body: "THE SPEC BODY" });
+    fixture.script(reviewScript(fixedPoint, [finishSpecCall()]));
+    await run(depsFor(fixture, recorded, { env, standardsFiles: async () => [] }));
+
+    const specAxis = (await reviewerConversations(fixture, env)).find((reviewer) =>
+      reviewer.firstMessage.includes("# Spec axis"),
+    );
+    expect(specAxis!.firstMessage).toContain("2017fighting/remote-agent#33");
+    expect(specAxis!.firstMessage).toContain("THE SPEC BODY");
+  });
+
+  it("reaches the reviewer through the real review-spec template: a ticket without specBody says so", async () => {
+    fixture = await runnerFixture();
+    const fixedPoint = await git(["rev-parse", "HEAD"], fixture.worktree);
+    await commitWork(fixture, "work.txt");
+    const recorded: Recorded = { events: [], results: [] };
+    // The fixture's review-spec template renders {{spec_body}} verbatim; the real
+    // template's own "no spec available" instruction is asserted against the file
+    // in the prompt-carrier block, and the empty value is what reaches it here.
+    const env = { ...fixture.env, workItem: { ...WORK_ITEM, body: "THE TICKET BODY" } };
+    fixture.script(reviewScript(fixedPoint, [finishTicketCall()]));
+    await run(depsFor(fixture, recorded, { env, standardsFiles: async () => [] }));
+
+    const specAxis = (await reviewerConversations(fixture, env)).find((reviewer) =>
+      reviewer.firstMessage.includes("# Spec axis"),
+    );
+    // Never the ticket body: the axis compares against the spec, and an empty body
+    // makes the real template answer "no spec available" instead of a fake pass.
+    expect(specAxis!.firstMessage).not.toContain("THE TICKET BODY");
+    expect(specAxis!.firstMessage).toContain(fixedPoint);
   });
 });
