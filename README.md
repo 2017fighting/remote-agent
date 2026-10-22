@@ -156,4 +156,4 @@ open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ �
 | 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent` | 同左 |
 | 额度满 · Defer | 一字不变 | 一字不变 |
 
-每个 `error` / `blocked` 终态 App 都会发一条评论（reason + Job/pod 名 + pod 终态证据 + 保留的 Ticket PVC 名 + 它的保留期 + `kubectl logs` 指引）——因为那几条路上根本没有 annotation。
+每个 `error` / `blocked` 终态 App 都会发一条评论（reason + Job/pod 名 + pod 终态证据 + 那块 Ticket PVC 的名字与它的 `remote-agent/expires-at` + `kubectl logs` 指引）——因为那几条路上根本没有 annotation。
