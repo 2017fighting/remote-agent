@@ -2,136 +2,147 @@ import { describe, expect, it } from "vitest";
 import { runReconcilePass, type WorldSnapshot } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
-import { existingJob, existingPvc, testConfig } from "./helpers.js";
+import { existingPvc, testConfig } from "./helpers.js";
+import { GATE_LABELS, REPO, issue, managedJob, specWorld } from "./world.js";
 
 /**
- * Reconcile pass skeleton (#34): read world → plan (always empty in this
- * ticket) → execute → counters. Reconcile is stateless across passes
- * (ADR-0001): no in-memory indexes; every pass recomputes from the world.
- * Replayability (spec #33 §2): running twice on the same world produces zero
- * new external writes in the second run.
+ * Pass-level behaviour of reconcile (spec #33 §2): read world → plan → execute
+ * → counters. Reconcile is stateless across passes (ADR-0001), so every pass
+ * recomputes from the world, and a replay over an unchanged world issues zero
+ * new external writes.
+ *
+ * Claim-specific behaviour (write order, failure injection, 409/403, job
+ * object decision surface) lives in claim.test.ts on the same seam.
  */
 
 const config = testConfig();
 
-function makeWorld(): { github: FakeGitHub; k8s: FakeK8s } {
-  const github = new FakeGitHub({
-    issues: [
-      {
-        ownerRepo: "2017fighting/remote-agent",
-        number: 33,
-        state: "open",
-        title: "Spec: remote-agent v1",
-        body: "...",
-        labels: ["ready-for-agent", "agent:implement"],
-      },
-      {
-        ownerRepo: "2017fighting/remote-agent",
-        number: 34,
-        state: "open",
-        title: "App skeleton",
-        body: "...",
-        labels: ["ready-for-agent", "agent:implement"],
-      },
-    ],
-    subIssues: [{ ownerRepo: "2017fighting/remote-agent", specNumber: 33, issueNumbers: [34] }],
-  });
-  const k8s = new FakeK8s();
-  return { github, k8s };
+/** A world with no spec in it: nothing to claim, so the pass writes nothing. */
+function idleWorld() {
+  return {
+    github: new FakeGitHub({ issues: [issue(34, GATE_LABELS)] }),
+    k8s: new FakeK8s(),
+  };
 }
 
-describe("reconcile pass skeleton", () => {
-  it("reads the world and returns the five counters with zero used slots", async () => {
-    const { github, k8s } = makeWorld();
+describe("reconcile pass: counters", () => {
+  it("returns the five counters and the global Slot cap", async () => {
+    const { github, k8s } = idleWorld();
     const result = await runReconcilePass({ github, k8s, config }, "startup");
-    expect(result).toEqual({
-      slotsUsed: 0,
-      slotsMax: 3,
-      deferred: 0,
-      renewed: 0,
-      waiting: 0,
-    });
+    expect(result).toEqual({ slotsUsed: 0, slotsMax: 3, deferred: 0, renewed: 0, waiting: 0 });
   });
 
-  it("executes no writes against a world this ticket has no planner for", async () => {
-    const { github, k8s } = makeWorld();
-    await runReconcilePass({ github, k8s, config }, "webhook");
-    expect(github.writeLog).toHaveLength(0);
-    expect(k8s.writeLog).toHaveLength(0);
-    expect(github.issues[1]!.labels).toEqual(["ready-for-agent", "agent:implement"]);
+  it("reports the configured global cap (MAX_JOBS_GLOBAL)", async () => {
+    const { github, k8s } = idleWorld();
+    const result = await runReconcilePass({ github, k8s, config: testConfig({ MAX_JOBS_GLOBAL: "5" }) }, "tick");
+    expect(result.slotsMax).toBe(5);
   });
 
-  it("counts a held slot when a managed Job has a non-terminal pod; terminal pods release it", async () => {
-    const { github, k8s } = makeWorld();
-    const jobName = "agent-2017fighting-remote-agent-34";
-    k8s.jobs.push(
-      existingJob({
-        name: jobName,
-        labels: {
-          "app.kubernetes.io/managed-by": "remote-agent",
-          "remote-agent/ticket": "2017fighting/remote-agent#34",
-        },
-      }),
-    );
-    k8s.pvcs.push(existingPvc(jobName));
+  it("counts a spec with open sub-issues but no frontier as waiting", async () => {
+    const cases: Record<string, string[]> = {
+      blocked: ["ready-for-human", "agent:blocked", "agent:implement"],
+      errored: ["ready-for-human", "agent:error", "agent:implement"],
+      "already claimed": [...GATE_LABELS, "agent:in-progress"],
+    };
+    for (const [name, labels] of Object.entries(cases)) {
+      const github = specWorld({ specNumber: 33, subIssueNumbers: [34], subIssueLabels: { 34: labels } });
+      const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
+      expect(result.waiting, name).toBe(1);
+      expect(result.deferred, name).toBe(0);
+      expect(github.writeLog, name).toEqual([]);
+    }
+  });
+});
 
-    // No pods → no slots held.
+describe("reconcile pass: Slot occupancy", () => {
+  it("counts a held Slot when a managed Job has a non-terminal pod; terminal pods release it", async () => {
+    const { github, k8s } = idleWorld();
+    const job = managedJob(REPO, 34);
+    k8s.jobs.push(job);
+    k8s.pvcs.push(existingPvc(job.name));
+
+    // No pods → no Slots held.
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
 
-    // A running pod holds one slot.
-    k8s.pods.push({
-      name: `${jobName}-pod`,
-      namespace: "remote-agent",
-      ownerJobName: jobName,
-      phase: "Running",
-      deleting: false,
-    });
+    k8s.pods.push({ name: `${job.name}-pod`, namespace: "remote-agent", ownerJobName: job.name, phase: "Running", deleting: false });
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(1);
 
     // Terminating still counts as holding (spec §5).
     k8s.pods[0]!.deleting = true;
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(1);
 
-    // A terminal pod releases the slot.
+    // A terminal pod releases the Slot.
     k8s.pods[0]!.phase = "Succeeded";
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
   });
 
   it("ignores pods owned by Jobs the App does not manage", async () => {
-    const { github, k8s } = makeWorld();
-    k8s.jobs.push(existingJob({ name: "somebody-elses-job" }));
-    k8s.pods.push({
-      name: "foreign-pod",
-      namespace: "remote-agent",
-      ownerJobName: "somebody-elses-job",
-      phase: "Running",
-      deleting: false,
-    });
+    const { github, k8s } = idleWorld();
+    k8s.jobs.push({ name: "somebody-elses-job", namespace: "remote-agent", labels: {}, annotations: {}, conditions: [], finished: false });
+    k8s.pods.push({ name: "foreign-pod", namespace: "remote-agent", ownerJobName: "somebody-elses-job", phase: "Running", deleting: false });
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
   });
 
-  it("replayability: two passes on the same world → the second pass makes zero new writes", async () => {
-    const { github, k8s } = makeWorld();
-    const first = await runReconcilePass({ github, k8s, config }, "startup");
-    expect(first.slotsUsed).toBe(0);
+  it("counts several pods of one Job as one Slot", async () => {
+    const { github, k8s } = idleWorld();
+    const job = managedJob(REPO, 34);
+    k8s.jobs.push(job);
+    for (const phase of ["Pending", "Running"]) {
+      k8s.pods.push({ name: `${job.name}-${phase}`, namespace: "remote-agent", ownerJobName: job.name, phase, deleting: false });
+    }
+    expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(1);
+  });
+});
 
-    const githubWritesBefore = github.writeLog.length;
-    const k8sWritesBefore = k8s.writeLog.length;
-    const second = await runReconcilePass({ github, k8s, config }, "webhook");
-    expect(github.writeLog.length).toBe(githubWritesBefore);
-    expect(k8s.writeLog.length).toBe(k8sWritesBefore);
-    expect(second).toEqual(first);
+describe("reconcile pass: statelessness and replayability", () => {
+  it("exposes the world snapshot it read (no state carried between passes)", async () => {
+    const { github, k8s } = idleWorld();
+    const seen: WorldSnapshot[] = [];
+    await runReconcilePass({ github, k8s, config, onWorldRead: (world) => seen.push(world) }, "startup");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.issues.map((i) => i.number)).toEqual([34]);
   });
 
-  it("exposes the world snapshot it read (no state carried between passes)", async () => {
-    const { github, k8s } = makeWorld();
-    const seen: WorldSnapshot[] = [];
-    const result = await runReconcilePass(
-      { github, k8s, config, onWorldRead: (w) => seen.push(w) },
-      "startup",
-    );
-    expect(seen).toHaveLength(1);
-    expect(seen[0]!.issues.map((i) => i.number)).toEqual([33, 34]);
-    expect(result.slotsMax).toBe(3);
+  it("a claim pass followed by a second pass over the new world makes zero new writes", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    const k8s = new FakeK8s();
+    await runReconcilePass({ github, k8s, config }, "startup");
+
+    const githubWrites = github.writeLog.length;
+    const k8sWrites = k8s.writeLog.length;
+    expect(githubWrites).toBeGreaterThan(0);
+    expect(k8sWrites).toBeGreaterThan(0);
+
+    // The Job controller starts the pod; from now on the Job holds its Slot.
+    const job = k8s.jobs[0]!;
+    k8s.pods.push({ name: `${job.name}-pod`, namespace: "remote-agent", ownerJobName: job.name, phase: "Running", deleting: false });
+
+    const second = await runReconcilePass({ github, k8s, config }, "tick");
+    expect(github.writeLog.length).toBe(githubWrites);
+    expect(k8s.writeLog.length).toBe(k8sWrites);
+    expect(second.slotsUsed).toBe(1);
+  });
+
+  it("makes no writes at all when nothing is claimable", async () => {
+    const { github, k8s } = idleWorld();
+    await runReconcilePass({ github, k8s, config }, "webhook");
+    expect(github.writeLog).toEqual([]);
+    expect(k8s.writeLog).toEqual([]);
+  });
+
+  it("a spec that is closed or out of the gate never yields a claim", async () => {
+    for (const spec of [
+      issue(33, GATE_LABELS, { state: "closed" }),
+      issue(33, ["ready-for-agent"]),
+      issue(33, [...GATE_LABELS, "agent:blocked"]),
+    ]) {
+      const github = specWorld({ specNumber: 33, subIssueNumbers: [34], extraIssues: [] });
+      github.issues[0] = spec;
+      const k8s = new FakeK8s();
+      const result = await runReconcilePass({ github, k8s, config }, "tick");
+      expect(github.writeLog).toEqual([]);
+      expect(k8s.writeLog).toEqual([]);
+      expect(result.slotsUsed).toBe(0);
+    }
   });
 });
