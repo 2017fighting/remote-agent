@@ -6,6 +6,10 @@ export const VOLUME_PATHS = {
   home: "/mnt/agent/home",
   seedMarker: "/mnt/agent/state/seeded.json",
   seedError: "/mnt/agent/state/seed-error.json",
+  /** Directory the per-Job Secret is mounted at (Secrets always mount as a directory). */
+  tokenMount: "/mnt/agent/token",
+  /** The token file inside that mount; read fresh at push time (ADR-0009: never env, never a URL). */
+  tokenFile: "/mnt/agent/token/token",
 } as const;
 
 /** Marker inside App-posted GitHub comments: `<!-- remote-agent:<kind>:<job-name> -->`. */

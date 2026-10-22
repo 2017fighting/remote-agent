@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { runReconcilePass, type WorldSnapshot } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
-import type { AppConfig } from "../src/config.js";
+import { existingJob, existingPvc, testConfig } from "./helpers.js";
 
 /**
  * Reconcile pass skeleton (#34): read world → plan (always empty in this
@@ -12,13 +12,7 @@ import type { AppConfig } from "../src/config.js";
  * new external writes in the second run.
  */
 
-const config: AppConfig = {
-  resyncIntervalSeconds: 300,
-  maxJobsGlobal: 3,
-  maxJobsPerRepo: 2,
-  githubApiBaseUrl: "https://api.github.com",
-  gitBaseUrl: "https://github.com",
-};
+const config = testConfig();
 
 function makeWorld(): { github: FakeGitHub; k8s: FakeK8s } {
   const github = new FakeGitHub({
@@ -69,27 +63,26 @@ describe("reconcile pass skeleton", () => {
 
   it("counts a held slot when a managed Job has a non-terminal pod; terminal pods release it", async () => {
     const { github, k8s } = makeWorld();
-    const job = await k8s.createJob({
-      name: "agent-2017fighting-remote-agent-34",
-      namespace: "remote-agent",
-      labels: {
-        "app.kubernetes.io/managed-by": "remote-agent",
-        "remote-agent/ticket": "2017fighting/remote-agent#34",
-      },
-      annotations: {},
-      conditions: [],
-      finished: false,
-    });
-    await k8s.createPvc({ name: job.name, namespace: "remote-agent", annotations: {}, labels: {} });
+    const jobName = "agent-2017fighting-remote-agent-34";
+    k8s.jobs.push(
+      existingJob({
+        name: jobName,
+        labels: {
+          "app.kubernetes.io/managed-by": "remote-agent",
+          "remote-agent/ticket": "2017fighting/remote-agent#34",
+        },
+      }),
+    );
+    k8s.pvcs.push(existingPvc(jobName));
 
     // No pods → no slots held.
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(0);
 
     // A running pod holds one slot.
     k8s.pods.push({
-      name: `${job.name}-pod`,
+      name: `${jobName}-pod`,
       namespace: "remote-agent",
-      ownerJobName: job.name,
+      ownerJobName: jobName,
       phase: "Running",
       deleting: false,
     });
@@ -106,18 +99,11 @@ describe("reconcile pass skeleton", () => {
 
   it("ignores pods owned by Jobs the App does not manage", async () => {
     const { github, k8s } = makeWorld();
-    const foreign = await k8s.createJob({
-      name: "somebody-elses-job",
-      namespace: "remote-agent",
-      labels: {},
-      annotations: {},
-      conditions: [],
-      finished: false,
-    });
+    k8s.jobs.push(existingJob({ name: "somebody-elses-job" }));
     k8s.pods.push({
       name: "foreign-pod",
       namespace: "remote-agent",
-      ownerJobName: foreign.name,
+      ownerJobName: "somebody-elses-job",
       phase: "Running",
       deleting: false,
     });
