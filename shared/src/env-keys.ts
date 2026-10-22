@@ -27,4 +27,10 @@ export const JOB_ENV_KEYS = {
   omniRouteModel: "OMNIROUTE_MODEL",
   omniRouteReviewModel: "OMNIROUTE_REVIEW_MODEL",
   omniRouteApiKey: "OMNIROUTE_API_KEY",
+  /** Bot identity for agent commits: `<GITHUB_APP_ID>+remote-agent[bot]@users.noreply.github.com` (ADR-0009). */
+  githubAppId: "GITHUB_APP_ID",
+  /** The Job's own name, from the downward API: the runner writes its run result on it (ADR-0007). */
+  jobName: "JOB_NAME",
+  /** The Job's namespace, from the downward API. */
+  jobNamespace: "JOB_NAMESPACE",
 } as const;
