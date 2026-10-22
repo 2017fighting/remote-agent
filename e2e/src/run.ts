@@ -392,21 +392,40 @@ async function loadImages(runner: Runner, clusterName: string): Promise<void> {
   // Assert the reference the App bakes is actually present in the cluster: a
   // mismatch here shows up much later as `Init:ImagePullBackOff` on every Job,
   // which reads like a Job bug rather than a harness bug.
-  const baked = await runner.run("node", ["-e", `
-    const { JOB_IMAGE } = await import("./app/src/build-info.ts");
-    process.stdout.write(JOB_IMAGE);
-  `], { cwd: repoRoot, allowFailure: true });
-  const bakedRef = baked.stdout.trim();
-  if (baked.exitCode !== 0 || bakedRef === "") {
-    runner.note("could not read the App's baked Job image reference; skipping the mismatch check");
+  //
+  // Read it from the BUILT image, not from app/src/build-info.ts: the source file
+  // holds the development default (`0.0.0-dev`), and only the image's build arg
+  // rewrites it. Checking the source would compare against a value no cluster ever
+  // sees — which is exactly the false alarm this guard produced on its first run.
+  const imageTag = await readBakedJobImage(runner);
+  if (imageTag === null) {
+    runner.note("could not read the App image's baked Job image reference; skipping the mismatch check");
     return;
   }
-  if (bakedRef !== JOB_IMAGE) {
+  if (imageTag !== JOB_IMAGE) {
     throw new Error(
-      `the App bakes Job image ${bakedRef} but the harness built/loaded ${JOB_IMAGE}: ` +
+      `the App image bakes Job image ${imageTag} but the harness built/loaded ${JOB_IMAGE}: ` +
         "Job pods would fail with ImagePullBackOff. Tag the Job image with the baked reference.",
     );
   }
+}
+
+/** The Job image reference compiled into the App image, or null when unreadable. */
+async function readBakedJobImage(runner: Runner): Promise<string | null> {
+  const script = [
+    'const m = await import("file:///app/build-info.mjs").catch(() => null);',
+    'if (m && m.JOB_IMAGE) { process.stdout.write(m.JOB_IMAGE); process.exit(0); }',
+    'const src = await import("node:fs/promises").then((fs) => fs.readFile("/app/main.mjs", "utf8")).catch(() => "");',
+    'const hit = /(ghcr\.io\/[A-Za-z0-9._\/-]+):([A-Za-z0-9._-]+)/.exec(src);',
+    'if (hit) process.stdout.write(`${hit[1]}:${hit[2]}`);',
+  ].join("\n");
+  const result = await runner.run(
+    "docker",
+    ["run", "--rm", "--entrypoint", "node", APP_IMAGE, "-e", script],
+    { allowFailure: true },
+  );
+  const value = result.stdout.trim();
+  return result.exitCode === 0 && value !== "" ? value : null;
 }
 
 async function waitForDeployment(
