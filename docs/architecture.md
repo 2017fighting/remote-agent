@@ -4,43 +4,44 @@
 
 图里的名词一律取自 `GLOSSARY.md`。与 ADR 不一致的地方不在这里偷偷改，集中在[第 8 节](#8-两处缺口)列出。部署面与 OmniRoute 接线的**已定事实**（namespace、RBAC、secret、镜像、Job env、provider 接线）另在 [`docs/deployment.md`](deployment.md)，不在这里重画。
 
-> **⚠️ 部分图已过期（[ADR-0008](adr/0008-durable-runtime-base.md)）**：执行面基座从 `pi -p --mode json` 换成了 pi-durable（库）+ 自写 runner，因此**第 1、2、6、7 节的图**与**第 8 节的缺口 A** 不再成立：Base PVC / Sync Job / Job snapshot 已退出 v1，终态只有三种（Job `Complete` / `backoffLimit` 耗尽 / `DeadlineExceeded`），pod 重启对 GitHub 不可见，`error` 不再自动重试。**第 3 节的 Spec 循环图另有两处失效（[#16](https://github.com/2017fighting/remote-agent/issues/16)）**：收尾 Job **不再跑 e2e**（`/implement-spec` 原文里没有 e2e，v1 不自行加），`Closes #<spec>` **不由 commit 带**，而是 App 开 PR 时追加进 PR body（ADR-0002 下 agent 不碰 GitHub）。重画归属 spec 阶段（见地图的「Not yet specified」）；在此之前以 `docs/adr/0003`、`0004`、`0005`、`0007`、`0008` 为准。
+图按**已经落地的执行面**画：pi-durable（库）+ 自写 runner（[ADR-0008](adr/0008-durable-runtime-base.md)），没有 Base PVC / Sync Job / snapshot，Job 终态只有三种，pod 重启对 GitHub 不可见。交付门是 kind e2e：它已在 CI 里**required**（`push-images` 把它列进 `needs`，循环没在真集群上跑通就不发镜像），它已经抓到的 11 个生产级致命 bug 记在 [`e2e/README.md`](../e2e/README.md)。
 
 ## 1. 系统全景
 
 ```mermaid
 flowchart TB
     subgraph GH["GitHub"]
-        Issues["issue · label · assignee · sub-issue · PR"]
+        Issues["issue · label · sub-issue · blocker · PR"]
     end
 
     subgraph AppSvc["App · 单副本 TypeScript 服务"]
         Hook["webhook 端点"]
+        Watch["Job watch<br/>ADDED / DELETED"]
         Timer["resync tick<br/>每 5 分钟"]
         Recon["Reconcile pass<br/>幂等重算，无数据库"]
     end
 
     subgraph NS["k8s namespace"]
-        Sync["Sync Job<br/>Base PVC 的唯一写者"]
-        Base[("Base PVC<br/>每 target repo 一个，永不删除")]
-        Snap[("Job snapshot<br/>CSI 快照，打在静止点上")]
-        Agent["Agent Job<br/>一个 ticket 一个<br/>AGENT_ROLE 决定挂哪份 prompt"]
+        PVC[("Ticket PVC<br/>一票一块 · ReadWriteOncePod<br/>repo/ · state/ · home/")]
+        Secret["per-Job Secret<br/>installation token"]
+        Seed["init container seed<br/>播种工作副本"]
+        Agent["Agent Job<br/>一个 ticket 一个（+ spec 收尾一个）<br/>AGENT_ROLE 决定挂哪份 prompt"]
         GQ{{"Guardrail quota<br/>只算对象数量"}}
-        Sync --> Base
-        Base -.->|"打快照"| Snap
-        Snap -->|"播种工作副本"| Agent
+        PVC --> Seed
+        Secret -.->|挂成文件| Seed
+        Seed --> Agent
+        PVC --> Agent
     end
 
     Route["OmniRoute<br/>Job 从不持有上游 key"]
 
     Hook --> Recon
+    Watch --> Recon
     Timer -->|单飞：期间触发合并成一次后续 pass| Recon
     Recon -->|"读 issue / label / sub-issue / blocker"| Issues
-    Recon -->|"读 Job 列表"| NS
+    Recon -->|"读 Job / pod / PVC"| NS
     Recon -->|"写 label · 评论 · 关 issue · 开 PR"| Issues
-    Recon -->|"创建"| Sync
-    Recon -->|"等 Succeeded 后创建"| Snap
-    Recon -->|"创建"| Agent
+    Recon -->|"创建 PVC / Secret / Job"| NS
     Recon -->|"读 annotation remote-agent/run-result"| Agent
     Agent -->|"push commit 到 agent/spec-N"| Issues
     Agent --> Route
@@ -49,8 +50,8 @@ flowchart TB
 三条边界值得记住：
 
 - **App 是唯一的 GitHub writer**（ADR-0002）。Job 只推 commit 和写自己的 annotation。
-- **Sync Job 是 Base PVC 唯一的写者**（ADR-0006）。Agent Job 只见快照，所以同步不需要排空正在跑的 Job。
-- **reconcile 有三个唤醒源，不是轮询**：webhook、Job watch、resync tick 每 5 分钟一次（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)）。三者都只是「去跑一轮 pass」的信号，落点都是同一个 `reconcile()`；同一时刻只跑一轮，期间的触发合并成恰好一次后续 pass；tick 不引入控制面状态（[ADR-0001](adr/0001-stateless-reconciler.md)），失败的轮不自排。
+- **每张票一块 Ticket PVC，播种在 Job 内部**（[ADR-0009](adr/0009-ticket-volume-seeding.md)）：App 只 create-if-absent 建卷，`seed` init container 把工作副本克隆进去，`runner` 在同一块卷上跑。没有跨 repo 的共享写者，所以不存在「同步需要排空正在跑的 Job」这个问题。
+- **reconcile 有三个唤醒源，不是轮询**：webhook、Job watch、resync tick 每 5 分钟一次（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)）。三者都只是「去跑一轮 pass」的信号，落点都是同一个 `reconcile()`；同一时刻只跑一轮，期间的触发合并成恰好一次后续 pass；tick 不引入控制面状态（[ADR-0001](adr/0001-stateless-reconciler.md)），失败的轮不自排。Job watch 的 `DELETED` 事件就是 Claim 门 k8s 半边的唤醒源（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）。
 
 ## 2. 一次 ticket 运行
 
@@ -60,31 +61,33 @@ sequenceDiagram
     participant H as 人
     participant GH as GitHub
     participant App as App
-    participant S as Sync Job
-    participant Base as Base PVC
+    participant K as k8s
     participant J as Agent Job
     participant R as OmniRoute
 
     H->>GH: 给 ready-for-agent 的 ticket 加 agent:implement
-    GH->>App: webhook
-    App->>GH: 读 issue 状态与 label，算 Frontier
-    App->>GH: 加 agent:in-progress，Claim（assignee）
+    GH->>App: webhook（只是唤醒信号）
+    App->>GH: 读 issue 状态 / label / sub-issue / blocker，算 Frontier
     App->>App: 算 Slot：全局 3 · 每 target repo 2
     Note over App: Slot 不够就 Defer，本轮什么都不做
-    App->>S: 创建 Sync Job
-    S->>Base: git fetch origin main + reset --hard + clean -fdx
-    S-->>App: Succeeded，baseSha 写在 sync Job 自己的 annotation
-    App->>Base: 创建 Job snapshot
-    App->>J: 创建 Agent Job，挂 snapshot，AGENT_ROLE=implement-ticket
+    App->>K: create-if-absent：Ticket PVC → per-Job Secret（mint token）→ Job
+    App->>GH: 最后才写 agent:in-progress（Claim）
+    Note over J: init container seed：git ls-remote → 克隆 → checkout agent/spec-N → 写 marker
     J->>R: 模型请求
-    J->>GH: 推 commit 到 agent/spec-N
-    J->>J: Result tool 写 $RUN_RESULT_PATH，terminate
-    J-->>App: Job 终态
-    App->>J: 读 annotation remote-agent/run-result
+    J->>GH: 调 Result tool 后：push HEAD 到 agent/spec-N
+    J->>K: push 成功后才 PATCH 自己 Job 的 remote-agent/run-result
+    J-->>App: Job 终态（watch / tick 唤醒）
+    App->>K: 读 annotation remote-agent/run-result
     App->>GH: 按 Outcome 写 label · 评论 · 关 issue
+    App->>K: 同一 pass：写 expires-at（done 7d / blocked·error 30d）
 ```
 
-同步失败直接标 `error`，**不降级用旧 base**（ADR-0006）。这是有意的：一次瞬时网络抖动废掉一次运行，比让 agent 从过期的 main 起分支便宜。
+四件事是结构性的，不是实现细节：
+
+- **写序**：PVC → Secret → Job → label（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）。在「建 Job」与「写 label」之间崩掉留下的是「Job 在跑 + 票仍在门内」，k8s 半边下一轮能收；反过来就是「in-progress + 没 Job」——一个假的 T6e。
+- **push 严格先于 annotation**（[ADR-0009](adr/0009-ticket-volume-seeding.md)）：push 失败就不写结果、非零退出，k8s 起新 pod 同卷 `resume()` 到同一点再 push。所以「Job 终态但无 annotation」的卷上可能有未 push 的 commit。
+- **播种失败直接判终态**：init container 的 exit 78 被 `podFailurePolicy` 映射成 `FailJob`，不等 `backoffLimit` 磨完；可重试的那类（exit 75）走普通 backoff。
+- **一个判定期时钟**：一轮 pass 只取一次 `now`，outcome、收尾、续期、回收共用（否则一轮 straddle 边界时会判完就删）。
 
 ## 3. Spec 循环
 
@@ -92,16 +95,24 @@ Spec 不会一次性实现完。App 每收到一次运行完成，就重算 Fron
 
 ```mermaid
 flowchart TD
-    Start["spec 收到 agent:implement（在 Gate 内）"] --> F["算 Frontier：<br/>list then open children，<br/>只留通过 Gate 的，<br/>first wins"]
+    Start["spec 收到 agent:implement（在 Gate 内）"] --> F["算 Frontier：<br/>list then open children，<br/>只留通过 Claim-gate 的，<br/>first wins"]
     F --> Has{"有 Frontier 吗？"}
     Has -->|"有"| Job["起 Agent Job（implement-ticket）<br/>Claim 这张 ticket"]
     Job --> Read["Job 终态 → App 读 run result"]
     Read --> F
-    Has -->|"没有，且 spec 下已无 open sub-issue"| Tail["起收尾 Job（implement-spec）<br/>e2e 验证"]
-    Tail --> PR["开 PR 到 main<br/>commit 带 Closes #spec-number"]
+    Has -->|"没有，且 spec 下已无 open sub-issue"| Tail["起收尾 Job（implement-spec）"]
+    Tail --> Done{"finish_spec 带 newTickets 吗？"}
+    Done -->|"没带"| PR["App 开 PR 到 main<br/>body 里追加 Closes #spec-number"]
+    Done -->|"带了"| Sub["App 建 sub-issue，不开 PR"]
+    Sub --> F
 ```
 
-收尾 Job 判断有真阻塞时走 `agent:blocked`；判断还有活没干完时，它在 spec 下**新建 sub-issue**（AFK 可实现就带 `ready-for-agent`，否则带 `ready-for-human`），下一轮 reconcile 会把它算进 Frontier。
+收尾 Job 的两件事容易被记错：
+
+- **它不跑 e2e**。收尾 role 的验证是全量测试 + typecheck（仓库 prompt 里点名 lint 就跑）；`/implement-spec` 原文里没有 e2e，v1 不自行加（[prompt 必写项清单第 5 条](agents/prompt-checklist.md)）。代价明写：目标仓自己的 `test:e2e` 这次运行没人跑，结果交到 PR 让人看。
+- **`Closes #<spec>` 不由 commit 带**，而是 App 开 PR 时追加进 PR body（幂等：已含就不重复加）。agent 不开 PR、不调 `gh`（[ADR-0002](adr/0002-app-is-sole-github-writer.md)）。
+
+收尾 Job 判断有真阻塞时走 `agent:blocked`；判断还有活没干完时在 run result 里带 `newTickets`，App 在 spec 下**新建 sub-issue**（AFK 可实现就带 `ready-for-agent`，否则带 `ready-for-human`）且**不开 PR**——开 PR 等于宣称 spec 完整。新票下一轮 reconcile 会进 Frontier（它们带 `ready-for-agent` 但不带人的 `agent:implement`，所以 Frontier 为空、走 idle 分支）。
 
 ## 4. 状态机
 
@@ -202,7 +213,7 @@ Job: Running
 | **S0** 已声明 | — | `open` · `[ready-for-agent]` | 交互 agent | — | 人加 `agent:implement` |
 | **S1** 循环中 · 在门内 | 本 spec 下某张 ticket 的 Job（也可能此刻没有 Job） | `open` · `[ready-for-agent, agent:implement]`，**全程不变**——spec 上从不写 `agent:in-progress` | 人（只写过那一次 `agent:implement`） | S0，或人重入（S6） | 每轮 reconcile 三选一：frontier 非空 → Claim 一张 ticket（走 ticket 的 T2→T3）；frontier 空 **∧** 无 open sub-issue → 起收尾 Job（S2）；有 open sub-issue 但 frontier 空（票都 blocked / error）→ 什么都不做，只写日志。Slot 满 → Defer |
 | **S2** 收尾中 | 收尾 Job（`implement-spec`）非终态 | 同 S1 | App（create-if-absent，确定性 Job 名） | S1 的第二个分支 | Job 终态 → S3 / S3N / S4 / S5 |
-| **S3** 已开 PR | `Complete` · `{outcome:"done", newTickets:[]}` | `open` · `[ready-for-human, agent:implement]` + PR（commit 带 `Closes #<spec>`，body 带证据） | App（摘 `ready-for-agent`、加 `ready-for-human`、开 PR；PR 按分支 `agent/spec-<n>` 唯一，重复开是幂等跳过） | S2 ∧ done ∧ 无 newTickets | 人 merge → `Closes` 自动关票（出局） |
+| **S3** 已开 PR | `Complete` · `{outcome:"done", newTickets:[]}` | `open` · `[ready-for-human, agent:implement]` + PR（**PR body** 末尾带 `Closes #<spec>` 与证据；commit 不带） | App（摘 `ready-for-agent`、加 `ready-for-human`、开 PR 并追加 `Closes`；PR 按分支 `agent/spec-<n>` 唯一，重复开是幂等跳过） | S2 ∧ done ∧ 无 newTickets | 人 merge → PR body 里的 `Closes` 自动关票（出局） |
 | **S3N** 回填新票 | `Complete` · `{outcome:"done", newTickets:[…]}` | `open` · `[ready-for-agent, agent:implement]`（不变） | App（建 sub-issue，**不开 PR**） | S2 ∧ done ∧ newTickets 非空 | 回到 S1，新票进 frontier |
 | **S4** 阻塞 | `Complete` · `{outcome:"blocked", commentBody}` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | App | S2 ∧ blocked | 人重入（S6） |
 | **S5** 出错 | `Failed(BackoffLimitExceeded)` / `Failed(DeadlineExceeded)` / `Complete` 无 annotation / Job 不存在（漂移） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | App | S2 ∧ 上述任一 | 人重入（S6） |
@@ -248,90 +259,95 @@ annotation 只有 runner 在**终态**才写，所以 T6b/T6c/T6d/T6e 这四条�
 ```mermaid
 flowchart TD
     Trig["webhook / Job watch / Resync tick"] --> Recon["Reconcile pass（单飞）"]
-    Recon --> Read["读：GitHub issue 状态 + k8s Job 列表"]
+    Recon --> Read["读：GitHub issue 状态 + k8s Job / pod / PVC 列表"]
     Read --> Calc["算 Frontier 与 Slot 占用"]
-    Calc --> Check{"Slot 够吗？<br/>全局 ≤ 3 · 每 target repo ≤ 2"}
+    Calc --> Check{"Slot 够吗？<br/>MAX_JOBS_GLOBAL · MAX_JOBS_PER_REPO"}
     Check -->|"不够"| Defer["Defer：不建 Job · 不改 label · 不评论"]
-    Check -->|"够"| Act["Sync Job → snapshot → Agent Job"]
+    Check -->|"够"| Act["Ticket PVC → Secret → Job（→ 写 agent:in-progress）"]
     Defer -.->|"等下一次唤醒自然重试：上界 = tick 间隔（ADR-0014）"| Recon
 ```
 
 两个语义容易混：
 
-- **Slot 不是 Guardrail quota**。Slot 是 App 算出来的并发名额；Guardrail quota 是 namespace 里只算对象数量的 ResourceQuota，防的是 App 逻辑写错时无限起 Job，不承载并发语义。
-- **Job 只要名下还有未到终态的 pod 就占着 Slot**，无论那个 pod 是否正在终止。所以删除卡在终止的 pod 不会立刻释放名额。
+- **Slot 不是 Guardrail quota**。Slot 是 App 算出来的并发名额（`MAX_JOBS_GLOBAL` 默认 3 / `MAX_JOBS_PER_REPO` 默认 2，都是 App env 键）；Guardrail quota 是 namespace 里只算对象数量的 ResourceQuota，防的是 App 逻辑写错时无限起 Job，不承载并发语义。
+- **Job 只要名下还有未到终态的 pod 就占着 Slot**，无论那个 pod 是否正在终止。所以删除卡在终止的 pod 不会立刻释放名额；反过来，保留窗里的终态 Job 名下没有未终态 pod，不占名额。
 
-## 6. Base PVC 与 Job snapshot 的生命周期
+## 6. Ticket PVC 的生命周期
 
 ```mermaid
 flowchart LR
-    subgraph Keep["长期保留"]
-        Base[("Base PVC<br/>main 的工作克隆<br/>不放 agent/spec-* 分支<br/>不放依赖缓存")]
-    end
-
-    Sync["Sync Job<br/>fetch + reset --hard + clean -fdx"] -->|"唯一写者"| Base
-    Base -->|"静止点上打快照"| Snap[("Job snapshot")]
-    Snap -->|"恢复成工作副本"| Work[("工作副本<br/>agent Job 自己 fetch agent/spec-N")]
-    Work --> Agent["Agent Job"]
-
-    Agent -->|"正常退出 + issue 关闭"| Del["删除 snapshot"]
-    Agent -->|"error / blocked"| Keep2["保留 snapshot<br/>留证据"]
+    Claim["Claim：create-if-absent"] --> PVC[("Ticket PVC<br/>agent-<repo-slug>-<issue#><br/>ReadWriteOncePod · 8Gi 薄置备")]
+    PVC --> Seed["init container seed<br/>df 预检 → ls-remote → 克隆 → checkout → marker"]
+    Seed --> Run["runner：同一块卷上的 durable storage<br/>repo/ · state/ · home/"]
+    Run -->|"Job 终态：判 outcome 那一次 pass"| Exp["写 remote-agent/expires-at<br/>done 7d · blocked/error 30d"]
+    Exp -->|"到点"| Del["删 PVC + 同名 Secret"]
+    PVC -.->|"Claim 时清掉 expires-at"| Claim
+    PVC -->|"无 expires-at ∧ 无未终态 Job ∧ 年龄 > 30d"| Orphan["孤儿兜底：删"]
 ```
 
-Base PVC 写坏时**不删 PVC**：按 truenas-csi 的语义，源卷被删时 `deletionPolicy: Retain` 也保不住旧快照。自愈信号是 base PVC 上的 `remote-agent/reseed` annotation（ADR-0006）。
+三条规矩：
+
+- **`expires-at` 不存在 = 不可删**。Claim 时清掉它，判 outcome 那一次 reconcile 里 set-if-absent 写一次；所以 T3 / T3L（在跑 / pod 重启）的卷一定带着「不可删」。
+- **孤儿兜底只看 k8s**：无 `expires-at` ∧ 没有任何未到终态的 Job 引用它 ∧ `creationTimestamp` 超 30 天。覆盖两类永远走不到 outcome 的卷：issue 被删 / 转走，或 App 在 Job 保留窗内没能读到结果。
+- **一个 pass 内的顺序是先判后收**：label 与 `expires-at` 先落到终值，再跑回收（且回收自己重读 PVC / Job）。否则一轮 straddle 边界时会把刚打上保留期的卷当过期删掉。
+
+spec 的收尾 Job 同一套：自己的 Ticket PVC、同一个确定性命名规则（作用在 spec 号上）、同一条 `expires-at` 规则。回收的单位是「这块卷 + 同名的 per-Job Secret」；Job 本身归 k8s 的 `ttlSecondsAfterFinished`（[ADR-0012](adr/0012-job-deletion-ttl.md)），App 既无 Job 的 `delete` 也无 `patch` 权。
 
 ## 7. Run result 与 Outcome 判定
 
 ```mermaid
 flowchart TD
-    Pi["pi 跑完"] --> Tool["Result tool<br/>原子写 $RUN_RESULT_PATH<br/>带 terminate: true"]
-    Tool --> Wrap["entrypoint wrapper<br/>唯一的 k8s writer"]
-    Wrap --> Ann["Job annotation<br/>remote-agent/run-result"]
-    Ann --> Readable{"App 读得到吗？"}
-    Readable -->|"读不到"| NoResult["outcome=error<br/>reason=no-result<br/>证据取 pod 终态与容器日志"]
-    Readable -->|"读得到"| Preempt{"超时 / 被驱逐？"}
-    Preempt -->|"是"| NoResult
-    Preempt -->|"否"| Out{"文件里的 outcome"}
-    Out -->|"done"| Close["App 关 issue"]
+    Agent["agent 调 Result tool<br/>finish_ticket / finish_spec / blocked"] --> Push["runner：先 push HEAD 到 agent/spec-N"]
+    Push -->|"push 失败"| Retry["非零退出 · 不写 annotation<br/>k8s 起新 pod，同卷 resume() 到这一点再 push"]
+    Push -->|"push 成功"| Ann["PATCH 自己 Job 的 annotation<br/>remote-agent/run-result"]
+    Ann --> Job["Job 终态"]
+    Job --> Readable{"App 读到可解析的 annotation 吗？"}
+    Readable -->|"读不到（no-result）"| Err
+    Readable -->|"读得到"| Out{"载荷里的 outcome"}
+    Out -->|"done"| Close["App 关 issue / 开 PR"]
     Out -->|"blocked"| Blocked["App 加 agent:blocked + 评论"]
-    Out -->|"error"| Err["App 加 agent:error<br/>享有一次自动重试"]
-    NoResult --> Err
+    Out -->|"error（防御分支）"| Err["App 加 agent:error + 证据评论"]
+    Job -->|"Failed：backoff 耗尽 / DeadlineExceeded"| Err
+    Job -->|"label 说在跑，但 Job 不存在（no-job）"| Err
 ```
 
-`outcome` 描述**这次运行是怎么结束的**，不描述为什么没做成（后者在 `reason` 里，不进枚举、不进状态机）。
+`outcome` 描述**这次运行是怎么结束的**，不描述为什么没做成（后者是 App 证据评论里的事，不进载荷、不进枚举）。agent 只能产生 `done` 与 `blocked`；`error` 的四种 reason（`backoff-exhausted` / `deadline-exceeded` / `no-result` / `no-job`）全部由 App 从 Job 终态与「annotation 读不读得到」推出来，第五种 `app-judged` 只服务那条防御分支（载荷里写了 `error`，而 agent 本来不能这么写）。
 
-两条判定压过文件内容：**超时与驱逐压过文件里的 `done`**（被 deadline 打断的运行 commit/push 未必走完，认 done 会让 App 去 close 一个并未真正完成的 issue）；**App 对已终态但读不到 result 的 Job 兜底判 `error`**。因此 **Job 与它的 pod 在 App 成功读到 result 之前不得被删**。
+三条压过载荷内容的判定：
 
-用了 `terminate: true` 之后，本次 run 最后一条 assistant 消息的 `stopReason` 是 `toolUse`，所以 wrapper 判 pi 层失败只能用「最后一条 assistant 的 `stopReason ∈ {error, aborted, length}`」。
+- **只有 `Complete` 分支才读 annotation，且一次 run 只读一次**（就是把它迁出 `agent:in-progress` 的那一轮）。所以一条已终态的旧 Job 不会被当成新结果重读。
+- **App 对已终态但读不到 result 的 Job 兜底判 `error`**（`no-result`）。因此 **Job 与它的 pod 在 App 成功读到 result 之前不得被删**：这是 `ttlSecondsAfterFinished=1800` 的真实含义——它是 App 的读取预算（[ADR-0012](adr/0012-job-deletion-ttl.md)）。
+- **pod 的终态不说明任何事**。OOMKilled / 驱逐 / SIGTERM / CrashLoopBackOff 只意味着 k8s 起新 pod、同卷 `resume()`；GitHub 上不会出现任何变化，也不会因此写 annotation（runner 收到 SIGTERM 只 `harness.close()` 然后非零退出）。
 
 ## 8. 两处缺口
 
-以下两点是**你提的需求与现有 ADR 之间真实存在的差距**，不是实现细节。按 `docs/agents/domain.md` 的要求显式列出。
+以下两点是**需求与当时 ADR 之间真实存在的差距**，不是实现细节。按 `docs/agents/domain.md` 的要求显式列出。
 
-### 缺口 A：崩溃后是「重跑整个 ticket」，不是「接着之前跑」
+### 缺口 A：崩溃后是「重跑整个 ticket」，不是「接着之前跑」——**已解决**
 
-> **已解决（[ADR-0008](adr/0008-durable-runtime-base.md)）**：基座换成 pi-durable 后，崩溃/被驱逐是 k8s 重启 pod + 同一块 Ticket PVC 上 `resume()` 从最后一个 checkpoint 接着跑，「重跑整个 ticket」不再成立。下面的现状描述只对 pi CLI 时代成立，保留作背景。
+> **已解决（[ADR-0008](adr/0008-durable-runtime-base.md)）**：执行面基座换成了 `@earendil-works/pi-durable@1.3.0`（库，无 CLI）+ 自写 runner。崩溃 / 被驱逐不再走 `error` + 起新 Job，而是 **k8s 重启 pod + 同一块 Ticket PVC 上 `resume()`** 从每个 task 的最后一个 checkpoint 接着跑。下面的描述只对 pi CLI 时代成立，保留作背景与「为什么当时不行」的记录。
 
-现状由 ADR-0007 决定：一切非 agent 自述的失败（OOM、被驱逐、超时、pi 的 `stopReason ∈ error|aborted|length`）都归为 `outcome=error`，享有一次自动重试。重试是 App 起一个**新 Job、从同一份 Job snapshot 重新开始**。
+当时的现状由 ADR-0007 决定：一切非 agent 自述的失败（OOM、被驱逐、超时、`stopReason ∈ error|aborted|length`）都归为 `outcome=error`，享有一次自动重试；而重试是 App 起一个**新 Job、从同一份 Job snapshot 重新开始**。
 
 ```mermaid
 flowchart LR
-    subgraph Now["现状 · ADR-0007"]
+    subgraph Before["pi CLI 时代（已作废）"]
         R1["Job 跑到一半被 OOMKilled"] --> R2["outcome=error"] --> R3["App 加 agent:error"] --> R4["自动重试一次"] --> R5["新 Job 从 snapshot 重来<br/>读过的文件 · 想清楚的设计 · 跑通的 tool 调用全部重来"]
     end
-    subgraph Want["你要的"]
-        D1["Job 跑到一半被 OOMKilled"] --> D2["运行状态停在最后一个 checkpoint"] --> D3["新 Job 挂同一份工作副本"] --> D4["从 checkpoint 接着跑"]
+    subgraph Now["现在"]
+        D1["Job 跑到一半被 OOMKilled"] --> D2["状态停在最后一个 checkpoint"] --> D3["k8s 起新 pod，挂同一块 Ticket PVC"] --> D4["同卷 resume() 接着跑"]
     end
 ```
 
-要「接着跑」，需要两样现在都没有的东西：
+它当时缺的两样东西，现在都有了：
 
-1. **一次运行的工作副本跨 Job 存活**。现在的 Job snapshot 是一次性的，Job 结束就没有家。
-2. **运行时自己的 checkpoint**。`pi -p --mode json` 没有——它是一次性的 print 运行。
+1. **一次运行的工作副本跨 Job 存活**：Ticket PVC 比 Job 活得久（`ReadWriteOncePod`、回收按 `expires-at`，见 §6）。
+2. **运行时自己的 checkpoint**：durable 把一次 run 拆成 task 状态机，phase 边界落 checkpoint；runner 的 open 路径是统一的——**`resume()` 接中断的，`submit()` 起新的**，不需要 App 传「这是重跑还是重开」。
 
-触动的 ADR：**0003**（一个 ticket 一个 Job，工作副本来自一次性快照）、**0006**（快照必须打在静止的 base 上）、**0007**（`error` 的语义与重试的粒度）。
+两条代价仍要记住（它们是这个解决方式的边界，不是缺口）：
 
-一个候选是 `@earendil-works/pi-durable`（实验性）：它把一次运行拆成 task 状态机，每步 `runtime.commit()` 落 checkpoint，进程崩溃后 `resume()` 从最后一个 checkpoint 接着跑，副作用靠 `runtime.memo()` 挡重复。代价是换掉 `pi -p --mode json` 这个运行时，ADR-0007 那套结果契约要重做——pi-durable 有自己的 submission / outcome 模型，不需要 `run_result` 工具与 annotation 那层 wrapper。
+- **崩溃的代价是 phase 重跑**：durable 只在 phase 边界落 checkpoint，且 built-in 工具（连 `read`）全是 `replay: "unsafe"`——崩在工具调用里，模型看到的是 `interrupted` 而不是重跑。
+- **crash-loop 的上界由 Job 的 `backoffLimit` 给**（v1 取 4）：耗尽之后仍然是 `Failed(BackoffLimitExceeded)`，App 判 `error`，**不自动重试**——`error` 仍是人的入口。
 
 ### 缺口 B：运行中无法观察，也没有介入通道
 
@@ -352,6 +368,6 @@ flowchart LR
 | 草图里的说法 | 与哪条 ADR 冲突 | 正确的说法 |
 |---|---|---|
 | control-plane 持有 `index.sqlite` | ADR-0001 无状态 reconciler | App 不保存控制面状态；GitHub issue 状态与 k8s Job 列表就是唯一真相 |
-| attach pod 作为第二种 pod | ADR-0003 一个 ticket 一个 Job | 目前只有 Agent Job 与 Sync Job 两种；运行中观察是缺口 B |
+| attach pod 作为第二种 pod | ADR-0003 一个 ticket 一个 Job | 目前只有 Agent Job（含 spec 收尾那一张）一种；运行中观察是缺口 B |
 | Job 通过 `onReport` 上报给 App | ADR-0002 App 是唯一 GitHub writer | Job 只推 commit、只写自己的 annotation；App 主动来读 |
 | 轮询 GitHub API 作为触发 | ADR-0014 把 resync tick 定为第三条唤醒源 | 有周期 tick，但它只当「去跑一轮 pass」的信号：不重算、不持有状态、同一时刻只跑一轮（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)） |
