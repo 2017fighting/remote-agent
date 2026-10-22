@@ -106,7 +106,7 @@ agent 容器（`runner`）：
 | `AGENT_WORK_ITEM` | App 渲染的 `WorkItemV1` JSON（≤ 512KB） | 正文逐字、评论旧→新（超预算时从最旧的开始换成一行占位） |
 | `TARGET_REPO` | `owner/name` | 目标仓 |
 | `SPEC_NUMBER` | spec 号 | 分支 `agent/spec-<n>` 与 `Closes #<n>` 的来源 |
-| `GIT_BASE_URL` | App 的 `GIT_BASE_URL` | 仅作记录，clone 用下面那条 |
+| `GIT_BASE_URL` | App 的 `GIT_BASE_URL` | **模板发射但 Job 镜像不读**（镜像读的是下面那条 `GIT_REMOTE_URL`）；留在这里是因为它是 App 侧拼 URL 的源，也是 e2e 的第三个 env 差异点 |
 | `GIT_REMOTE_URL` | App 拼好：`GIT_BASE_URL/<owner>/<name>.git` | 播种与 push 都用它，**不带 token** |
 | `GITHUB_APP_ID` | App 的 `GITHUB_APP_ID` | commit 身份 `<app-id>+remote-agent[bot]@users.noreply.github.com` |
 | `OMNIROUTE_BASE_URL` / `OMNIROUTE_MODEL` / `OMNIROUTE_REVIEW_MODEL` | App 常量（§9） | 两个 conversation 的模型 |

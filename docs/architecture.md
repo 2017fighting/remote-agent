@@ -6,6 +6,8 @@
 
 图按**已经落地的执行面**画：pi-durable（库）+ 自写 runner（[ADR-0008](adr/0008-durable-runtime-base.md)），没有 Base PVC / Sync Job / snapshot，Job 终态只有三种，pod 重启对 GitHub 不可见。交付门是 kind e2e：它已在 CI 里**required**（`push-images` 把它列进 `needs`，循环没在真集群上跑通就不发镜像），它已经抓到的 11 个生产级致命 bug 记在 [`e2e/README.md`](../e2e/README.md)。
 
+一处**实现尚未补齐**的差异已在 §1 标出：Job watch 这条唤醒源在端口层已经实现并有测试，但 `app/src/main.ts` 还没 arm 它——目前真正在跑的唤醒源是 webhook 与 resync tick（ADR-0014 本来就把 tick 定为漏事件的兜底，所以闭环仍然成立）。
+
 ## 1. 系统全景
 
 ```mermaid
@@ -16,7 +18,7 @@ flowchart TB
 
     subgraph AppSvc["App · 单副本 TypeScript 服务"]
         Hook["webhook 端点"]
-        Watch["Job watch<br/>ADDED / DELETED"]
+        Watch["Job watch<br/>ADDED / DELETED<br/>（已实现，尚未 arm）"]
         Timer["resync tick<br/>每 5 分钟"]
         Recon["Reconcile pass<br/>幂等重算，无数据库"]
     end
@@ -53,6 +55,8 @@ flowchart TB
 - **每张票一块 Ticket PVC，播种在 Job 内部**（[ADR-0009](adr/0009-ticket-volume-seeding.md)）：App 只 create-if-absent 建卷，`seed` init container 把工作副本克隆进去，`runner` 在同一块卷上跑。没有跨 repo 的共享写者，所以不存在「同步需要排空正在跑的 Job」这个问题。
 - **reconcile 有三个唤醒源，不是轮询**：webhook、Job watch、resync tick 每 5 分钟一次（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)）。三者都只是「去跑一轮 pass」的信号，落点都是同一个 `reconcile()`；同一时刻只跑一轮，期间的触发合并成恰好一次后续 pass；tick 不引入控制面状态（[ADR-0001](adr/0001-stateless-reconciler.md)），失败的轮不自排。Job watch 的 `DELETED` 事件就是 Claim 门 k8s 半边的唤醒源（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）。
 
+> **实现状态（不要当成已接线）**：`K8sPort.watchJobs()` 的生产实现（`app/src/adapters/k8s.ts`，只转发 `ADDED` / `DELETED`）与 `job-watch` 这个 `Trigger` 都已存在并有测试，但 `app/src/main.ts` **没有 arm 它**——当前进程里真正会触发 pass 的只有 webhook 与 resync tick，`trigger=job-watch` 只出现在测试里。闭环因此靠 tick 兑现：ADR-0014 本来就把 tick 定为「漏接 `DELETED` 事件」的兜底，所以行为正确但延迟从秒级变成 tick 间隔（默认 5 分钟）。接上 watch 是**代码工作**，不在本文范围内。
+
 ## 2. 一次 ticket 运行
 
 ```mermaid
@@ -76,7 +80,7 @@ sequenceDiagram
     J->>R: 模型请求
     J->>GH: 调 Result tool 后：push HEAD 到 agent/spec-N
     J->>K: push 成功后才 PATCH 自己 Job 的 remote-agent/run-result
-    J-->>App: Job 终态（watch / tick 唤醒）
+    J-->>App: Job 终态（tick 唤醒；watch 尚未 arm）
     App->>K: 读 annotation remote-agent/run-result
     App->>GH: 按 Outcome 写 label · 评论 · 关 issue
     App->>K: 同一 pass：写 expires-at（done 7d / blocked·error 30d）
@@ -87,7 +91,7 @@ sequenceDiagram
 - **写序**：PVC → Secret → Job → label（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）。在「建 Job」与「写 label」之间崩掉留下的是「Job 在跑 + 票仍在门内」，k8s 半边下一轮能收；反过来就是「in-progress + 没 Job」——一个假的 T6e。
 - **push 严格先于 annotation**（[ADR-0009](adr/0009-ticket-volume-seeding.md)）：push 失败就不写结果、非零退出，k8s 起新 pod 同卷 `resume()` 到同一点再 push。所以「Job 终态但无 annotation」的卷上可能有未 push 的 commit。
 - **播种失败直接判终态**：init container 的 exit 78 被 `podFailurePolicy` 映射成 `FailJob`，不等 `backoffLimit` 磨完；可重试的那类（exit 75）走普通 backoff。
-- **一个判定期时钟**：一轮 pass 只取一次 `now`，outcome、收尾、续期、回收共用（否则一轮 straddle 边界时会判完就删）。
+- **一个 pass 只取一次 `now`**：outcome、收尾、续期、回收共用同一个判期时刻（否则一轮 straddle 边界时会刚判完就把那块卷当过期删掉）。
 
 ## 3. Spec 循环
 
@@ -149,7 +153,7 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 
 等待与 Defer 同形：不改 label、不建 Job、不评论，只打一行日志；不吃 Slot（终态 Job 名下没有未到终态的 pod）。它顺带收掉两个崩窗：人在 Job 跑动中手滑摘了 `agent:*`（门内 ∧ Job 活着，最迟 3h deadline + 30min TTL 后 `DELETED` 唤醒重新 Claim，同卷接续）；上一次 Claim 在「建 Job」与「写 label」之间崩掉的残留（写序因此定为先建 Job 后写 label）。spec 收尾 Job（S2）同规则：`implement-spec` 名下对象还在就不起。
 
-**逃逸口**：等不及的人可以 `kubectl delete job <名>`——删除事件立即唤醒 Claim，不用等满 30 分钟保留窗。
+**逃逸口**：等不及的人可以 `kubectl delete job <名>`——Job 一没，下一轮 pass（watch 已接上时是删除事件，现在最迟是下一个 tick）就能重新 Claim，不用等满 30 分钟保留窗。
 
 ### 4.3 Ticket
 
@@ -175,7 +179,7 @@ flowchart TD
     T1 -->|"人加 agent:implement"| T2["open · [ready-for-agent, agent:implement]<br/>在门内"]
     T2 -->|"App：Claim（写 agent:in-progress）<br/>+ create-if-absent Job"| T3["open · [ready-for-agent, agent:implement, agent:in-progress]"]
     T2 -.->|"Slot 满 → Defer：label 一字不变，只写日志"| T2
-    T2 -.->|"名下旧 Job 未删 → 等：同 Defer 形<br/>TTL 删除的 DELETED 事件唤醒（ADR-0013）"| T2
+    T2 -.->|"名下旧 Job 未删 → 等：同 Defer 形<br/>TTL 删除后的下一轮唤醒（ADR-0013）"| T2
     T3 --> S{"Job 终态？"}
     S -->|"否：pod 重启 / resume()"| T3L["自环：对 GitHub 不可见<br/>label 不动 · 不评论 · Slot 继续占"]
     T3L -->|"pod 又起来了"| S
@@ -317,7 +321,7 @@ flowchart TD
 
 - **只有 `Complete` 分支才读 annotation，且一次 run 只读一次**（就是把它迁出 `agent:in-progress` 的那一轮）。所以一条已终态的旧 Job 不会被当成新结果重读。
 - **App 对已终态但读不到 result 的 Job 兜底判 `error`**（`no-result`）。因此 **Job 与它的 pod 在 App 成功读到 result 之前不得被删**：这是 `ttlSecondsAfterFinished=1800` 的真实含义——它是 App 的读取预算（[ADR-0012](adr/0012-job-deletion-ttl.md)）。
-- **pod 的终态不说明任何事**。OOMKilled / 驱逐 / SIGTERM / CrashLoopBackOff 只意味着 k8s 起新 pod、同卷 `resume()`；GitHub 上不会出现任何变化，也不会因此写 annotation（runner 收到 SIGTERM 只 `harness.close()` 然后非零退出）。
+- **pod 的终态不说明任何事**。OOMKilled / 驱逐 / SIGTERM / CrashLoopBackOff 只意味着 k8s 起新 pod、同卷 `resume()`；GitHub 上不会出现任何变化，也不会因此写 annotation（runner 只在真正终态且 push 成功后写它）。
 
 ## 8. 两处缺口
 

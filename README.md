@@ -35,10 +35,10 @@ WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3  # ⚠�
 ## implement整体流程
 
 1. `人`：给 `ready-for-agent` 的 issue 加 `agent:implement` 的 label
-2. `App`：收到 webhook（`issues` / `issue_comment` / `sub_issues` / `issue_dependencies` / `installation_repositories`），**只把它当「去跑一轮 pass」的信号**，不解析业务；唤醒源共三个（webhook、Job watch、每 5 分钟的 resync tick），落点都是同一个 `reconcile()`（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）
+2. `App`：收到 webhook（`issues` / `issue_comment` / `sub_issues` / `issue_dependencies` / `installation_repositories`），**只把它当「去跑一轮 pass」的信号**，不解析业务。唤醒源设计上共三个（webhook、Job watch、每 5 分钟的 resync tick），落点都是同一个 `reconcile()`（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）；**目前 Job watch 尚未 arm，在跑的是 webhook + tick**（见 [architecture.md §1](docs/architecture.md#1-系统全景) 的实现状态注）
 3. `App`：一轮 pass 从 GitHub 与 k8s 读出全部相关状态。有 sub-issue 的 issue 是 spec（算它的 Frontier，只实现 Frontier 那一张 ticket），没有 sub-issue 的是 ticket（实现它自己）
 4. `App`：Claim 这张 ticket——按写序建 Ticket PVC（若缺）、mint 只覆盖目标 repo 的 installation token 写进 `agent-<repo-slug>-<issue#>-token`、create-if-absent 建 Job，**最后**才写 `agent:in-progress`（反过来会在两写之间留下假的 no-job 形状，[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）
-5. `implement job`：init container `seed` 先把工作副本播进这块 ticket 自己的 Ticket PVC（`git ls-remote` 判分支、克隆、checkout `agent/spec-<n>`、原子写 marker，只碰 `repo/`），主容器 `runner` 再打开同一块卷上的 durable storage 跑一个 agent role——执行面基座是 **`@earendil-works/pi-durable` 这个库 + 自写的 TypeScript runner**，不是 `pi -p`（[ADR-0008](docs/adr/0008-durable-runtime-base.md)）。agent 不碰 GitHub：push 由 runner 在收尾时做，凭证是挂成文件的 token
+5. `implement job`：init container `seed` 先把工作副本播进这块 ticket 自己的 Ticket PVC（`git ls-remote` 判分支、克隆、checkout `agent/spec-<n>`、原子写 marker），主容器 `runner` 再打开同一块卷上的 durable storage 跑一个 agent role——执行面基座是 **`@earendil-works/pi-durable` 这个库 + 自写的 TypeScript runner**，不是 `pi -p`（[ADR-0008](docs/adr/0008-durable-runtime-base.md)）。agent 不碰 GitHub：push 由 runner 在收尾时做，凭证是挂成文件的 token
 6. `App`：读 Job 的 `remote-agent/run-result` annotation 判 Outcome，写 label / 评论 / 关票 / 开 PR。**没有「检查 pi 最终结果」这层包装**：结果由 agent 调的 Result tool 自述、runner 落在 annotation 上（[ADR-0007](docs/adr/0007-run-result-contract.md)），四条非 agent 自述的失败由 App 从 Job 终态推出来并判 `error`（[architecture.md §4.6](docs/architecture.md#46-每个-error--blocked-终态都留一条评论)）
 
 ## 如何区分issue是`spec`还是`ticket`
@@ -47,7 +47,7 @@ WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3  # ⚠�
 
 ## 如何找spec当前frontier ticket
 
-list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ no `agent:*` label），first wins。**门还有 k8s 半边**：该 ticket 确定性名下的 Job 对象还在（终态与否）就不 Claim、不建、不读旧 annotation，等它的 `DELETED` 事件唤醒下一轮（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。
+list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ no `agent:*` label），first wins。**门还有 k8s 半边**：该 ticket 确定性名下的 Job 对象还在（终态与否）就不 Claim、不建、不读旧 annotation，等它被删掉之后的下一轮唤醒（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。
 
 ## job并发
 
@@ -68,7 +68,7 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 - **done**：App 关票、摘 `agent:in-progress`；下一轮唤醒重算 Frontier，接着实现下一张
 - **blocked**：App 加 `agent:blocked` + `ready-for-human`、按 run result 的 `commentBody` 转写一条评论说明做了什么，**不关票**，然后停下（agent 不碰 GitHub，[ADR-0002](docs/adr/0002-app-is-sole-github-writer.md)）
 
-直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**，新票下一轮进 Frontier。
+直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票带 `ready-for-agent` 但不带人的 `agent:implement`，所以 spec 停在 idle 分支，等人授权后才进 Frontier。
 
 spec 上**从不写 `agent:in-progress`**：它的「在跑」就是「在门内 + Frontier 空/非空」，收尾后把 `ready-for-agent` 换成 `ready-for-human` 就是退出门。完整状态表见 [architecture.md §4.5](docs/architecture.md#45-spec)。
 
@@ -77,10 +77,10 @@ spec 上**从不写 `agent:in-progress`**：它的「在跑」就是「在门内
 **每个 ticket 一块自己的 Ticket PVC，没有 Base PVC、没有 Sync Job、也没有快照**——这三样在 v1 都已退出（[ADR-0008](docs/adr/0008-durable-runtime-base.md)，[GLOSSARY](GLOSSARY.md) 里保留为 v2 候选）。
 
 1. Claim 时 App 先 create-if-absent 建这块卷（名字就是 Job 名 `agent-<repo-slug>-<issue#>`，`ReadWriteOncePod`，SC `truenas-iscsi-delete` 薄置备，默认 8Gi = 文件系统上限而不是池占用），然后才建 Job、最后写 `agent:in-progress`
-2. Job 的 init container `seed` 把工作副本播进这块卷：`git ls-remote` 判 `agent/spec-<n>` 分支在不在 → 全量克隆（分支不存在就从 `origin/main` 克隆再开分支）→ checkout → 最后原子写 `state/seeded.json` marker。播种前先做一次 `df` 预检（< 3Gi 直接判 `disk` 失败），因为卷满会让同一个 phase 反复撞 ENOSPC。**它只碰 `repo/`**，`state/` 与 `home/` 不碰（[ADR-0009](docs/adr/0009-ticket-volume-seeding.md)）
-3. 主容器 `runner` 用的是同一块卷：`repo/` 是工作副本，`state/` 放 durable 的 session storage（`session.sqlite`，WAL）与 marker，`home/` 是 `HOME` 缓存（npm 不重下）。**没有「每次都从零拉取」的问题，也没有需要同步的 base**：同一张票重入时 marker 匹配就跳过播种，未提交改动与历史全在
-4. 卷比 Job 活得久，因为缺口 B（人接进去看历史）与 `resume()` 都要它。生死由 App 按 `remote-agent/expires-at` 判：判 Outcome 那一次 reconcile 写一次（`done` 7 天，`blocked` / `error` 30 天，set-if-absent），Claim 时清掉；**不存在 = 不可删**。兜底只看 k8s：无 `expires-at` ∧ 无未终态 Job ∧ 年龄 > 30 天 → 删（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）
-5. 回收的单位是「这张票的三件套」：Ticket PVC + 同名的 per-Job Secret；Job 本身归 k8s 的 `ttlSecondsAfterFinished`（[ADR-0012](docs/adr/0012-job-deletion-ttl.md)）
+2. Job 的 init container `seed` 把工作副本播进这块卷：`git ls-remote --exit-code` 判 `agent/spec-<n>` 分支在不在 → 全量克隆（分支在就直接 `--branch` 克隆，不在就从 `main` 克隆再 `checkout -b`）→ `fetch origin main:refs/remotes/origin/main`（spec 收尾 role 的 `merge-base origin/main HEAD` 靠它）→ 最后原子写 `state/seeded.json` marker。播种前先做一次 `df` 预检（< 3Gi 直接判 `disk` 失败），因为卷满会让同一个 phase 反复撞 ENOSPC。**工作副本只落在 `repo/`**：`state/` 只放 marker 与 session storage（`state/` 永远在 git 视野之外，`git clean -xfd` 删不掉唯一一份可续跑的历史），`home/` 只当 `HOME`（[ADR-0009](docs/adr/0009-ticket-volume-seeding.md)）
+3. 主容器 `runner` 用的是同一块卷：工作副本在 `repo/`，durable 的 session storage（`session.sqlite`，WAL）在 `state/`，`HOME` 在 `home/`（npm 不重下）。**没有「每次都从零拉取」的问题，也没有需要同步的 base**：同一张票重入时 marker 匹配就跳过播种，未提交改动与历史全在；只有 marker 缺失、且 `state/` 里也没有 session 时才清 `repo/` 重播。
+4. 卷比 Job 活得久，因为 `resume()` 与「人回来把对话全文读出来」（[architecture.md §8 缺口 B](docs/architecture.md#8-两处缺口)）都要它。生死由 App 按 `remote-agent/expires-at` 判：判 Outcome 那一次 reconcile 写一次（`done` 7 天，`blocked` / `error` 30 天，set-if-absent），Claim 时清掉；**不存在 = 不可删**。兜底只看 k8s：无 `expires-at` ∧ 无未终态 Job ∧ 年龄 > 30 天 → 删（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）
+5. 回收的对象是两个：Ticket PVC + 同名的 per-Job Secret（凭证跟卷一起死）；Job 本身归 k8s 的 `ttlSecondsAfterFinished`，App 既无 Job 的 `delete` 也无 `patch` 权（[ADR-0012](docs/adr/0012-job-deletion-ttl.md)）
 
 spec 的收尾 Job（`implement-spec`）也是同一套：确定性名、同一块自己的 Ticket PVC、同一条回收规则——它同样会拿到 `expires-at`。
 
