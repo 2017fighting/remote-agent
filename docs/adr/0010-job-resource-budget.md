@@ -14,7 +14,7 @@
 | `terminationGracePeriodSeconds` | **120** | 给 `harness.close()`（含在飞的模型请求）留时间；最多多占 2 分钟 Slot |
 | HOME | `/mnt/agent/home`（Ticket PVC 上） | 崩溃换 pod 后 npm 不重下 853 个包，也不写节点共享的可写层 |
 
-三个 env 覆盖（App 侧，默认值就是上表）：`JOB_PVC_SIZE` / `JOB_ACTIVE_DEADLINE_SECONDS` / `JOB_BACKOFF_LIMIT`。判据是「事故里会不会被人当场改」：CPU / 内存跟着镜像里的工具链走，要改它们本来就该重估镜像，所以留在代码里。
+App 侧四个 env 覆盖（默认值就是上表）：`JOB_PVC_SIZE` / `JOB_ACTIVE_DEADLINE_SECONDS` / `JOB_BACKOFF_LIMIT` / `JOB_TTL_SECONDS_AFTER_FINISHED`（第四个来自 [ADR-0012](0012-job-deletion-ttl.md)）。判据是「事故里会不会被人当场改」：CPU / 内存跟着镜像里的工具链走，要改它们本来就该重估镜像，所以留在代码里。
 
 ## 硬约束（选型的后果，不是实现细节）
 
@@ -45,4 +45,4 @@
 - **Ticket PVC 上多一层 `home/`**：`repo/`（工作副本）、`state/`（durable sqlite + marker）之外还有 HOME 的缓存。播种仍然只碰 `repo/`，从不碰 `state/` 与 `home/`。
 - **`disk` 这个失败类终于有了触发点**：ADR-0009 的五个分类里原本只列了名字。
 - **以后要跑 e2e 或 `next build` 时这些数要重估**：6Gi 的上限容不下一次 `next build` 加 chromium。那是新的一次决策，不是把 6Gi 调大就行。
-- **3h 与 [#23](https://github.com/2017fighting/remote-agent/issues/23) 的 Job TTL 是两个不同的时钟**：deadline 管「一次运行能跑多久」，TTL 管「读完 annotation 之前 Job 能活多久」。
+- **3h 与 Job 的删除保留窗是两个不同的时钟**（[ADR-0012](0012-job-deletion-ttl.md)）：deadline 管「一次运行能跑多久」，保留窗管「App 有多久把 annotation 与证据读走」。

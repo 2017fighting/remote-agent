@@ -74,6 +74,10 @@ _Avoid_: 工作卷, workspace, job pvc
 Ticket PVC 上的 `remote-agent/expires-at` annotation（RFC3339）：App 在判定 outcome 的那一次 reconcile 里写一次（`done` 7 天、`blocked` / `error` 30 天），Claim 时清掉；**不存在 = 这块卷不可删**。
 _Avoid_: ttl, 保留期, 过期时间
 
+**Job retention**:
+终态 Job 在被 k8s 按其 `ttlSecondsAfterFinished` 删除之前的保留窗（1800 秒）。它不是清理习惯，而是 App 的读取预算：App 要在这段内读到 run result 并把证据落进 GitHub，超出预算的宕机由 no-job 兜底接管。
+_Avoid_: ttl, 清理窗口, job 过期
+
 **Seed**:
 init container 把工作副本装进 Ticket PVC 的那一步：问 `git ls-remote` 分支在不在、全量克隆、checkout `agent/spec-<n>`、写 marker。只碰 `repo/`，从不碰 `state/`。
 _Avoid_: bootstrap, sync, 初始化
@@ -140,7 +144,7 @@ _Avoid_: proxy, gateway, router, LLM API
 App 加上，表示这张 ticket 此刻被一个 Job 占着（Claim → Job 终态）。只出现在 ticket 上，spec 从不带它；pod 重启期间它一字不变。
 
 **agent:error**:
-App 加上，表示这次运行没有可用结论：Job 非正常退出（backoffLimit 耗尽 / 超时）、Job 已终态却读不到 run result、或 label 与 Job 漂移（有 `in-progress` 无 Job）。同时摘 `ready-for-agent`、加 `ready-for-human`、发一条带证据的评论；**没有自动重试**。
+App 加上，表示这次运行没有可用结论：Job 非正常退出（backoffLimit 耗尽 / 超时）、Job 已终态却读不到 run result、或 label 与 Job 漂移（有 `in-progress` 无 Job——App 宕机超过了 Job retention）。同时摘 `ready-for-agent`、加 `ready-for-human`、发一条带证据的评论；**没有自动重试**。
 
 **agent:blocked**:
 Agent 自述没做完、需要人做决定，由 App 按 run result 加上（同时摘 `ready-for-agent`、加 `ready-for-human`、转写评论）。

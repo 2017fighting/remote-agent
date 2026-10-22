@@ -146,7 +146,7 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Gate 的
 | **T6b** error · backoff 耗尽 | `Failed` · `reason=BackoffLimitExceeded` · **无 annotation** | 同 T6a | App | T3L 超过 `backoffLimit` | 人重入（T8） |
 | **T6c** error · 超时 | `Failed` · `reason=DeadlineExceeded` · **无 annotation** | 同 T6a | App | T3 跑过 `activeDeadlineSeconds` | 人重入（T8） |
 | **T6d** error · no-result | `Complete` · annotation **缺失或不可解析** | 同 T6a | App | Job 已终态却读不到 annotation（ADR-0007 兜底） | 人重入（T8） |
-| **T6e** error · no-job | Job **不存在** | 同 T6a | App | label 有 `agent:in-progress`，但确定性 Job 名在 k8s 里不存在（漂移：被 ttl 清掉、人手动删、App 重启时已没了） | 人重入（T8） |
+| **T6e** error · no-job | Job **不存在** | 同 T6a | App | label 有 `agent:in-progress`，但确定性 Job 名在 k8s 里不存在（可用性兜底：App 宕机超过 Job 保留窗被 TTL 清掉、人手动删、灾难恢复） | 人重入（T8） |
 | **T8** 人重入 | — | `open` · `[ready-for-agent, agent:implement]` | 人（摘 `agent:blocked` 或 `agent:error`，`ready-for-human` → `ready-for-agent`） | T5 或 T6a–e | 回到 T2（下一次 reconcile 重新 Claim） |
 
 ```mermaid
@@ -164,7 +164,7 @@ flowchart TD
     S -->|"Failed · BackoffLimitExceeded"| T6
     S -->|"Failed · DeadlineExceeded"| T6
     S -->|"Complete · 读不到 annotation"| T6
-    D["label 有 agent:in-progress<br/>但确定性 Job 名不存在"] -->|"App 兜底判 error（no-job）"| T6
+    D["label 有 agent:in-progress<br/>但确定性 Job 名不存在"] -->|"App 兜底判 error（no-job）<br/>可用性兜底，不是常态路径"| T6
     T5 -->|"人重入：摘 blocked / error<br/>ready-for-human → ready-for-agent"| T2
     T6 -->|"人重入：同上"| T2
 ```
