@@ -92,15 +92,14 @@ describe("runner: startup validation", () => {
     "AGENT_WORK_ITEM",
     "TARGET_REPO",
     "SPEC_NUMBER",
-    "GIT_BASE_URL",
+    "GIT_REMOTE_URL",
     "OMNIROUTE_BASE_URL",
     "OMNIROUTE_MODEL",
     "OMNIROUTE_REVIEW_MODEL",
     "OMNIROUTE_API_KEY",
-    "GITHUB_APP_ID",
-    "JOB_NAME",
-    "JOB_NAMESPACE",
   ];
+
+  const NAMESPACE = "remote-agent";
 
   function fullEnv(): Record<string, string> {
     return {
@@ -109,42 +108,39 @@ describe("runner: startup validation", () => {
       AGENT_WORK_ITEM: JSON.stringify(WORK_ITEM),
       TARGET_REPO: WORK_ITEM.repo,
       SPEC_NUMBER: "33",
-      GIT_BASE_URL: "https://github.com",
+      GIT_REMOTE_URL: "https://github.com/2017fighting/remote-agent.git",
       OMNIROUTE_BASE_URL: "http://omniroute.test/v1",
       OMNIROUTE_MODEL: "default",
       OMNIROUTE_REVIEW_MODEL: "review",
       OMNIROUTE_API_KEY: "key",
-      GITHUB_APP_ID: "5390512",
-      JOB_NAME: "agent-2017fighting-remote-agent-39",
-      JOB_NAMESPACE: "remote-agent",
     };
   }
 
   it.each(REQUIRED)("fails at startup when %s is missing", (key) => {
     const env = fullEnv();
     delete env[key];
-    expect(() => readRunnerEnv(env)).toThrow(StartupError);
-    expect(() => readRunnerEnv(env)).toThrow(new RegExp(key));
+    expect(() => readRunnerEnv(env, NAMESPACE)).toThrow(StartupError);
+    expect(() => readRunnerEnv(env, NAMESPACE)).toThrow(new RegExp(key));
   });
 
   it("fails the entrypoint before it opens storage or calls a model", async () => {
     const env = fullEnv();
     delete env["OMNIROUTE_REVIEW_MODEL"];
     // Not an I/O error from a missing /mnt/agent: validation runs first.
-    await expect(runRunner(env)).rejects.toThrow(StartupError);
-    await expect(runRunner(env)).rejects.toThrow(/OMNIROUTE_REVIEW_MODEL/);
+    await expect(runRunner({ env, namespace: NAMESPACE })).rejects.toThrow(StartupError);
+    await expect(runRunner({ env, namespace: NAMESPACE })).rejects.toThrow(/OMNIROUTE_REVIEW_MODEL/);
   });
 
   it("rejects an unparseable work item at startup", () => {
     const env = fullEnv();
     env["AGENT_WORK_ITEM"] = "{not json";
-    expect(() => readRunnerEnv(env)).toThrow(/AGENT_WORK_ITEM/);
+    expect(() => readRunnerEnv(env, NAMESPACE)).toThrow(/AGENT_WORK_ITEM/);
   });
 
   it("rejects a work item for a different repo than TARGET_REPO", () => {
     const env = fullEnv();
     env["AGENT_WORK_ITEM"] = JSON.stringify({ ...WORK_ITEM, repo: "other/repo" });
-    expect(() => readRunnerEnv(env)).toThrow(/does not match/);
+    expect(() => readRunnerEnv(env, NAMESPACE)).toThrow(/does not match/);
   });
 });
 

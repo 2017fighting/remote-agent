@@ -1,4 +1,13 @@
-import { JOB_ENV_KEYS, VOLUME_PATHS, JOB_MOUNT_PATHS, specBranch, parseWorkItem, type WorkItemV1 } from "@remote-agent/shared";
+import {
+  JOB_ENV_KEYS,
+  VOLUME_PATHS,
+  JOB_MOUNT_PATHS,
+  jobName,
+  specBranch,
+  parseWorkItem,
+  type WorkItemV1,
+} from "@remote-agent/shared";
+import { readFile } from "node:fs/promises";
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -6,32 +15,27 @@ export type EnvSource = Record<string, string | undefined>;
 export class StartupError extends Error {}
 
 /**
- * Every key the runner cannot work without. All are checked at startup, so a
- * missing `OMNIROUTE_*` fails the pod immediately instead of surfacing as a
- * provider error at the first model request (spec #33 §6.1).
+ * The Job env surface the App's template emits (spec #33 §4, docs/deployment.md
+ * §6). Every one of these is checked at startup, so a broken Job template fails
+ * the pod immediately instead of at the first model request.
  */
+export const REQUIRED_SEED_ENV_KEYS = [
+  JOB_ENV_KEYS.targetRepo,
+  JOB_ENV_KEYS.specNumber,
+  JOB_ENV_KEYS.gitRemoteUrl,
+] as const;
+
 export const REQUIRED_RUNNER_ENV_KEYS = [
   JOB_ENV_KEYS.agentRole,
   JOB_ENV_KEYS.agentThinkingLevel,
   JOB_ENV_KEYS.agentWorkItem,
   JOB_ENV_KEYS.targetRepo,
   JOB_ENV_KEYS.specNumber,
-  JOB_ENV_KEYS.gitBaseUrl,
+  JOB_ENV_KEYS.gitRemoteUrl,
   JOB_ENV_KEYS.omniRouteBaseUrl,
   JOB_ENV_KEYS.omniRouteModel,
   JOB_ENV_KEYS.omniRouteReviewModel,
   JOB_ENV_KEYS.omniRouteApiKey,
-  JOB_ENV_KEYS.githubAppId,
-  JOB_ENV_KEYS.jobName,
-  JOB_ENV_KEYS.jobNamespace,
-] as const;
-
-/** The seed needs only enough to build a remote URL, a branch and a commit identity. */
-export const REQUIRED_SEED_ENV_KEYS = [
-  JOB_ENV_KEYS.targetRepo,
-  JOB_ENV_KEYS.specNumber,
-  JOB_ENV_KEYS.gitBaseUrl,
-  JOB_ENV_KEYS.githubAppId,
 ] as const;
 
 export type AgentRole = "implement-ticket" | "implement-spec";
@@ -41,9 +45,9 @@ export interface SeedEnv {
   repo: string;
   specNumber: number;
   branch: string;
-  /** Clean https remote, no token (ADR-0009). */
+  /** Clean https clone URL composed by the App; never carries the token (ADR-0009). */
   remoteUrl: string;
-  /** `<app-id>+remote-agent[bot]@users.noreply.github.com`. */
+  /** `<app-id>+remote-agent[bot]@users.noreply.github.com`, or the bot address without an app id. */
   commitEmail: string;
 }
 
@@ -57,19 +61,16 @@ export interface RunnerEnv extends SeedEnv {
     reviewModel: string;
     apiKey: string;
   };
+  /** The Job whose `remote-agent/run-result` annotation this run writes. */
   jobName: string;
   jobNamespace: string;
 }
 
 const ROLES: readonly string[] = ["implement-ticket", "implement-spec"];
 
-function missingKeys(env: EnvSource, keys: readonly string[]): string[] {
-  return keys.filter((key) => (env[key] ?? "").trim() === "");
-}
-
 /** Fail once, with every missing key, so a broken Job template takes one pod to diagnose. */
 export function requireEnv(env: EnvSource, keys: readonly string[]): void {
-  const missing = missingKeys(env, keys);
+  const missing = keys.filter((key) => (env[key] ?? "").trim() === "");
   if (missing.length > 0) throw new StartupError(`missing required env: ${missing.join(", ")}`);
 }
 
@@ -80,13 +81,31 @@ function readPositiveInt(env: EnvSource, key: string): number {
   return value;
 }
 
-export function gitRemoteUrl(gitBaseUrl: string, repo: string): string {
-  return `${gitBaseUrl.replace(/\/+$/, "")}/${repo}.git`;
+/**
+ * Commit identity is the App's bot identity (ADR-0009). It only affects how
+ * commits are attributed, so a Job without `GITHUB_APP_ID` still commits — it
+ * just loses the app id prefix.
+ */
+export function commitIdentity(appId: string | undefined): { name: string; email: string } {
+  const prefix = (appId ?? "").trim();
+  return {
+    name: "remote-agent[bot]",
+    email: `${prefix === "" ? "" : `${prefix}+`}remote-agent[bot]@users.noreply.github.com`,
+  };
 }
 
-export function commitIdentity(appId: string): { name: string; email: string } {
-  return { name: "remote-agent[bot]", email: `${appId}+remote-agent[bot]@users.noreply.github.com` };
+/** The Job name is deterministic (spec #33 §0), so the runner never needs it in env. */
+export function deriveJobName(env: EnvSource, repo: string, issueNumber: number): string {
+  const fromEnv = (env[JOB_ENV_KEYS.jobName] ?? "").trim();
+  return fromEnv === "" ? jobName(repo, issueNumber) : fromEnv;
 }
+
+/** The pod's own namespace, from the ServiceAccount mount the kubelet always provides. */
+export async function readServiceAccountNamespace(path = SERVICE_ACCOUNT_NAMESPACE_PATH): Promise<string> {
+  return (await readFile(path, "utf8")).trim();
+}
+
+export const SERVICE_ACCOUNT_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
 export function readSeedEnv(env: EnvSource): SeedEnv {
   requireEnv(env, REQUIRED_SEED_ENV_KEYS);
@@ -97,12 +116,12 @@ export function readSeedEnv(env: EnvSource): SeedEnv {
     repo,
     specNumber,
     branch: specBranch(specNumber),
-    remoteUrl: gitRemoteUrl(env[JOB_ENV_KEYS.gitBaseUrl]!, repo),
-    commitEmail: commitIdentity(env[JOB_ENV_KEYS.githubAppId]!).email,
+    remoteUrl: env[JOB_ENV_KEYS.gitRemoteUrl]!.trim(),
+    commitEmail: commitIdentity(env[JOB_ENV_KEYS.githubAppId]).email,
   };
 }
 
-export function readRunnerEnv(env: EnvSource): RunnerEnv {
+export function readRunnerEnv(env: EnvSource, namespace: string): RunnerEnv {
   requireEnv(env, REQUIRED_RUNNER_ENV_KEYS);
   const seed = readSeedEnv(env);
   const role = env[JOB_ENV_KEYS.agentRole]!.trim();
@@ -118,6 +137,8 @@ export function readRunnerEnv(env: EnvSource): RunnerEnv {
       `${JOB_ENV_KEYS.agentWorkItem} repo ${workItem.repo} does not match ${JOB_ENV_KEYS.targetRepo} ${seed.repo}`,
     );
   }
+  const jobNamespace = (env[JOB_ENV_KEYS.jobNamespace] ?? "").trim() || namespace;
+  if (jobNamespace === "") throw new StartupError("the Job namespace is neither in env nor in the ServiceAccount mount");
   return {
     ...seed,
     role: role as AgentRole,
@@ -129,8 +150,8 @@ export function readRunnerEnv(env: EnvSource): RunnerEnv {
       reviewModel: env[JOB_ENV_KEYS.omniRouteReviewModel]!.trim(),
       apiKey: env[JOB_ENV_KEYS.omniRouteApiKey]!,
     },
-    jobName: env[JOB_ENV_KEYS.jobName]!.trim(),
-    jobNamespace: env[JOB_ENV_KEYS.jobNamespace]!.trim(),
+    jobName: deriveJobName(env, seed.repo, role === "implement-spec" ? seed.specNumber : workItem.number),
+    jobNamespace,
   };
 }
 

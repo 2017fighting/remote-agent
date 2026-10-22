@@ -29,13 +29,13 @@ export const OMNIROUTE_REVIEW_MODEL = "review";
 export const OMNIROUTE_API_KEY_SECRET = "remote-agent-secret";
 
 /**
- * Job-side spellings the App emits that are not in the shared key index: the
- * shared module is the contract both workspaces read, and widening it here
- * would collide with the Job image ticket that owns the Job's env surface.
+ * Job-side spellings the App emits that are not in the shared key index. #39 moved
+ * the clone URL into `JOB_ENV_KEYS` (the Job image owns the Job's env surface), so
+ * this alias keeps the one spelling both workspaces read.
  */
 export const JOB_ONLY_ENV_KEYS = {
   /** Clone URL the seed clones from: `GIT_BASE_URL/<owner>/<name>.git`, composed by the App. */
-  gitRemoteUrl: "GIT_REMOTE_URL",
+  gitRemoteUrl: JOB_ENV_KEYS.gitRemoteUrl,
 } as const;
 
 /** Where the per-Job token is mounted as a file (ADR-0009: never env, never a URL). */

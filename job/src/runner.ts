@@ -1,18 +1,33 @@
 import { pathToFileURL } from "node:url";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { jobPaths, readRunnerEnv, StartupError, type RunnerEnv } from "./internal/env.js";
+import {
+  readRunnerEnv,
+  readServiceAccountNamespace,
+  StartupError,
+  jobPaths,
+  type RunnerEnv,
+} from "./internal/env.js";
 import { createOmniRouteModels } from "./internal/provider.js";
 import { inClusterAnnotationWriter } from "./internal/annotation.js";
 import { pushToSpecBranch, run, type RunOutcome } from "./internal/runner.js";
+
+export interface RunnerEntryOptions {
+  env?: Record<string, string | undefined>;
+  /** Overrides the ServiceAccount namespace file; the kubelet always provides it in-cluster. */
+  namespace?: string;
+  log?(line: string): void;
+}
 
 /**
  * Main container entry (spec #33 §6). Every required env key is validated before
  * any durable storage is opened, so a broken Job template fails the pod at once
  * instead of at the first model request.
  */
-export async function runRunner(env: Record<string, string | undefined> = process.env): Promise<RunOutcome> {
-  const log = (line: string) => console.log(line);
-  const runnerEnv: RunnerEnv = readRunnerEnv(env);
+export async function runRunner(options: RunnerEntryOptions = {}): Promise<RunOutcome> {
+  const env = options.env ?? process.env;
+  const log = options.log ?? ((line: string) => console.log(line));
+  const namespace = options.namespace ?? (await readServiceAccountNamespace());
+  const runnerEnv: RunnerEnv = readRunnerEnv(env, namespace);
   const paths = jobPaths();
   const models = createOmniRouteModels(runnerEnv.omniRoute);
   const writer = inClusterAnnotationWriter(env, runnerEnv, log);

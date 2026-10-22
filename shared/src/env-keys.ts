@@ -23,6 +23,11 @@ export const JOB_ENV_KEYS = {
   targetRepo: "TARGET_REPO",
   specNumber: "SPEC_NUMBER",
   gitBaseUrl: "GIT_BASE_URL",
+  /**
+   * The composed clone URL `GIT_BASE_URL/<owner>/<name>.git`. The App composes it and
+   * the Job reads it verbatim, so the Job never re-derives a URL that could differ.
+   */
+  gitRemoteUrl: "GIT_REMOTE_URL",
   omniRouteBaseUrl: "OMNIROUTE_BASE_URL",
   omniRouteModel: "OMNIROUTE_MODEL",
   omniRouteReviewModel: "OMNIROUTE_REVIEW_MODEL",

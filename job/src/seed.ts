@@ -1,12 +1,12 @@
 import { statfs } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { readSeedEnv, jobPaths, StartupError } from "./internal/env.js";
+import { jobPaths, readSeedEnv, StartupError } from "./internal/env.js";
 import { seed } from "./internal/seed.js";
 
 /**
  * Init container entry (ADR-0009): seed the Ticket PVC's worktree once, then exit.
  * `podFailurePolicy` reads the exit code, so 75 (retryable) and 78 (fatal) are the
- * only two failure exits; everything is logged on one line each.
+ * only two failure exits.
  */
 export async function runSeed(env: Record<string, string | undefined> = process.env): Promise<number> {
   const log = (line: string) => console.log(line);
@@ -15,6 +15,8 @@ export async function runSeed(env: Record<string, string | undefined> = process.
     seedEnv = readSeedEnv(env);
   } catch (error) {
     if (error instanceof StartupError) {
+      // A Job template that cannot even describe the repo is as fatal as a bad
+      // credential: no amount of retrying fixes it.
       log(`seed-failed kind=unknown detail=${error.message}`);
       return 78;
     }
