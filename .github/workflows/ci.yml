@@ -74,21 +74,60 @@ jobs:
           cache-from: type=gha,scope=app
           cache-to: type=gha,mode=max,scope=app
 
-  # Placeholder for ticket #41 (kind e2e): real webhook → real App → real
-  # Job/PVC/Secret → real annotation → label closure, with a stub GitHub and a
-  # stub OpenAI-compatible model service in kind. It is the release gate; #41
-  # implements it and adds itself to `push-images.needs`.
+  # The kind e2e (ticket #41): real webhook → real App Deployment → real
+  # Job/PVC/Secret → real annotation → label closure, with a stub GitHub (whose
+  # git half is real `git http-backend`) and a stub OpenAI-compatible model
+  # service in kind. It is the spec's delivery gate.
+  #
+  # NOT YET REQUIRED, on purpose: the App still has no production port
+  # implementations (#43: octokit + @kubernetes/client-node), so the App process
+  # exits at its startup list and this job fails with that reason rather than
+  # passing. It becomes required — and `push-images` gains it in `needs` — when
+  # #43 merges and the loop can actually close. Leaving it non-required now keeps
+  # the signal honest: a red gate is visible, but it does not block unrelated
+  # work before the adapter it depends on exists.
   kind-e2e:
     needs: build-images
-    if: ${{ false }}
     runs-on: ubuntu-latest
+    # Long enough for a cold kind cluster plus four image builds; the assertions
+    # themselves poll with their own bounded timeouts.
+    timeout-minutes: 45
     steps:
-      - name: Implemented by ticket #41
-        run: echo "kind e2e arrives in #41"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19
+          cache: npm
+      - run: npm install
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.32.0
+
+      - name: Build and load images
+        run: node e2e/build.mjs
+
+      # The harness builds and loads the four images itself, brings up the
+      # cluster, applies the namespace contract, drives the scenario and asserts
+      # the final world. Its log is sectioned (cluster / images / stubs / app /
+      # job / assert) so a failure names the side that broke.
+      - name: Run the kind e2e
+        run: node e2e/run.mjs --timeout 300 --verbose
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-ra-e2e -n remote-agent get all,pvc,secrets,cm -o wide || true
+          kubectl --context kind-ra-e2e -n remote-agent describe jobs || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/remote-agent --tail 200 || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-github --tail 100 || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-model --tail 100 || true
 
   push-images:
-    # #41 makes this `needs: [build-images, kind-e2e]` so nothing is published
-    # before the closed loop is green on kind (spec #33 §9).
+    # `kind-e2e` joins this `needs` when #43 lands and the gate can go green;
+    # nothing is published before the closed loop is green on kind (spec #33 §9).
     needs: [build-images]
     # PRs build but never publish; main and release tags publish (spec #33 §9).
     if: >-
