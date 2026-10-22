@@ -60,6 +60,9 @@ export const PROMPTS_CONFIGMAP_NAME = "remote-agent-prompts";
 export const TOKEN_SECRET_KEY = "token";
 
 /** Code constants, not env overrides (ADR-0010: they follow the image's toolchain). */
+/** Init container entrypoint inside the Job image (job/Dockerfile). */
+export const SEED_ENTRYPOINT = "/opt/remote-agent/seed.mjs";
+
 export const AGENT_CONTAINER_NAME = "runner";
 export const SEED_CONTAINER_NAME = "seed";
 export const SEED_FAILURE_EXIT_CODE = 78;
@@ -143,6 +146,12 @@ function renderSeedContainer(input: JobTemplateInput): K8sContainer {
   return {
     name: SEED_CONTAINER_NAME,
     image: JOB_IMAGE,
+    // The image's CMD is the runner, so the init container must name its own
+    // entrypoint explicitly. Without this the "seed" container runs the runner,
+    // which validates the runner's env and dies on the keys seed deliberately
+    // does not get (`missing required env: AGENT_ROLE, ...`) — the pod then loops
+    // to BackoffLimitExceeded and no ticket ever starts.
+    command: ["node", SEED_ENTRYPOINT],
     env: [
       { name: JOB_ENV_KEYS.targetRepo, value: targetRepo },
       { name: JOB_ENV_KEYS.specNumber, value: String(specNumber) },

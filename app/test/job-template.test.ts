@@ -8,6 +8,7 @@ import {
   JOB_ONLY_ENV_KEYS,
   PROMPTS_CONFIGMAP_NAME,
   TOKEN_MOUNT_PATH,
+  SEED_ENTRYPOINT,
   TOKEN_SECRET_KEY,
   renderJobManifest,
 } from "../src/renders/job-template.js";
@@ -33,6 +34,21 @@ function manifest(): K8sJobManifest {
     workItemJson: '{"repo":"2017fighting/remote-agent"}',
   });
 }
+
+describe("seed container entrypoint", () => {
+  it("names the seed entrypoint explicitly, so it never inherits the image's runner CMD", () => {
+    const jobManifest = manifest();
+    const seed = jobManifest.podTemplate.initContainers[0]!;
+    // The Job image's CMD is the runner. Without an explicit command the init
+    // container would run the runner, which validates runner-only env and exits
+    // with "missing required env: AGENT_ROLE, ..." — every Job then loops to
+    // BackoffLimitExceeded and no ticket ever starts.
+    expect(seed.command).toEqual(["node", SEED_ENTRYPOINT]);
+    expect(SEED_ENTRYPOINT).toMatch(/seed\.mjs$/);
+    // And the runner container must NOT pin seed's entrypoint.
+    expect(jobManifest.podTemplate.containers[0]!.command).toBeUndefined();
+  });
+});
 
 describe("job template: identity and labels", () => {
   it("is named `agent-<repo-slug>-<issue#>` with the PVC and Secret derived from it", () => {

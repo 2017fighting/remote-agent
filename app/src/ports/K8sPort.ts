@@ -135,6 +135,12 @@ export interface K8sVolume {
 export interface K8sContainer {
   name: string;
   image: string;
+  /**
+   * Container entrypoint. Required for the init container: the Job image's `CMD`
+   * is the runner, so a seed container without `command` runs the runner and dies
+   * on the env keys seed deliberately does not receive (ADR-0009).
+   */
+  command?: string[];
   env?: K8sEnvVar[];
   volumeMounts?: K8sVolumeMount[];
   resources?: K8sResourceRequirements;
