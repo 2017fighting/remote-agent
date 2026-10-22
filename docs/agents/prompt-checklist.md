@@ -34,7 +34,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 - **为什么必写**：`code-review` 只看 `git diff <fixed-point>...HEAD`（三点，对 merge-base），无参数时**问用户**；且它要求先确认 ref 能 resolve、diff 非空，否则在扇出两个 reviewer 之前就失败。
 - **不写会怎样**：模型自己猜 `HEAD~3` 或 `main`，Spec 轴审到错的范围；或 diff 为空却两手一摊报 `done`。
-- **写什么**：字面值（merge-base sha，或 init container 记录的 baseSha，来源归 [#17](https://github.com/2017fighting/remote-agent/issues/17)），配一句「解析不开或 diff 为空就先自己处理，不许跳过 review 静默收尾」。**取哪个 sha 按 role 分**（[#14](https://github.com/2017fighting/remote-agent/issues/14)）：ticket role 取**本次运行的起点**（每票只审本票的 diff），spec 收尾 role 取**分支起点**；整条分支的覆盖面由 spec 收尾那一次全分支 review 提供。
+- **写什么**：字面值（merge-base sha，或 init container 记录的 baseSha，来源归 [#17](https://github.com/2017fighting/remote-agent/issues/17)），配一句「解析不开或 diff 为空就先自己处理，不许跳过 review 静默收尾」。**取哪个 sha 按 role 分**（[#14](https://github.com/2017fighting/remote-agent/issues/14)）：ticket role 取**本次运行的起点**（每票只审本票的 diff），spec 收尾 role 取**分支起点**；整条分支的覆盖面由 spec 收尾那一次全分支 review 提供。Spec 轴读的 spec 正文同样由 `code_review` 工具注入（A10，[#25](https://github.com/2017fighting/remote-agent/issues/25)）——固定点与 spec 正文同一条注入面。
 - **落点**：prompt（注入）+ 工具（review 工具自己 `git rev-parse` 与非空校验，坏 ref 直接弹回，不浪费两个 reviewer）。
 
 ### 3. 小 bug 的授权 → `_common`（`implement-spec` 收尾段加一句）
@@ -71,7 +71,8 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 - **不写会怎样**：一次运行炸成几十个 conversation，烧钱烧额度，最后没人说得清结论从哪来。
 - **写什么**（三处，缺一层都不够）：
   - **工具**：runner 烧一个 `code_review` 工具，起一个**独立 conversation** 的 reviewer（foreground、`replay: "safe"`、独立模型由 runner 给），传固定点与 spec 正文，取回两轴报告。它的工具表是 `read` / `grep` / `bash`——**不给 subagent 工具，也不给 `code_review` 自己**，扇出从工具表上被结构地断掉。（[#14](https://github.com/2017fighting/remote-agent/issues/14) 就地改：reviewer 得自己跑 `git diff` / `git log`，所以它拿到 `bash`；只读靠 prompt 约束，`bash` 本身不打开扇出。）
-  - **ConfigMap**：两轴 brief 写成 `review-standards` / `review-spec` 两份模板（含 smell baseline 12 条、standards 文件清单、diff 命令与 commit 列表）。改 review 话术不必重建镜像。
+  - **ConfigMap**：两轴 brief 写成 `review-standards` / `review-spec` 两份模板（diff 命令与 commit 列表）。改 review 话术不必重建镜像。smell baseline 十二条**只住在 `review-standards`**（[#25](https://github.com/2017fighting/remote-agent/issues/25)：Spec 轴用不上它，单份不漂移）；Standards 轴读的 standards 文件清单**不由模板提供**——`code_review` 被调时 runner 扫工作副本得出，候选名表是 runner 代码常量（A17a）；Spec 轴的 spec 正文由工具注入（A10）。
+  - **工具（扇出第二层，[#25](https://github.com/2017fighting/remote-agent/issues/25) A15）**：`code_review` 同一 run 第二次调用直接报错（「review 已跑过：修完就收尾」）——implementer 真正的扇出向量是反复调 review，不只在 reviewer 里开子 agent。implementer 模板**不写**「不要开子 agent」：它的工具表里没有 subagent 工具（[#21](https://2017fighting.github.io/remote-agent/issues/21) 研究证实 durable 无内置），禁令只写进两份 review 模板当保险丝。原则：**工具表先行，prompt 只为真实持有的工具写禁令**。
   - **模板末行**：一句「不要开子 agent、不要改文件」，两轴模板各一遍——reviewer 才是被约束的人。
 - **落点**：工具（起 conversation + 工具表裁剪）+ ConfigMap（两份 brief）+ prompt（一句禁令，在 review 模板里而不是角色模板里）。
 
