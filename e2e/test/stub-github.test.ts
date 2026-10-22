@@ -21,6 +21,11 @@ const exec = promisify(execFile);
 const REPO = "2017fighting/remote-agent";
 const TOKEN = "ghs_stub_token";
 
+/** `Response.json()` is `unknown` in this TS lib; the stub's shape is asserted at each use. */
+function json<T>(response: Response): Promise<T> {
+  return response.json() as Promise<T>;
+}
+
 const SCENARIO: Scenario = {
   repo: REPO,
   issues: [
@@ -89,33 +94,39 @@ describe("stub-github", () => {
 
   it("serves the issue list and a single issue in GitHub's REST shape", async () => {
     const { base } = await start();
-    const list = await (await fetch(`${base}/repos/${REPO}/issues`)).json();
+    const list = await json<Array<{ number: number; state: string; title: string; labels: Array<{ name: string }> }>>(
+      await fetch(`${base}/repos/${REPO}/issues`),
+    );
     expect(list).toHaveLength(4);
     expect(list[0]).toMatchObject({ number: 33, state: "open", title: "spec" });
-    expect(list[0].labels).toEqual([{ name: "ready-for-agent" }, { name: "agent:implement" }]);
+    expect(list[0]!.labels).toEqual([{ name: "ready-for-agent" }, { name: "agent:implement" }]);
 
-    const one = await (await fetch(`${base}/repos/${REPO}/issues/35`)).json();
+    const one = await json<{ number: number; body: string }>(await fetch(`${base}/repos/${REPO}/issues/35`));
     expect(one).toMatchObject({ number: 35, body: "ticket two" });
   });
 
   it("serves the sub-issue tree in listed order and the blocker list", async () => {
     const { base } = await start();
-    const subs = await (await fetch(`${base}/repos/${REPO}/issues/33/sub_issues`)).json();
-    expect(subs.map((issue: { number: number }) => issue.number)).toEqual([34, 35]);
+    const subs = await json<Array<{ number: number }>>(
+      await fetch(`${base}/repos/${REPO}/issues/33/sub_issues`),
+    );
+    expect(subs.map((issue) => issue.number)).toEqual([34, 35]);
 
-    const blockers = await (await fetch(`${base}/repos/${REPO}/issues/34/dependencies/blocked_by`)).json();
-    expect(blockers.map((issue: { number: number }) => issue.number)).toEqual([90]);
+    const blockers = await json<Array<{ number: number }>>(
+      await fetch(`${base}/repos/${REPO}/issues/34/dependencies/blocked_by`),
+    );
+    expect(blockers.map((issue) => issue.number)).toEqual([90]);
   });
 
   it("applies label edits with set semantics and closes an issue", async () => {
     const { stub, base } = await start();
-    const patched = await (
+    const patched = await json<{ labels: Array<{ name: string }> }>(
       await fetch(`${base}/repos/${REPO}/issues/34`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ labels: ["ready-for-agent", "agent:in-progress"] }),
-      })
-    ).json();
+      }),
+    );
     expect(patched.labels).toEqual([{ name: "ready-for-agent" }, { name: "agent:in-progress" }]);
 
     await fetch(`${base}/repos/${REPO}/issues/34`, {
@@ -133,43 +144,44 @@ describe("stub-github", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ body: "done <!-- remote-agent:done:job -->" }),
     });
-    const comments = await (await fetch(`${base}/repos/${REPO}/issues/34/comments`)).json();
-    expect(comments.map((c: { body: string }) => c.body)).toEqual([
-      "go",
-      "done <!-- remote-agent:done:job -->",
-    ]);
-    expect(comments[1].user.login).toBe("remote-agent[bot]");
-    expect(stub.world.listComments(34)[1]?.id).toBeGreaterThan(comments[0].id);
+    const comments = await json<Array<{ id: number; body: string; user: { login: string } }>>(
+      await fetch(`${base}/repos/${REPO}/issues/34/comments`),
+    );
+    expect(comments.map((c) => c.body)).toEqual(["go", "done <!-- remote-agent:done:job -->"]);
+    expect(comments[1]!.user.login).toBe("remote-agent[bot]");
+    expect(stub.world.listComments(34)[1]?.id).toBeGreaterThan(comments[0]!.id);
   });
 
   it("creates a PR and finds it by head branch, and never returns two for one branch", async () => {
     const { base } = await start();
-    const created = await (
+    const created = await json<{ draft: boolean; head: { ref: string }; base: { ref: string } }>(
       await fetch(`${base}/repos/${REPO}/pulls`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ title: "close out", body: "Closes #33", head: "agent/spec-33", base: "main" }),
-      })
-    ).json();
+      }),
+    );
     expect(created).toMatchObject({ draft: false, head: { ref: "agent/spec-33" }, base: { ref: "main" } });
 
-    const found = await (await fetch(`${base}/repos/${REPO}/pulls?head=${REPO}:agent/spec-33`)).json();
+    const found = await json<Array<{ body: string }>>(
+      await fetch(`${base}/repos/${REPO}/pulls?head=${REPO}:agent/spec-33`),
+    );
     expect(found).toHaveLength(1);
-    expect(found[0].body).toContain("Closes #33");
+    expect(found[0]!.body).toContain("Closes #33");
 
-    const none = await (await fetch(`${base}/repos/${REPO}/pulls?head=${REPO}:agent/spec-99`)).json();
+    const none = await json<unknown[]>(await fetch(`${base}/repos/${REPO}/pulls?head=${REPO}:agent/spec-99`));
     expect(none).toEqual([]);
   });
 
   it("creates an issue, then links it as a sub-issue idempotently", async () => {
     const { stub, base } = await start();
-    const created = await (
+    const created = await json<{ number: number }>(
       await fetch(`${base}/repos/${REPO}/issues`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ title: "follow-up", body: "more work", labels: ["ready-for-human"] }),
-      })
-    ).json();
+      }),
+    );
     expect(created.number).toBe(91);
 
     for (const _ of [1, 2]) {
@@ -184,9 +196,9 @@ describe("stub-github", () => {
 
   it("mints an installation token that expires in the future", async () => {
     const { base } = await start();
-    const minted = await (
-      await fetch(`${base}/app/installations/1/access_tokens`, { method: "POST" })
-    ).json();
+    const minted = await json<{ token: string; expires_at: string }>(
+      await fetch(`${base}/app/installations/1/access_tokens`, { method: "POST" }),
+    );
     expect(minted.token).toBe(TOKEN);
     expect(new Date(minted.expires_at).getTime()).toBeGreaterThan(Date.now());
   });

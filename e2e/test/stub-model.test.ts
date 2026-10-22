@@ -181,7 +181,8 @@ describe("stub-model", () => {
     if (model === undefined) throw new Error("the stub model catalog is missing its model");
 
     const events: Array<{ type: string; message?: { content: unknown[]; stopReason: string } }> = [];
-    for await (const event of models.stream(model, { messages: [{ role: "user", content: "go" }] })) {
+    const context = { messages: [{ role: "user" as const, content: "go", timestamp: Date.now() }] };
+    for await (const event of models.stream(model, context)) {
       events.push(event as (typeof events)[number]);
     }
     const done = events.find((event) => event.type === "done");
