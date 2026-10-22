@@ -34,15 +34,18 @@ export interface WebhookServer {
  */
 export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
   const server: Server = createServer((req, res) => {
-    void handle(req, res, deps).catch(() => {
+    handle(req, res).catch(() => {
       if (!res.headersSent) res.writeHead(500);
       res.end();
     });
   });
 
-  function handle(req: IncomingMessage, res: ServerResponse, d: WebhookServerDeps): Promise<void> {
+  function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return new Promise((resolve) => {
+      let settled = false;
       const finish = (status: number): void => {
+        if (settled) return;
+        settled = true;
         res.writeHead(status);
         res.end();
         resolve();
