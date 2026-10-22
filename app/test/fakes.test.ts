@@ -38,10 +38,10 @@ describe("FakeK8s create-if-absent (409 = success)", () => {
     const k8s = new FakeK8s({
       secrets: [{ name: "s", namespace: "remote-agent", annotations: { "a": "1" }, labels: {}, data: {} }],
     });
-    await k8s.patchSecretAnnotations("s", { "a": "1" });
+    await k8s.patchSecret("s", { annotations: { a: "1" } });
     expect(k8s.writeLog).toHaveLength(0);
-    await k8s.patchSecretAnnotations("s", { "a": "2" });
-    expect(k8s.writeLog).toEqual(["patchSecretAnnotations s"]);
+    await k8s.patchSecret("s", { annotations: { a: "2" } });
+    expect(k8s.writeLog).toEqual(["patchSecret s"]);
   });
 });
 

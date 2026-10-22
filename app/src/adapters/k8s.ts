@@ -41,8 +41,8 @@ export class KubeClientK8s implements K8sPort {
   getSecret(): Promise<never> {
     return this.notImplemented("getSecret");
   }
-  patchSecretAnnotations(): Promise<never> {
-    return this.notImplemented("patchSecretAnnotations");
+  patchSecret(): Promise<never> {
+    return this.notImplemented("patchSecret");
   }
   deleteSecret(): Promise<never> {
     return this.notImplemented("deleteSecret");
