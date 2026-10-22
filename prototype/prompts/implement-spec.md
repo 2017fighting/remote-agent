@@ -1,30 +1,28 @@
-# 角色：implement-spec
+# Role: implement-spec
 
-手头是**一整条 spec**：`{{work_ref}}`。它的 ticket 都已经关票，代码全在这一条分支上。
+At hand is **an entire spec**: `{{work_ref}}`. All of its tickets are closed; the code is all on this one branch.
 
-## 验收面
+## Acceptance surface
 
-- **ticket 图是验收面的来源**：每条 ticket 当初要求的东西，都要能在现在的分支上找到回应；找不回的，这次补上。[A12]
-- **spec 正文是验收标准**：ticket 拼起来必须真的满足 spec 的目的，而不只是逐条打过勾。
+- **The ticket map is the source of the acceptance surface** (rendered above, newest-last, with every run report and human correction from the comments): everything each ticket required must be findable in the branch as it stands; what isn't there, complete now.
+- **The spec body is the acceptance criteria**: the tickets, joined, must genuinely satisfy the spec's purpose — not merely check off one by one.
 
-开工顺序：读 spec 正文（上面已给出）与 ticket 图 → 对照现有代码列出「缺的 / 只做了一半的」→ 补完（垂直切片、seam 同上）→ 全量测试 + typecheck（仓库里点名 lint 就跑）。
+Order of work: read the spec body (given above) and the ticket map → against the current code, list "missing / half-done" → complete it (vertical slices, seams as above) → full test suite + typecheck (plus lint if the repo names it).
 
-**没有 e2e 这一步**：不要去找 e2e 命令、不要自己发明一条、也不要因为「通常都要跑 e2e」而停下来。本仓的 `test:e2e` 这一轮不跑，结果交给 PR 上的人看。[A13]
+## Finish (this run closes the whole spec)
 
-## 收尾（这次收的是整条 spec）
+1. Commit everything (titles in the repo's conventional-commit shape, ending with `(#{{spec_number}})`).
+2. `code_review` over the **whole branch**: fixed point `{{fixed_point}}` is the spec branch's starting point; both axes.
+3. Review findings **must be fixed**, each in a new commit (no `--amend`). What can't be fixed, or exceeds this run's scope, goes into `newTickets`: one ticket per item — title + body (written as a ticket a run could start from directly) + why it wasn't fixed this round.
+4. After fixing, run the full test suite + typecheck again — the closing evidence is this second run's output.
+5. Call `finish_spec`, with `prBody`.
 
-1. 全部改动 commit 完（标题以 `#{{spec_number}}` 开头）。
-2. `code_review` 跑**整条分支**：固定点 `{{fixed_point}}` 是这条 spec 分支的起点，两轴都跑。
-3. review 提出的问题**必须修**，修在一个新 commit 里（不 `--amend`）。修不动的、或超出这次范围的，写进 `newTickets`：一票一条——标题 + 正文（正文按一张能直接开工的 ticket 写）+ 为什么这轮没修。[A9]
-4. 修完 review 再跑一次全量测试 + typecheck——收尾证据取这一次的输出。
-5. 调 `finish_spec`，带上 `prBody`。
+## How to write `prBody`
 
-## `prBody` 怎么写
+Three sections, short, no pleasantries (this is the PR body verbatim; the control plane posts it):
 
-三段，短，别客套（这一段是 PR body 的正文，控制面会把它原样贴进 PR）：[A14]
+- `## Summary`: the smallest picture — pseudocode / call tree / component tree / file tree / one mermaid / a diff-sketch; anything that shows the shape of the change.
+- `## Evidence`: the **actual output** of the full test suite and typecheck (not a paraphrase); before/after where it exists (the test that failed, now passing).
+- `## Merge Danger`: `Door`: one-way or two-way; `Blast Radius`: one word + a sentence or two of consequence.
 
-- `## Summary`：最小的那张图——伪代码 / 调用树 / 组件树 / 文件树 / 一张 mermaid / 一段 diff-sketch 都行，说清这次改了什么形状。
-- `## Evidence`：全量测试与 typecheck 的**真实输出**（不是转述）；能给 before/after 就给（原本失败的那条测试现在过了）。
-- `## Merge Danger`：`Door`：one-way 还是 two-way；`Blast Radius`：一个词 + 一两句后果。
-
-PR 由控制面开，`Closes #<spec>` 由控制面追加进 body——**你不要开 PR、不要调 `gh`，也不要在 commit message 里写 `Closes`**。
+The PR is opened by the control plane, and `Closes #<spec>` is appended by the control plane — **you do not open PRs, call `gh`, or put `Closes` in commit messages**.

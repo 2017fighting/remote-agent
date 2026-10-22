@@ -1,10 +1,11 @@
-# prototype · v1 prompt 模板初稿（[#14](https://github.com/2017fighting/remote-agent/issues/14)）
+# prototype · v1 prompt 模板定稿（[#14](https://github.com/2017fighting/remote-agent/issues/14) → [#24](https://github.com/2017fighting/remote-agent/issues/24)）
 
-**这是一份 prototype：throwaway，永不 merge。** 它只回答一个问题——「v1 的五份 prompt 写出来长什么样、还缺哪些决定」。定下来的东西会以文字结论回到 #14 的 resolution 与 `docs/agents/prompt-checklist.md`，不会以这个目录的形式进入 main。
+**这是一份 prototype：throwaway，永不 merge。** 它回答一个问题——「v1 的五份 prompt 写出来长什么样」。定下来的东西以文字结论回到 ticket 的 resolution 与 `docs/agents/prompt-checklist.md`，不会以这个目录的形式进入 main。
 
 - 分支：`prototype/prompts`（不进 main，对照 `research/*` 的处理）
-- 初稿日期 / clone 基线：`main@8363367`
+- 初稿日期 / clone 基线：`main@8363367`；定稿回写：`main@8ef77ec`（[#24](https://github.com/2017fighting/remote-agent/issues/24)）
 - 五份模板 = [ADR-0004](../../docs/adr/0004-prompts-live-in-configmap.md) 里 ConfigMap `remote-agent-prompts` 的五个键，逐条对着 [#16 清单](../../docs/agents/prompt-checklist.md) 的十一条写
+- **语言（A1，#24 已定）：五份模板英文；agent 产出（commentBody / prBody / warnings）同英文。** 定稿五份均为英文。
 
 | 文件 | ConfigMap 键 | 拼装方式 |
 | --- | --- | --- |
@@ -16,21 +17,31 @@
 
 ## 怎么批注
 
-正文里有两类行内标记，直接对着那一行回话就行（在本票评论里贴行号 + 一句话，或者把整段改好贴回来）：
+正文里的行内标记：
 
-- `[P1]`–`[P4]`：**替 agent 预先回答了它本来会问用户的分支**（见下「预答图例」）。这些不是问题，是清单第 1、2、11 条要求的位置，扫一眼确认落对了地方。
-- `[A…]`：**这张票还没定的分叉**（A1 是整份文件级的——语言——不落行内标记），每条在下面「批注点」里给了问题、草稿的选择、备选。
+- `[P1]`–`[P4]`：**替 agent 预先回答了它本来会问用户的分支**（见「预答图例」），清单第 1、2、11 条要求的位置。
+- `[A…]`：批注点编号。#24 之前的行内标记已随定稿清除（正文即定稿）；#25 范围内的标记（A10 / A15 / A17）在两份 review 模板里保留。
 
-## 已定（[#14](https://github.com/2017fighting/remote-agent/issues/14) resolution）
+## 已定（resolution 汇总）
 
-四条本票拍下的，已经回写进上面的模板：
+#14 拍下四条，#24 拍下十条：
 
-| 批注点 | 决定 |
-| --- | --- |
-| A16 reviewer 怎么拿到 diff | **reviewer 也拿 `bash`**：工具表 = `read` / `grep` / `bash`，只读靠模板约束（只跑 `git diff`/`log`/`rev-parse`/`show`/`status`、`grep`、`ls`；不 commit/checkout/stash/push/装依赖/跑测试/写文件）。扇出的结构性拦断还在——reviewer 依然没有 subagent 工具、也没有 `code_review`。两份 review 模板保留「自己跑 diff 命令」的写法，并补了只读边界；#16 清单第 7 条的「工具表只有 read/grep」据此就地改 |
-| A7 ticket role 的固定点 | **本次运行的起点**（这次运行开始时分支所在的位置）；spec 收尾 role 是**分支起点**。整条分支的覆盖面由 spec 收尾那一次全分支 review 提供 → [#17](https://github.com/2017fighting/remote-agent/issues/17) 要额外记「本次运行起点 sha」 |
-| A2 工作项正文怎么进 prompt | **App 取好，经 Job env/参数交给 runner 渲染**（App 本来就要读 issue 算 frontier；它同时把 `Part of #<spec>` 的 parent 一起解析，否则 `[P4]` 的 spec 指针渲染不出来） |
-| A9 修完 review 要不要再 review | **不再 review**：修完另起 commit → 全量测试 + typecheck → `finish_*`。修订本身交给 PR 上的人看 |
+| 批注点 | 决定 | 出处 |
+| --- | --- | --- |
+| A16 reviewer 怎么拿到 diff | reviewer 也拿 `bash`：工具表 = `read` / `grep` / `bash`，只读靠模板约束；无 subagent 工具、无 `code_review` 的结构性拦断不变 | #14 |
+| A7 固定点 | ticket role = **本次运行起点**；spec 收尾 role = **分支起点**；整条分支的覆盖面由收尾那次全分支 review 提供 → #17 要记「本次运行起点 sha」 | #14 |
+| A2 工作项正文 | **App 取好，经 Job env/参数交给 runner 渲染**（含 `Part of #<spec>` 的 parent 解析） | #14 |
+| A9 修完 review | **不再 review**：修完另起 commit → 全量测试 + typecheck → `finish_*`；修订交给 PR 上的人看 | #14 |
+| A1 语言 | **英文模板；agent 产出（commentBody / prBody / warnings）同英文**。试点仓 pi-web 是英文公开仓，模板与产出同一语言、与目标仓一致，不维护两套语言约定 | #24 |
+| A3 blocked 判据 | **三条正例**（工作项自相矛盾 / 缺只有人能给的决定 / 环境坏到绕不开）＋一句反例「**难 ≠ 卡**：先换路、交付能做的、把处境写进 summary 再继续；难度永不终止运行」 | #24 |
+| A4 commit 标题形态 | **Conventional Commits 在前、`(#n)` 收尾**（`fix: … (#1308)`，pi-web 既有习惯）。prompt 只写「按仓库 git log 的既有形态、以 `(#n>)` 收尾」，不整段复述规则 | #24 |
+| A5 seam 记录点 | **首条 commit message 的 body**（不再「或 summary」二选一）；正文自带 `## Seams` 就照它 | #24 |
+| A6 newTickets 边界 | **维持可开票**（App 代写，ADR-0002 不破）；不收窄成「只开小票」——「小票」是个模型判不准的模糊档位，成色由「正文按能直接开工的 ticket 写」+ PR 上的人兜住 | #24 |
+| A8 环境栏 | **维持极简**：现有两段（正面陈述 + 五个不做）已够；不加「不要创建分支」等新禁令——每多一句禁令稀释一分其余义务 | #24 |
+| A11 与别的 ticket 界线 | **维持现状**（「别的 ticket 不归你、不回退、不顺手做」）；不加优先级句子——「小 bug = 本次 diff 涉及的代码内」已隐含界线 | #24 |
+| A12 spec role 的 ticket 图 | **App 全文渲染**：每张 sub-issue 的标题 + 正文 + **评论按时间序**（评论里有每轮 run 报告与人的修订，正是验收面）。一 spec 一次、token 花得起；不给 agent `gh`——installation token 自带 issues:write 降不了权，只读要新建最小权限凭证，且连破 #14-A2 / 清单第 10 条 / ADR-0002 三处已定 | #24 |
+| A13 e2e 不做 | **不写**：整段「没有 e2e 这一步」从 implement-spec 删除。pi-web 的 `test` 只含单测不链 e2e，点名 `test:e2e` 反而指路；「撤销 e2e」的决定已落在 #16 清单第 5 条，不需要 prompt 复述 | #24 |
+| A14 prBody 三段 | **详细写法留 implement-spec 模板**；`finish_spec` 工具 schema 只留 `prBody: string` + 一句「按角色模板三段写」。形状归 prompt（改文案不重建镜像），存在性与必填归工具 | #24 |
 
 ## 预答图例（P）
 
@@ -39,57 +50,28 @@
 | `[P1]` | `_common` 手头的工作项 | ticket 引用歧义。正文与 `<owner/repo>#<n>` 都渲染进 prompt，模型没有「猜哪个 issue」的余地 | `implement/SKILL.md:9` |
 | `[P2]` | `_common` 测试与 seam | tdd 的「写测试前先与用户确认 seam」。改成「自己列、写进首条 commit body」 | `tdd/SKILL.md:22-24` |
 | `[P3]` | `_common` 收尾 review | code-review 的固定点。字面值由 runner/工具注入，模型不许自己挑 ref | `code-review/SKILL.md:19` |
-| `[P4]` | `_common` 收尾 review ＋ `review-spec` 输入 | code-review 的 spec 来源。显式给 `owner/repo#n`，因为上游**不遍历 parent/sub-issue** | `code-review/SKILL.md:27-32` |
+| `[P4]` | `_common` 收尾 review ＋ `review-spec` 输入 | code-review 的 spec 来源。显式给 `owner/repo#n`，因为上游**不遍历** parent/sub-issue | `code-review/SKILL.md:27-32` |
 
-## 渲染与注入契约（草稿的假设，见 A2）
+## 渲染与注入契约
 
 模板是静态文本；`{{…}}` 是渲染时被替换的字面值。**渲染结果自包含**：`_common` + 角色模板拼起来，读的人不需要再去看另一份文件。
 
 | 值 | 谁提供 | 进哪份模板 |
 | --- | --- | --- |
 | `{{work_ref}}` / `{{work_title}}` / `{{work_body}}` | 控制面读 issue 得到（App 是唯一 GitHub writer，读也由它做） | `_common` |
-| `{{fixed_point}}` | 分支起点的 merge-base 字面值（取值与来源归 [#17](https://github.com/2017fighting/remote-agent/issues/17)） | `_common`、两份 `review-*` |
+| ticket 图（spec role）：每票标题 + 正文 + 评论全文，时间序 | App 读 sub-issues 与评论后渲染（A12，#24） | `implement-spec`（经 `_common` 的 `{{work_body}}` 之外另注入） |
+| `{{fixed_point}}` | merge-base 字面值（ticket role = 本次运行起点；spec role = 分支起点；取值与来源归 #17） | `_common`、两份 `review-*` |
 | `{{ticket_number}}` / `{{spec_number}}` | 就是 `{{work_ref}}` 的编号部分 | 角色模板 |
-| `{{spec_ref}}` + spec 正文 / standards 清单 | `code_review` 工具在起 reviewer conversation 时给（diff 与 commit 列表由 reviewer 自己用 `bash` 取，见 A16）| 两份 `review-*` |
-| 模型、thinking 档位、reviewer 模型、凭证、卷布局、分支名 | **不进 prompt**（清单第 10 条），归 [#17](https://github.com/2017fighting/remote-agent/issues/17) / [#20](https://github.com/2017fighting/remote-agent/issues/20) | — |
+| `{{spec_ref}}` + spec 正文 / standards 清单 | `code_review` 工具起 reviewer conversation 时给（diff 与 commit 列表 reviewer 自己用 `bash` 取，A16） | 两份 `review-*` |
+| 模型、thinking 档位、reviewer 模型、凭证、卷布局、分支名 | **不进 prompt**（清单第 10 条），归 #17 / #20 | — |
 
-## 批注点（A）
+## 仍开着（[#25](https://github.com/2017fighting/remote-agent/issues/25)）
 
-**A1 · 语言。** 草稿是中文。备选：英文（目标 repo 的代码、commit、工具输出都是英文），或「模板英文、`commentBody` 中文」。模型对英文指令的遵从度通常更稳，但批注与改 prompt 的人要读英文。
+- **A10** reviewer 的 spec 正文从哪来（工具注入 vs 落文件让 reviewer `read`）
+- **A15** implementer 要不要也写「不要开子 agent」（取决于 runner 给 implementer 的工具表）
+- **A17** standards 清单谁扫（运行期 vs 静态）＋ smell baseline 十二条的载体（两份重复 vs 第 6 个 ConfigMap 键 vs 镜像）
 
-**A2 ·（已定，见上）注入边界：谁把工作项正文交给模型。** AGENT_ROLE 的角色 prompt 里，模型既没有 `gh` 也没有 GitHub 凭证（清单第 10 条），所以正文只能由外面推进去。草稿假设「App 读 issue → 交给 runner 渲染」。备选：(a) App 把正文塞进 Job env / Job 参数；(b) init container 顺手取正文落到 PVC，runner 读文件；(c) 给 runner 一个只读 installation token 自己去读。这条同时决定 #17 的 init container 要不要知道 issue 正文，以及 ConfigMap 里到底哪些是静态文本。（顺带：这也意味着 App 必须把 `Part of #<spec>` 的 parent 一并解析出来，否则 `[P4]` 的 spec 指针渲染不出来。）
-
-**A3 · 「绝不提问」的强度与 `blocked` 判据。** 草稿写了「绝不提问」＋「真做不下去调 `blocked`」，但没给「什么叫真做不下去」的例子。要不要补三条判据（工作项自相矛盾 / 缺只有人能给的决定 / 环境坏到做不了），还是留白靠模型判断？留白会让 `blocked` 时多时少；写死会让模型把「难」误报成「卡」。
-
-**A4 · commit message。** 草稿要求「标题以 `#<n>` 开头」，因为 code-review 的第一查找顺序是 commit message 的 issue 引用。备选：`fix: … #123`（Conventional Commits 在前）或 `#123 fix: …`。软约束、不阻断、不重试——但**选哪个形态**会决定 `[P4]` 以外的兜底能不能命中。
-
-**A5 · seam 记在哪。** 草稿选了「首条 commit message 的 body，或者 `summary`」。备选：写进 ticket 正文的 `## Seams`（人先给，模型照做）。前者零人工成本但事后才看得见；后者更好审，但要求每张票都先被写一遍 seam。清单第 11 条只要求「不上升成 Gate 条件」。
-
-**A6 · 小 bug 的边界。** 草稿的范围是「本次改动涉及的代码 + 不引新依赖 + 不改公开接口」，出圈进 `warnings`（ticket）或 `newTickets`（spec）。问题：**spec 收尾 role 看到的问题该开新票还是记 warnings**——草稿允许它开 `newTickets`，这意味着 AFK 运行能反过来给 GitHub 造票（由 App 代写，ADR-0002 不破）。要不要收窄成「只允许开 P2 以下的票」？
-
-**A7 ·（已定，见上）固定点在 ticket role 是什么。** 草稿假设「这条 spec 分支的起点」（`_common` 里的 `{{fixed_point}}`）。对**同一 spec 的第 2、3 张票**，那意味着 review 会把前面几张票的改动一起重审一遍（重复发现、上下文变长）。备选：本次运行开始时分支的位置（每票只审本票的 diff），代价是 review 看不见前序改动的交互。这条同时喂回 #17 的 `.seeded` 标记要记什么。
-
-**A8 · 「环境已备好」这一栏的边界。** 清单第 10 条的「不写」栏在 prompt 里只能变成正面表述。草稿写了一句「工作副本已就位、分支已切好、模型与凭证由环境给」，够不够让模型不去自己 `git checkout`／找 token？要不要点名「不要创建分支」？
-
-**A9 ·（已定，见上）review 的发现必须修吗、修完要不要再 review。** 草稿：ticket role 修范围内的、范围外进 `warnings`；spec role 必须修、修不动进 `newTickets`；**都不再 review 第二次**。风险：修出来的东西没人看过（一次修改可能引入新问题）。备选「修完再跑一次 review，代价是一次运行里两轮 review」——成本翻倍，且 convergence 没有保证。
-
-**A10 · reviewer 的 spec 全文从哪来。** 草稿假设 `code_review` 工具把 spec 正文喂进 reviewer conversation。备选：落到工作副本里一个文件让 reviewer `read`（工具表只有 `read`/`grep`，这条可行），代价是工作副本里多出非代码文件（要不要加进 `.gitignore`？谁清？）。见 A16。
-
-**A11 · ticket role 与同 spec 其他 ticket 的界线。** 草稿写了「别的 ticket 有它自己的运行，不要回退也不要顺手做」。这条与「小 bug 可以直接修」的边界容易打架（同一文件里别人写坏的算 bug 还是算别人的活）。要不要补一句优先级（「本票要求优先于任何顺手修」）？
-
-**A12 · spec role 的 ticket 图从哪来。** 草稿写「ticket 图是验收面的来源」，但没说图怎么拿到（App 读 sub-issues 后渲染？reviewer 不读 GitHub）。而且「已全部关票」之后 ticket 正文还在，这一轮要不要把它们全渲染进 prompt（可能很长，但 spec 收尾只有这一次）？
-
-**A13 · e2e 的「不做」要不要明写。** 草稿写了「没有 e2e 这一步，不要去找命令、不要自己发明」。另一种看法：写了反而提醒模型去找。清单第 5 条要求「决定」是撤销 e2e，但没说 prompt 里要不要显式写这一句。
-
-**A14 · `prBody` 三段在 prompt 里的份量。** 草稿把 /pr 的三段结构完整搬进 `implement-spec`。备选：只指向「Summary / Evidence / Merge Danger」三段名，让模型自己发挥；或把结构搬进 `finish_spec` 工具的 schema/description（落点从 prompt 换成工具）。草稿选 prompt 是因为改文案不该重建镜像。
-
-**A15 · 「不要开子 agent」的措辞与位置。** 草稿在**两份 review 模板**的正文与末行各写了一遍（清单第 7 条要求末行统一写）。问题：**implementer 要不要也有这句**？取决于 runner 的 implementer 工具表里到底有没有 subagent 工具——有的话，一次 implement 也能扇出；没有的话这句话是噪音。这是 runner 工具集的决定（#14 的「本清单不覆盖」），但 prompt 与它必须一致。
-
-**A16 ·（已定，见上）〔结构性坑〕reviewer 只有 `read`/`grep`，跑不了 `git diff`。** 清单第 7 条把 reviewer 的工具表裁到 `read`/`grep`（断扇出），第 2 条又要求 brief 里带「diff 命令与 commit 列表」。两者冲突：**没有 `bash` 就执行不了那条命令**。三条路：(a) `code_review` 工具自己算好 diff 与 commit 列表，作为 reviewer 的用户消息喂进去（草稿现在写的是「工具会把 diff 的范围给你」，默认这条）；(b) 工具把 diff 落成一个文件，reviewer `read` 它；(c) reviewer 工具表加 `bash`（干净但把「只读」变成了自觉）。这条不定，#14 的两份 review 模板就定不下来，`code_review` 工具的实现也没法写。
-
-**A17 · Standards 轴的材料：清单谁扫、baseline 放哪。** (a) standards 文件清单是运行期扫 repo 得到的（草稿假设）还是静态写死？跨仓库复用时静态清单一定错。(b) smell baseline 十二条在**两份**模板里各有一份会漂移（要找 12 条只需一处改），但 ADR-0004 定的键是五个；备选：加第 6 个键 `_smell-baseline`（改 ADR-0004）、或放进代码镜像（撞「prompt 不烧进镜像」）、或就接受两份重复（接受漂移）。
-
-## 这份初稿不覆盖
+## 这份 prototype 不覆盖
 
 - runner 的内部结构（task/phase、工具集、section 拼接）——留给 spec 阶段的 `/codebase-design`
-- 模型与 thinking 档位、reviewer 的模型（[#20](https://github.com/2017fighting/remote-agent/issues/20)）；工作副本播种、凭证、固定点取值（[#17](https://github.com/2017fighting/remote-agent/issues/17)）；Job 与卷的预算（[#18](https://github.com/2017fighting/remote-agent/issues/18)）；PVC 回收（[#19](https://github.com/2017fighting/remote-agent/issues/19)）；Job 何时可删（[#23](https://github.com/2017fighting/remote-agent/issues/23)）
+- 模型与 thinking 档位、reviewer 的模型（#20）；工作副本播种、凭证、固定点取值（#17）；Job 与卷的预算（#18）；PVC 回收（#19）；Job 何时可删（#23）
