@@ -31,4 +31,4 @@
 - **可用性预算多一条（与 ADR-0012 同类记账）**：App 单次宕机 < 60 分钟不伤在跑的 Job（最后一次 pass 续的 token 还没到期，pod 的 git 是现读挂载文件）；超过就得靠 k8s 重启 pod + `backoffLimit` 4 兜，耗尽才是 `error(no-result)`，而卷上 commit 还在、人重入即 `resume()`。不加新机制。
 - **RBAC 不动**：`secrets get/patch` 已由 ADR-0009 加过，续期按确定性名 `get` 那一枚、不 list；tick 只多花 GitHub 与 k8s 的读，不新增写面。
 - **rate limit 余量**：一次 pass 典型 3–5 次 GitHub 读、最坏 20 次；5 分钟间隔 ≈ 60 次/h，最坏 240 次/h，占 installation 下限 5,000/h 的 1.2%–4.8%。多 repo 下的余量仍留在图的「Not yet specified」里。
-- **一条未核实的事实不因本 ADR 消失**：GitHub 文档既没写「mint 新 installation token 会让旧 token 失效」，也没写相反。本 ADR 的选择在两种答案下都可用（每 Job 各自续期、每 30 分钟才 mint 一次），但若为真，「续 A 弄挂 B」会让 per-Job 凭证载体本身失守——那要重开 ADR-0009/#17 的前提。判据交给研究票 [#31](https://github.com/2017fighting/remote-agent/issues/31)。
+- **一条未核实的事实不因本 ADR 消失**：GitHub 文档既没写「mint 新 installation token 会让旧 token 失效」，也没写相反。研究票 [#31](https://github.com/2017fighting/remote-agent/issues/31) 的结论是**不作废**（文档沉默 + 吊销只有显式逐枚动作 + 新格式 token 无状态这三条反证，仍标【未确认】），所以「续 A 弄挂 B」这个失效形状不成立，per-Job 凭证载体不需要重开；ADR-0009 已把「多枚可并存」与「token 形态不作为假设（~520 字符无状态 `ghs_APPID_JWT`）」记进硬约束。要拿正面确认只有两条路（真 mint 两枚比对 / 向 Support 提问），留给实现阶段做一次一致性验证，不再开票。
