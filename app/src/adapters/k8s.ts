@@ -5,7 +5,9 @@ import {
   PatchStrategy,
   KubernetesObjectApi,
   Watch,
+  type V1Container,
   type V1ContainerStatus,
+  type V1EnvVar,
   type V1Job,
   type V1ObjectMeta,
   type V1PersistentVolumeClaim,
@@ -15,6 +17,8 @@ import {
 import { AGENT_CONTAINER_NAME, SEED_CONTAINER_NAME } from "../renders/job-template.js";
 import { K8sApiError } from "../ports/errors.js";
 import type {
+  K8sContainer,
+  K8sEnvVar,
   K8sEvent,
   K8sJob,
   K8sJobManifest,
@@ -565,11 +569,43 @@ function toJobBody(job: K8sJobManifest): V1Job {
           restartPolicy: podTemplate.restartPolicy,
           terminationGracePeriodSeconds: podTemplate.terminationGracePeriodSeconds,
           securityContext: { fsGroup: podTemplate.securityContext.fsGroup },
-          initContainers: podTemplate.initContainers,
-          containers: podTemplate.containers,
+          initContainers: podTemplate.initContainers.map(toContainerBody),
+          containers: podTemplate.containers.map(toContainerBody),
           volumes: podTemplate.volumes,
         },
       },
     },
+  };
+}
+
+/**
+ * The port models env two ways (`secretKeyRef`, `valueFrom.fieldRef`) because the
+ * decision layer talks about intent; the API wants both nested under
+ * `valueFrom`. Passing the port shape straight through silently DROPS the
+ * reference — the container then starts without the variable, which the runner
+ * reports as "missing required env: OMNIROUTE_API_KEY" and every Job dies.
+ */
+function toContainerBody(container: K8sContainer): V1Container {
+  return {
+    name: container.name,
+    image: container.image,
+    ...(container.command === undefined ? {} : { command: container.command }),
+    ...(container.env === undefined ? {} : { env: container.env.map(toEnvVarBody) }),
+    ...(container.volumeMounts === undefined ? {} : { volumeMounts: container.volumeMounts }),
+    ...(container.resources === undefined ? {} : { resources: container.resources }),
+  };
+}
+
+function toEnvVarBody(env: K8sEnvVar): V1EnvVar {
+  const valueFrom =
+    env.secretKeyRef !== undefined
+      ? { secretKeyRef: { name: env.secretKeyRef.name, key: env.secretKeyRef.key } }
+      : env.valueFrom !== undefined
+        ? { fieldRef: { fieldPath: env.valueFrom.fieldRef.fieldPath } }
+        : undefined;
+  return {
+    name: env.name,
+    ...(env.value === undefined ? {} : { value: env.value }),
+    ...(valueFrom === undefined ? {} : { valueFrom }),
   };
 }

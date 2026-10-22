@@ -276,6 +276,32 @@ describe("KubeClientK8s: Jobs", () => {
     expect(created).toMatchObject({ name: manifest.name, namespace: NAMESPACE, finished: false });
   });
 
+  it("nests env references under valueFrom, so secret and downward-API vars survive", async () => {
+    const { k8s, requests } = await adapter();
+    const manifest = jobManifest("agent-2017fighting-pi-web-35");
+    manifest.podTemplate.initContainers.push({ name: "seed", image: "job:e2e", command: ["node", "/opt/remote-agent/seed.mjs"] });
+    manifest.podTemplate.containers.push({ name: "runner", image: "job:e2e" });
+    manifest.podTemplate.containers[0]!.env = [
+      { name: "PLAIN", value: "x" },
+      { name: "OMNIROUTE_API_KEY", secretKeyRef: { name: "remote-agent-secret", key: "OMNIROUTE_API_KEY" } },
+      { name: "JOB_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
+    ];
+    await k8s.createJob(manifest);
+
+    const body = requests().at(-1)?.json() as Record<string, any>;
+    const agent = body["spec"]["template"]["spec"]["containers"][0];
+    // The API nests both reference kinds under `valueFrom`. Sending the port
+    // shape straight through drops them, and the container then starts without
+    // the variable — the runner dies on "missing required env: OMNIROUTE_API_KEY".
+    expect(agent.env).toEqual([
+      { name: "PLAIN", value: "x" },
+      { name: "OMNIROUTE_API_KEY", valueFrom: { secretKeyRef: { name: "remote-agent-secret", key: "OMNIROUTE_API_KEY" } } },
+      { name: "JOB_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
+    ]);
+    const seed = body["spec"]["template"]["spec"]["initContainers"][0];
+    expect(seed.command).toEqual(["node", "/opt/remote-agent/seed.mjs"]);
+  });
+
   it("getJob maps conditions and reads finished from Complete/Failed only", async () => {
     const { k8s } = await adapter({
       jobs: [
