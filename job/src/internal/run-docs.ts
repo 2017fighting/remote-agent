@@ -20,6 +20,28 @@ export const RunResultDoc = defineDoc<RunResultState>({
 });
 
 /**
+ * The one review round a run may take (spec #33 §6). Committed by `code_review`
+ * itself, so a resumed run refuses a second round instead of fanning out again;
+ * `fixedPoint` is `""` until the round completes.
+ */
+export type ReviewRoundState = {
+  fixedPoint: string;
+  spec: string;
+  standards: string;
+  completedAt: string;
+};
+
+export const ReviewRoundDoc = defineDoc<ReviewRoundState>({
+  kind: "remote-agent.review-round",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ fixedPoint: "", spec: "", standards: "", completedAt: "" }),
+  checkpointWhen: () => false,
+});
+
+/**
  * Set after a successful push + annotation. Its presence is what makes reopening
  * a cleanly finished volume do nothing at all: no model call, no second push, no
  * second annotation.

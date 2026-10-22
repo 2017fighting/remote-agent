@@ -3,7 +3,19 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Models } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxText,
+  fauxToolCall,
+  type Models,
+} from "@earendil-works/pi-ai";
+import { Harness, createRegistry } from "@earendil-works/pi-durable";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { reviewerExtension } from "../../src/internal/reviewer-tools.js";
+import { buildRegistry } from "../../src/internal/runner.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { WorkItemV1 } from "@remote-agent/shared";
 import { jobPaths, type JobPaths, type RunnerEnv } from "../../src/internal/env.js";
@@ -47,6 +59,8 @@ export interface RunnerFixture {
   /** Scripted model responses; empty means any model request fails the test. */
   script(responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]): void;
   pendingResponses(): number;
+  /** The standards files the runner scans for the Standards axis (the fixture's repo has none). */
+  standardsFiles?(): Promise<string[]>;
 }
 
 /**
@@ -105,6 +119,19 @@ export async function runnerFixture(): Promise<RunnerFixture> {
     join(paths.prompts, "implement-ticket"),
     ["# Role: implement-ticket", "This run implements ticket #{{ticket_number}} of spec #{{spec_number}}.", ""].join("\n"),
   );
+  await writeFile(
+    join(paths.prompts, "review-spec"),
+    [
+      "# Spec axis",
+      "Fixed point {{fixed_point}}; spec {{spec_ref}}:",
+      "{{spec_body}}",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(
+    join(paths.prompts, "review-standards"),
+    ["# Standards axis", "Fixed point {{fixed_point}}.", ""].join("\n"),
+  );
 
   const faux = fauxProvider({
     provider: "omniroute",
@@ -151,6 +178,154 @@ export function finishTicketCall(summary = "did the thing"): ReturnType<typeof f
   return fauxAssistantMessage([fauxToolCall("finish_ticket", { summary }, { id: "call-finish" })], {
     stopReason: "toolUse",
   });
+}
+
+export function finishSpecCall(
+  args: { summary?: string; prBody?: string; commentBody?: string; newTickets?: { title: string; body: string; readyForAgent: boolean }[]; warnings?: string[] } = {},
+): ReturnType<typeof fauxAssistantMessage> {
+  return fauxAssistantMessage(
+    [fauxToolCall("finish_spec", { summary: "closed the spec", prBody: "## Summary\nshape", ...args }, { id: "call-spec" })],
+    { stopReason: "toolUse" },
+  );
+}
+
+export function blockedCall(args: Record<string, unknown> = {}): ReturnType<typeof fauxAssistantMessage> {
+  return fauxAssistantMessage([fauxToolCall("blocked", { summary: "stuck", commentBody: "change X", ...args }, { id: "call-blocked" })], {
+    stopReason: "toolUse",
+  });
+}
+
+/** One reviewer conversation's answer (the reviewer's whole report). */
+export function reviewerReport(text: string): ReturnType<typeof fauxAssistantMessage> {
+  return fauxAssistantMessage([fauxText(text)]);
+}
+
+export function codeReviewCall(fixedPoint: string, id = "call-review"): ReturnType<typeof fauxAssistantMessage> {
+  return fauxAssistantMessage([fauxToolCall("code_review", { fixedPoint }, { id })], { stopReason: "toolUse" });
+}
+
+/** One reviewer conversation, read back the way the runner created it. */
+export interface ReviewerConversation {
+  id: number;
+  /** The tool names the conversation's agent offers, in registry order. */
+  tools: string[];
+  /** The first message the reviewer received: its rendered axis template. */
+  firstMessage: string;
+}
+
+/** Every non-root conversation on the volume, with the tool table its agent resolves. */
+export async function reviewerConversations(
+  fixture: RunnerFixture,
+  env: RunnerEnv = fixture.env,
+): Promise<ReviewerConversation[]> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+    { models: fixture.models, registry: runRegistry(fixture, env) },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const page = await harness.commit((tx) => tx.scanConversations({}, 100), BACKGROUND_CONTEXT);
+    const others = page.items.filter((record) => record.id !== root.id);
+    const found: ReviewerConversation[] = [];
+    for (const record of others) {
+      const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
+      if (conversation === undefined) continue;
+      const agent = await conversation.agent(BACKGROUND_CONTEXT);
+      const entries = await conversation.entries({}, 100, undefined, BACKGROUND_CONTEXT);
+      const user = entries.items.find((entry) => entry.kind === "pi.user");
+      found.push({
+        id: record.id,
+        tools: agent.tools.map((tool) => tool.name),
+        firstMessage: messageText(user?.model?.[0]),
+      });
+    }
+    return found;
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/**
+ * The registry one run installs, so a stored `extensions` filter resolves to the
+ * tool table the conversation really had. The harness handle is absent here: no
+ * tool runs in these read-backs.
+ */
+function runRegistry(fixture: RunnerFixture, env: RunnerEnv = fixture.env) {
+  return buildRegistry(
+    {
+      env,
+      paths: fixture.paths,
+      log: () => {},
+      ...(fixture.standardsFiles === undefined ? {} : { standardsFiles: fixture.standardsFiles }),
+    },
+    [],
+  );
+}
+
+function messageText(message: unknown): string {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .flatMap((block) => (typeof block === "object" && block !== null && (block as { type?: string }).type === "text"
+        ? [(block as { text: string }).text]
+        : []))
+      .join("\n");
+  }
+  return "";
+}
+
+/** The implementer's tool table: the root conversation's agent, read after the run. */
+export async function implementerTools(fixture: RunnerFixture, env: RunnerEnv = fixture.env): Promise<string[]> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+    { models: fixture.models, registry: runRegistry(fixture, env) },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const agent = await root.agent(BACKGROUND_CONTEXT);
+    return agent.tools.map((tool) => tool.name);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/** One tool result from the implementer's transcript: the call's id and its error code, if any. */
+export interface ToolResultRecord {
+  callId: string;
+  isError: boolean;
+  code?: string;
+  text: string;
+}
+
+/** Every tool result the implementer's transcript holds, oldest first. */
+export async function toolResults(fixture: RunnerFixture): Promise<ToolResultRecord[]> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+    { models: fixture.models, registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const page = await root.entries({}, 200, undefined, BACKGROUND_CONTEXT);
+    return page.items.flatMap((entry) => {
+      if (entry.kind !== "pi.tool-result") return [];
+      const message = entry.model?.[0] as { toolCallId?: string; isError?: boolean; content?: unknown } | undefined;
+      const diagnostics = (entry.data as { diagnostics?: { code?: string }[] } | undefined)?.diagnostics ?? [];
+      return [
+        {
+          callId: message?.toolCallId ?? "",
+          isError: message?.isError === true,
+          ...(diagnostics[0]?.code === undefined ? {} : { code: diagnostics[0].code }),
+          text: messageText(message),
+        },
+      ];
+    });
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
 }
 
 export { fauxAssistantMessage, fauxToolCall };

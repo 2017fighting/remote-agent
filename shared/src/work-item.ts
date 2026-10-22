@@ -19,6 +19,12 @@ export interface WorkItemV1 {
   specNumber: number;
   title: string;
   body: string;
+  /**
+   * The parent spec's body, when the App could read it. The Spec axis of `code_review`
+   * compares the diff against this text; for the spec role `body` already is the spec
+   * body, so the field stays absent there.
+   */
+  specBody?: string;
   comments: WorkItemComment[];
 }
 
@@ -35,6 +41,7 @@ export function isWorkItemV1(value: unknown): value is WorkItemV1 {
     Number.isInteger(v["specNumber"]) &&
     typeof v["title"] === "string" &&
     typeof v["body"] === "string" &&
+    (v["specBody"] === undefined || typeof v["specBody"] === "string") &&
     Array.isArray(v["comments"]) &&
     v["comments"].every((comment) => typeof comment === "object" && comment !== null)
   );

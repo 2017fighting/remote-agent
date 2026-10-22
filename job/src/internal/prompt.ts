@@ -3,11 +3,35 @@ import { join } from "node:path";
 import type { WorkItemV1 } from "@remote-agent/shared";
 import type { AgentRole } from "./env.js";
 
-/** ConfigMap `remote-agent-prompts` keys (ADR-0004): `_common` first, then the role's template. */
+/**
+ * ConfigMap `remote-agent-prompts` keys (ADR-0004): `_common` first, then the
+ * role's template, plus one system prompt per review axis. `prompts/` in this
+ * repo is the verbatim source of that key surface.
+ */
+export const PROMPT_TEMPLATE_KEYS = [
+  "_common",
+  "implement-ticket",
+  "implement-spec",
+  "review-standards",
+  "review-spec",
+] as const;
+
 export const COMMON_PROMPT_KEY = "_common";
+
+/** The reviewer conversation's two axes: each reads its own template. */
+export type ReviewAxis = "spec" | "standards";
+
+const REVIEW_TEMPLATE_KEYS: Record<ReviewAxis, string> = {
+  spec: "review-spec",
+  standards: "review-standards",
+};
 
 export function roleTemplateKey(role: AgentRole): string {
   return role;
+}
+
+export function reviewTemplateKey(axis: ReviewAxis): string {
+  return REVIEW_TEMPLATE_KEYS[axis];
 }
 
 export interface RenderPromptInput {
@@ -30,7 +54,28 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
   return substitutePlaceholders(template, placeholderValues(input));
 }
 
-async function readPromptFile(dir: string, key: string): Promise<string> {
+export interface RenderReviewPromptInput {
+  axis: ReviewAxis;
+  /** The ref the reviewer diffs against; the same literal the implementer passed to `code_review`. */
+  fixedPoint: string;
+  /** `owner/repo#<spec>` — the Spec axis' comparison surface, never inferred by the reviewer. */
+  specRef: string;
+  /** The spec body; empty only when the work item carries none (the template then says so). */
+  specBody: string;
+  promptsDir: string;
+}
+
+/** The axis template as the reviewer conversation's system prompt, every placeholder substituted. */
+export async function renderReviewPrompt(input: RenderReviewPromptInput): Promise<string> {
+  const template = await readPromptFile(input.promptsDir, reviewTemplateKey(input.axis));
+  return substitutePlaceholders(template, {
+    fixed_point: input.fixedPoint,
+    spec_ref: input.specRef,
+    spec_body: input.specBody,
+  });
+}
+
+export async function readPromptFile(dir: string, key: string): Promise<string> {
   const path = join(dir, key);
   try {
     return await readFile(path, "utf8");

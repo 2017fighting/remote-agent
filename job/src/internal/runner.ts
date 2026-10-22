@@ -5,19 +5,24 @@ import {
   ROOT_CONVERSATION_ID,
   createRegistry,
   type Conversation,
+  type AgentChange,
   type Harness as HarnessHandle,
   type Storage,
   type Submission,
+  type ToolExecutionApi,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
-import { isRunResultV1, specBranch, type RunResultV1 } from "@remote-agent/shared";
+import { isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
 import type { JobPaths, RunnerEnv } from "./env.js";
 import { renderPrompt } from "./prompt.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
-import { RunCompletedDoc, RunResultDoc } from "./run-docs.js";
+import { ReviewRoundDoc, RunCompletedDoc, RunResultDoc } from "./run-docs.js";
 import { resultExtension, resultToolsForRole, commitRunResult } from "./result-tools.js";
+import { codeReviewTool, type ReviewReports } from "./code-review.js";
+import { runReview } from "./reviewer.js";
+import { reviewerExtension } from "./reviewer-tools.js";
 import { mergeBase, revParseHead, runGit } from "./git.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -38,6 +43,8 @@ export interface RunDeps {
   now?(): Date;
   /** Simulates a process death right after the run is admitted (before any model request). */
   crashAfterSubmit?(): void;
+  /** Injected in tests: the standards files the runner scans for the Standards axis. */
+  standardsFiles?(): Promise<string[]>;
 }
 
 export interface RunOutcome {
@@ -65,11 +72,13 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
   await mkdir(deps.paths.home, { recursive: true });
 
   const storage = await deps.openStorage(deps.paths.sessionDatabase);
-  const harness = await openHarness(deps, storage);
+  // The `code_review` tool is registered before the harness exists (the registry
+  // is a Harness input), so it reaches the harness through this holder.
+  const handle: HarnessHandle[] = [];
+  const harness = await openHarness(deps, storage, handle);
+  handle.push(harness);
   try {
-    const root = await harness.root(context, {
-      agent: { model: modelRefFor(deps), thinkingLevel: THINKING_LEVEL },
-    });
+    const root = await harness.root(context, { agent: implementerAgent(deps) });
     if (await isComplete(harness, root)) {
       deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} already-complete=true`);
       return { exitCode: 0, resumed: false, alreadyComplete: true };
@@ -107,29 +116,117 @@ function runRequestId(deps: RunDeps): string {
   return `remote-agent:${deps.env.repo}#${deps.env.workItem.number}:${deps.env.role}`;
 }
 
-async function openHarness(deps: RunDeps, storage: Storage): Promise<HarnessHandle> {
+async function openHarness(
+  deps: RunDeps,
+  storage: Storage,
+  handle: HarnessHandle[],
+): Promise<HarnessHandle> {
   if (deps.env.thinkingLevel !== THINKING_LEVEL) {
     // The Job template pins `high` (docs/deployment.md §9); a different value is an
     // App-side wiring bug and the runner does not silently substitute one.
     throw new Error(`AGENT_THINKING_LEVEL=${deps.env.thinkingLevel} is not the pinned level ${THINKING_LEVEL}`);
   }
-  const registry = createRegistry();
-  registry.install(CodingTools);
-  registry.install(
-    resultExtension(resultToolsForRole({ role: deps.env.role, record: commitRunResult })),
-  );
-
   return Harness.open(
     storage,
     {
       models: deps.models,
-      registry,
+      registry: buildRegistry(deps, handle),
       env: () => new NodeExecutionEnv({ cwd: deps.paths.repo }),
       now: () => (deps.now?.() ?? new Date()).getTime(),
       onReport: (error) => deps.log(`runner-report error=${String(error)}`),
     },
     context,
   );
+}
+
+/**
+ * Every extension one run installs: the coding tools, the reviewer's three tools
+ * (selectable by a reviewer conversation, removed from the implementer's agent),
+ * and the Result tools plus `code_review` for the role. Exported so a test can
+ * resolve a conversation's tool table against the same registry the run used.
+ */
+export function buildRegistry(
+  deps: Pick<RunDeps, "env" | "paths" | "log" | "standardsFiles">,
+  handle: HarnessHandle[],
+): ReturnType<typeof createRegistry> {
+  const registry = createRegistry();
+  registry.install(CodingTools);
+  registry.install(reviewerExtension());
+  registry.install(
+    resultExtension([
+      ...resultToolsForRole({ role: deps.env.role, record: commitRunResult }),
+      codeReviewTool({
+        repo: deps.paths.repo,
+        roundTaken: (api) => roundTaken(api),
+        claimRound: (fixedPoint, api) => claimRound(fixedPoint, api),
+        review: (request) =>
+          runReview(
+            {
+              harness: handle[0]!,
+              repo: deps.paths.repo,
+              promptsDir: deps.paths.prompts,
+              specRef: `${deps.env.repo}#${deps.env.specNumber}`,
+              specBody: specBodyFor(deps.env.role, deps.env.workItem),
+              model: { provider: "omniroute", modelId: deps.env.omniRoute.reviewModel },
+              parentTaskId: request.taskId,
+              ...(deps.standardsFiles === undefined ? {} : { standardsFiles: deps.standardsFiles }),
+              log: deps.log,
+            },
+            request.fixedPoint,
+          ),
+        completeRound: (reports, api) => completeRound(reports, api),
+      }),
+    ]),
+  );
+  return registry;
+}
+
+/**
+ * The implementer's agent: its model, the pinned thinking level, and the coding
+ * tools — with the reviewer extension removed, so `code_review`'s tool table is
+ * never also the implementer's.
+ */
+function implementerAgent(deps: RunDeps): AgentChange {
+  return {
+    model: modelRefFor(deps),
+    thinkingLevel: THINKING_LEVEL,
+    extensions: { remove: [reviewerExtension()] },
+  };
+}
+
+/** The one review round is durable: a resumed run finds it taken and refuses a second. */
+async function roundTaken(api: ToolExecutionApi): Promise<boolean> {
+  const round = await api.snapshot(ReviewRoundDoc, api.conversationId, BACKGROUND_CONTEXT);
+  return (round?.fixedPoint ?? "") !== "";
+}
+
+/** Claim before the first reviewer starts, so a crash mid-round cannot start a second. */
+async function claimRound(fixedPoint: string, api: ToolExecutionApi): Promise<void> {
+  await api.commit(async (tx) => {
+    const round = await tx.doc(ReviewRoundDoc, api.conversationId);
+    round.fixedPoint = fixedPoint;
+  }, BACKGROUND_CONTEXT);
+}
+
+async function completeRound(reports: ReviewReports, api: ToolExecutionApi): Promise<void> {
+  await api.commit(async (tx) => {
+    const round = await tx.doc(ReviewRoundDoc, api.conversationId);
+    round.spec = reports.spec;
+    round.standards = reports.standards;
+    round.completedAt = reports.completedAt;
+  }, BACKGROUND_CONTEXT);
+}
+
+/**
+ * The Spec axis' comparison surface: the parent spec's body when the App could
+ * read it, else the work item's own body for the spec role (which *is* the spec
+ * body). A ticket run without a `specBody` gets an empty string, and the
+ * template then reports "no spec available" rather than comparing against the
+ * ticket body, which the implementer already read.
+ */
+export function specBodyFor(role: RunnerEnv["role"], workItem: WorkItemV1): string {
+  if (workItem.specBody !== undefined) return workItem.specBody;
+  return role === "implement-spec" ? workItem.body : "";
 }
 
 /**
