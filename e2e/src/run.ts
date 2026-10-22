@@ -78,10 +78,18 @@ const repoRoot = resolve(process.env["RA_E2E_REPO_ROOT"] ?? process.cwd());
 
 /** Image tags the harness builds and loads. Distinct from GHCR so nothing is pulled by accident. */
 const APP_IMAGE = "remote-agent-e2e/app:local";
-const JOB_IMAGE = "remote-agent-e2e/job:local";
+/**
+ * The Job image must be tagged with **the reference the App bakes into itself**,
+ * not a local alias: the App's pod template names the image, and a Job pod can
+ * only start if that exact reference resolves inside the cluster. Tagging it
+ * anything else yields `Init:ImagePullBackOff` on every Job — which is what the
+ * first real run of this harness produced.
+ */
+const JOB_IMAGE_REPOSITORY = "ghcr.io/2017fighting/remote-agent-job";
 const STUB_GITHUB_IMAGE = "remote-agent-e2e/stub-github:local";
 const STUB_MODEL_IMAGE = "remote-agent-e2e/stub-model:local";
 const JOB_IMAGE_TAG = "e2e";
+const JOB_IMAGE = `${JOB_IMAGE_REPOSITORY}:${JOB_IMAGE_TAG}`;
 
 const STUB_GITHUB_PORT = 8080;
 const STUB_MODEL_PORT = 8080;
@@ -380,6 +388,24 @@ async function dockerBuild(runner: Runner, args: string[]): Promise<void> {
 async function loadImages(runner: Runner, clusterName: string): Promise<void> {
   for (const image of [APP_IMAGE, JOB_IMAGE, STUB_GITHUB_IMAGE, STUB_MODEL_IMAGE]) {
     await runner.run("kind", ["load", "docker-image", "--name", clusterName, image]);
+  }
+  // Assert the reference the App bakes is actually present in the cluster: a
+  // mismatch here shows up much later as `Init:ImagePullBackOff` on every Job,
+  // which reads like a Job bug rather than a harness bug.
+  const baked = await runner.run("node", ["-e", `
+    const { JOB_IMAGE } = await import("./app/src/build-info.ts");
+    process.stdout.write(JOB_IMAGE);
+  `], { cwd: repoRoot, allowFailure: true });
+  const bakedRef = baked.stdout.trim();
+  if (baked.exitCode !== 0 || bakedRef === "") {
+    runner.note("could not read the App's baked Job image reference; skipping the mismatch check");
+    return;
+  }
+  if (bakedRef !== JOB_IMAGE) {
+    throw new Error(
+      `the App bakes Job image ${bakedRef} but the harness built/loaded ${JOB_IMAGE}: ` +
+        "Job pods would fail with ImagePullBackOff. Tag the Job image with the baked reference.",
+    );
   }
 }
 
