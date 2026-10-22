@@ -34,6 +34,7 @@ import {
   AssertionTimeout,
   delay,
   isJobFinished,
+  AppReportedFailure,
   jobTerminalReason,
   kubectlJson,
   poll,
@@ -398,6 +399,36 @@ async function waitForDeployment(
   });
 }
 
+
+/**
+ * Fail fast when the App has already reported why it cannot proceed.
+ *
+ * A silent poll loop for an object the App will never create is the worst
+ * failure mode in this harness: it burns the whole timeout and reports
+ * "Job not found" when the real cause is one line in the App log. Called
+ * before each downstream wait.
+ */
+async function abortOnAppFailure(runner: Runner, context: string, phase: string): Promise<void> {
+  const logs = await runner.run("kubectl", ["--context", context, "-n", NAMESPACE, "logs", "deploy/remote-agent", "--tail", "80"], {
+    allowFailure: true,
+  });
+  const match = /pass-error[^\n]*/.exec(logs.stdout);
+  if (match === null) return;
+  runner.section("app", `App reported a failure during ${phase}`);
+  runner.write(
+    [
+      `While waiting for: ${phase}`,
+      "",
+      "The App's own log line (this is the cause, not the downstream symptom):",
+      match[0],
+      "",
+      "Full tail:",
+      logs.stdout.trim() || "(empty)",
+    ].join("\n"),
+  );
+  throw new AppReportedFailure(match[0]);
+}
+
 /**
  * Wait for the App Deployment. A crash-looping App is the interesting failure,
  * so this returns a failed summary with the reason instead of only timing out:
@@ -542,6 +573,9 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
   const observed: string[] = [];
   for (const ticketNumber of TICKET_NUMBERS) {
     const jobName = `agent-2017fighting-remote-agent-${ticketNumber}`;
+    // If the App has already reported a pass failure, the Job will never appear:
+    // report the App's own line now instead of timing out on "Job absent".
+    await abortOnAppFailure(runner, context, `claim of ticket #${ticketNumber}`);
     await poll<K8sJobObject | null>({
       description: `Job ${jobName} exists (ticket #${ticketNumber} claimed)`,
       timeoutMs: options.timeoutMs,
