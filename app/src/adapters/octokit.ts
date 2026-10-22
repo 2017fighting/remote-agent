@@ -68,6 +68,12 @@ export class OctokitGitHub implements GitHubPort {
   private readonly clients = new Map<string, OctokitClient>();
 
   constructor(config: OctokitGitHubConfig) {
+    // Fail at startup with the env names, not at the first request with
+    // octokit's own wording: a missing App credential is a deployment fault.
+    if (config.appId === "") throw new Error("GITHUB_APP_ID is required for the GitHub App adapter");
+    if (config.privateKey === "") {
+      throw new Error("GITHUB_APP_PRIVATE_KEY is required for the GitHub App adapter");
+    }
     const base = Octokit.defaults({ baseUrl: config.apiBaseUrl.replace(/\/+$/, "") });
     this.app = new App({
       appId: config.appId,

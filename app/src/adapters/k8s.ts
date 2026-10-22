@@ -12,6 +12,7 @@ import {
   type V1Pod,
   type V1Secret,
 } from "@kubernetes/client-node";
+import { AGENT_CONTAINER_NAME } from "../renders/job-template.js";
 import { K8sApiError } from "../ports/errors.js";
 import type {
   K8sEvent,
@@ -47,8 +48,6 @@ import type {
  * namespace is the one App config resolved.
  */
 
-/** The container whose log tail is quoted into an `error` comment (ADR-0007). */
-const LOG_CONTAINER = "runner";
 /** Log tail budget for the evidence comment (`renders/comments.ts` keeps 40 lines). */
 const LOG_TAIL_LINES = 200;
 
@@ -82,7 +81,7 @@ export class KubeClientK8s implements K8sPort {
       return toJob(job);
     } catch (error) {
       if (isNotFoundError(error)) return null;
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -91,7 +90,7 @@ export class KubeClientK8s implements K8sPort {
       const list = await this.batch.listNamespacedJob({ namespace: this.namespace });
       return (list.items ?? []).map(toJob);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -104,15 +103,17 @@ export class KubeClientK8s implements K8sPort {
       });
       return toJob(created);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
   /**
    * Job watch — the wake source for "a run reached a terminal state" and for
    * `DELETED` (ADR-0013: a Job's removal is what re-opens the Claim-gate).
-   * The watcher reconnects on its own after a closed connection; only
-   * `ADDED` / `DELETED` carry product meaning here, so the rest is dropped.
+   * Only `ADDED` / `DELETED` carry product meaning here, so the rest is
+   * dropped. The stream ends when the connection closes; the resync tick is
+   * the backstop that makes that lossless (ADR-0014), which is why a closed
+   * watch is not surfaced as a pass failure.
    */
   async watchJobs(onEvent: (event: K8sEvent) => void): Promise<void> {
     await this.watch.watch(
@@ -124,7 +125,8 @@ export class KubeClientK8s implements K8sPort {
       },
       () => {
         // A closed watch is not a pass failure: the resync tick is the backstop
-        // (ADR-0014), so the error is dropped rather than thrown into a timer.
+        // (ADR-0014). Re-arming the watch belongs to whoever owns the wake
+        // surface, not to this per-call method.
       },
     );
   }
@@ -136,7 +138,7 @@ export class KubeClientK8s implements K8sPort {
       const list = await this.core.listNamespacedPod({ namespace: this.namespace });
       return (list.items ?? []).map(toPod);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -146,7 +148,7 @@ export class KubeClientK8s implements K8sPort {
       return toPod(pod);
     } catch (error) {
       if (isNotFoundError(error)) return null;
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -156,11 +158,12 @@ export class KubeClientK8s implements K8sPort {
       return await this.core.readNamespacedPodLog({
         name: podName,
         namespace: this.namespace,
-        container: LOG_CONTAINER,
+        // The same container name the Job template declares (one spelling).
+        container: AGENT_CONTAINER_NAME,
         tailLines: LOG_TAIL_LINES,
       });
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -178,7 +181,7 @@ export class KubeClientK8s implements K8sPort {
       });
       return toSecret(created);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -188,7 +191,7 @@ export class KubeClientK8s implements K8sPort {
       return toSecret(secret);
     } catch (error) {
       if (isNotFoundError(error)) return null;
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -210,7 +213,7 @@ export class KubeClientK8s implements K8sPort {
       );
       return toSecret(patched as V1Secret);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -218,7 +221,7 @@ export class KubeClientK8s implements K8sPort {
     try {
       await this.core.deleteNamespacedSecret({ name, namespace: this.namespace });
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -239,7 +242,7 @@ export class KubeClientK8s implements K8sPort {
       });
       return toPvc(created);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -252,7 +255,7 @@ export class KubeClientK8s implements K8sPort {
       return toPvc(pvc);
     } catch (error) {
       if (isNotFoundError(error)) return null;
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -261,7 +264,7 @@ export class KubeClientK8s implements K8sPort {
       const list = await this.core.listNamespacedPersistentVolumeClaim({ namespace: this.namespace });
       return (list.items ?? []).map(toPvc);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -281,7 +284,7 @@ export class KubeClientK8s implements K8sPort {
       );
       return toPvc(patched as V1PersistentVolumeClaim);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -310,7 +313,7 @@ export class KubeClientK8s implements K8sPort {
       );
       return toPvc(patched as V1PersistentVolumeClaim);
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 
@@ -318,7 +321,7 @@ export class KubeClientK8s implements K8sPort {
     try {
       await this.core.deleteNamespacedPersistentVolumeClaim({ name, namespace: this.namespace });
     } catch (error) {
-      throw translate(error);
+      throw toK8sApiError(error);
     }
   }
 }
@@ -344,9 +347,7 @@ function loadKubeConfig(kubeconfigPath?: string): KubeConfig {
 
 /** A 404 from any of the generated clients means "gone", never "fail the pass". */
 function isNotFoundError(error: unknown): boolean {
-  return error instanceof K8sApiError
-    ? error.status === 404
-    : statusOf(error) === 404;
+  return statusOf(error) === 404;
 }
 
 function statusOf(error: unknown): number | undefined {
@@ -362,7 +363,7 @@ function statusOf(error: unknown): number | undefined {
  * the server's own `Status.message`, which is where the quota text
  * ("exceeded quota: ...") lives for `isQuotaExceeded` to match.
  */
-function translate(error: unknown): unknown {
+function toK8sApiError(error: unknown): unknown {
   if (error instanceof K8sApiError) return error;
   const status = statusOf(error);
   if (status === undefined) return error;

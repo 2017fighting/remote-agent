@@ -29,7 +29,7 @@ export async function startApp(options?: {
     privateKey: env[APP_ENV_KEYS.githubAppPrivateKey] ?? "",
     apiBaseUrl: config.githubApiBaseUrl,
   });
-  const k8s = options?.k8s ?? new KubeClientK8s({ namespace: env["NAMESPACE"] ?? "remote-agent" });
+  const k8s = options?.k8s ?? new KubeClientK8s({ namespace: config.namespace });
 
   const scheduler = createScheduler(config, {
     reconcile: (trigger) => runReconcilePass({ github, k8s, config }, trigger),

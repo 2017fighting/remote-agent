@@ -378,6 +378,29 @@ describe("OctokitGitHub: writes", () => {
   });
 });
 
+describe("OctokitGitHub: configuration", () => {
+  it("fails at construction when the App credentials are missing, naming the env key", () => {
+    expect(() => new OctokitGitHub({ appId: "", privateKey: TEST_PRIVATE_KEY, apiBaseUrl: "http://127.0.0.1:1" })).toThrow(
+      /GITHUB_APP_ID/,
+    );
+    expect(() => new OctokitGitHub({ appId: APP_ID, privateKey: "", apiBaseUrl: "http://127.0.0.1:1" })).toThrow(
+      /GITHUB_APP_PRIVATE_KEY/,
+    );
+  });
+
+  it("accepts a base URL with a trailing slash (the stub's form) and an escaped private key", async () => {
+    stub = await startStubServer(defaultHandler);
+    const github = new OctokitGitHub({
+      appId: APP_ID,
+      privateKey: TEST_PRIVATE_KEY.replace(/\n/g, "\\n"),
+      apiBaseUrl: `${stub.url}/`,
+    });
+
+    expect(await github.getIssue(REPO, 1)).toMatchObject({ number: 1 });
+    expect(stub.requests.every((request) => request.path.startsWith("/"))).toBe(true);
+  });
+});
+
 describe("OctokitGitHub: installation token mint", () => {
   it("requests contents: write scoped to the one target repo", async () => {
     const github = await adapter();
