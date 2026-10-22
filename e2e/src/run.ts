@@ -287,9 +287,40 @@ async function ensureCluster(runner: Runner, name: string): Promise<void> {
   const existing = await runner.run("kind", ["get", "clusters"], { allowFailure: true });
   if (existing.stdout.split("\n").includes(name)) {
     runner.note(`cluster ${name} already exists; reusing it`);
+    await resetNamespace(runner, `kind-${name}`);
     return;
   }
   await runner.run("kind", ["create", "cluster", "--name", name, "--wait", "180s"]);
+}
+
+/**
+ * Drop the e2e namespace before reusing a cluster.
+ *
+ * Everything the harness owns lives in it (Deployments, Jobs, Ticket PVCs,
+ * per-Job Secrets), so a previous run's objects would otherwise be asserted on:
+ * a stale App pod still runs the previous image, and a stale Job or PVC makes a
+ * claim assertion pass without this run having claimed anything. The namespace
+ * is re-applied from `manifests.ts` a few lines later, so deleting it is safe.
+ */
+async function resetNamespace(runner: Runner, context: string): Promise<void> {
+  const deleted = await runner.run("kubectl", ["--context", context, "delete", "namespace", NAMESPACE, "--ignore-not-found", "--wait=false"], {
+    allowFailure: true,
+  });
+  if (deleted.exitCode !== 0) {
+    runner.note(`could not delete namespace ${NAMESPACE}: ${deleted.stderr.trim()}`);
+    return;
+  }
+  runner.note(`deleted namespace ${NAMESPACE} from the previous run; waiting for it to go`);
+  await poll<string>({
+    description: `namespace ${NAMESPACE} is gone`,
+    timeoutMs: 120_000,
+    intervalMs: 1000,
+    observe: () =>
+      runner.run("kubectl", ["--context", context, "get", "namespace", NAMESPACE, "-o", "name"], { allowFailure: true })
+        .then((result) => result.stdout.trim()),
+    until: (stdout) => stdout === "",
+    describe: (stdout) => stdout || "absent",
+  });
 }
 
 async function buildImages(runner: Runner, options: RunOptions): Promise<void> {
