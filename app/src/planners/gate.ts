@@ -20,8 +20,16 @@ export const LABEL_READY_FOR_AGENT = "ready-for-agent";
 export const LABEL_AGENT_IMPLEMENT = "agent:implement";
 export const LABEL_AGENT_IN_PROGRESS = "agent:in-progress";
 
-/** Every `agent:*` label is an exit marker (in-progress / error / blocked) — none of them belongs on a claimable issue. */
+/**
+ * Every `agent:*` label other than `agent:implement` is an exit marker
+ * (in-progress / error / blocked) — none of them belongs on a claimable issue.
+ * `agent:implement` is the authorization itself, so it is excluded here.
+ */
 const AGENT_LABEL_PREFIX = "agent:";
+
+function hasBlockingAgentLabel(labels: string[]): boolean {
+  return labels.some((label) => label.startsWith(AGENT_LABEL_PREFIX) && label !== LABEL_AGENT_IMPLEMENT);
+}
 
 export interface GateInput {
   issue: GitHubIssue;
@@ -54,7 +62,7 @@ export function labelGate(issue: GitHubIssue, openBlockerCount: number): GateRes
   if (!issue.labels.includes(LABEL_AGENT_IMPLEMENT)) {
     return { passed: false, reason: "missing-agent-implement" };
   }
-  if (issue.labels.some((label) => label.startsWith(AGENT_LABEL_PREFIX))) {
+  if (hasBlockingAgentLabel(issue.labels)) {
     return { passed: false, reason: "agent-label-present" };
   }
   return { passed: true };
