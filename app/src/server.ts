@@ -15,6 +15,13 @@ export interface WebhookServerDeps {
   webhookSecret: string;
   /** The only thing the webhook endpoint does with an accepted delivery. */
   wake: (trigger: Trigger) => void;
+  /**
+   * Address to bind. Defaults to an ephemeral port on loopback, which is what a
+   * test wants; the App image sets `PORT`, and `main.ts` then binds all
+   * interfaces so the Service (and the kubelet's probe) can reach it.
+   */
+  host?: string;
+  port?: number;
 }
 
 export interface WebhookServer {
@@ -87,13 +94,14 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
   const listeningPromise = new Promise<void>((resolve) => {
     listeningResolve = resolve;
   });
+  const host = deps.host ?? "127.0.0.1";
   const handleObj: WebhookServer = {
-    host: "127.0.0.1",
+    host,
     port: 0,
     ready: () => listeningPromise,
     close: () => new Promise<void>((done) => server.close(() => done())),
   };
-  server.listen(0, "127.0.0.1", () => {
+  server.listen(deps.port ?? 0, host, () => {
     const address = server.address();
     if (address === null || typeof address === "string") {
       throw new Error("unexpected server address");

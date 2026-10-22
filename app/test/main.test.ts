@@ -98,4 +98,34 @@ describe("startApp wiring", () => {
       await app.stop();
     }
   });
+
+  it("binds PORT on all interfaces, so the Service and the readiness probe can reach it", async () => {
+    // The image declares PORT=8080 and the Deployment probes that port over the
+    // pod IP; a loopback-only or ephemeral listener is unreachable in-cluster.
+    const port = 18080 + Math.floor(Math.random() * 1000);
+    const logLines: string[] = [];
+    const app = await startApp({
+      env: { PORT: String(port) },
+      github: new FakeGitHub(),
+      k8s: new FakeK8s(),
+      log: (line) => logLines.push(line),
+      webhookSecret: SECRET,
+    });
+    try {
+      expect(logLines).toContain(`webhook listening on 0.0.0.0:${port}/webhook`);
+      const payload = JSON.stringify({ action: "labeled" });
+      const res = await fetch(`http://127.0.0.1:${port}/webhook`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "issues",
+          "x-hub-signature-256": sign(SECRET, payload),
+        },
+        body: payload,
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      await app.stop();
+    }
+  });
 });

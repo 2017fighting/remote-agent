@@ -44,7 +44,17 @@ export async function startApp(options?: {
   });
 
   const webhookSecret = options?.webhookSecret ?? env["GITHUB_WEBHOOK_SECRET"] ?? "";
-  const server = createWebhookServer({ webhookSecret, wake: (t) => scheduler.wake(t) });
+  // The image declares PORT=8080 (app/Dockerfile) and the Deployment's Service
+  // targets that port, so the App must bind it — on all interfaces, because a
+  // loopback listener is unreachable from the Service and from the kubelet's
+  // readiness probe. Unset (unit tests, `node` on a laptop) keeps the ephemeral
+  // loopback default.
+  const port = options?.port ?? readPort(env["PORT"]);
+  const server = createWebhookServer({
+    webhookSecret,
+    wake: (t) => scheduler.wake(t),
+    ...(port === undefined ? {} : { host: "0.0.0.0", port }),
+  });
   await server.ready();
   log(`webhook listening on ${server.host}:${server.port}/webhook`);
 
@@ -57,4 +67,14 @@ export async function startApp(options?: {
       await server.close();
     },
   };
+}
+
+/** `PORT` from the image env; absent or unusable means "let the OS choose". */
+function readPort(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const port = Number.parseInt(raw, 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`PORT=${raw} is not a valid TCP port`);
+  }
+  return port;
 }
