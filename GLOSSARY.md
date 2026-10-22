@@ -1,6 +1,6 @@
 # Remote Agent
 
-一个把 GitHub issue 变成 k8s 里 AFK agent 运行的编排系统：App 读 issue、算 frontier、起 Job，Job 里的 pi 干活并把结果回报给 App。
+一个把 GitHub issue 变成 k8s 里 AFK agent 运行的编排系统：App 读 issue、算 frontier、起 Job，Job 里的 runner 跑一个 agent role、把结果写进自己 Job 的 annotation，再由 App 回报到 GitHub。
 
 ## Language
 
@@ -15,7 +15,7 @@ _Avoid_: epic, parent issue, 大 issue
 _Avoid_: task, subtask, child issue
 
 **Frontier**:
-某个 spec 当前可开工的那张 ticket：它的 sub-issue 里第一条通过 Gate 的。
+某个 spec 当前可开工的那张 ticket：它的 sub-issue 里第一条**通过 Claim-gate 的**——即 Gate（label 半边）∧ 确定性名下无未删的 Job 对象（k8s 半边，见 `Claim`；[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。
 _Avoid_: next task, queue head, 待办
 
 **Gate**:

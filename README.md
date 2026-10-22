@@ -1,5 +1,7 @@
 # Remote Agent
 
+> **⚠️ 本文件有大段内容还是立项时的草稿，与已定决策不符。**准绳是 `docs/adr/` 与 `docs/architecture.md`，不是这里。已知过期处：`## k8s job的pvc哪来`（base PVC + 快照已退出 v1，工作副本由 init container 播种进每 ticket 自己的卷，见 [ADR-0008](docs/adr/0008-durable-runtime-base.md)）、`## job并发`（Slot / Defer 语义见 [architecture.md §5](docs/architecture.md#5-并发slot-与-defer)）、`## implement整体流程` 第 5 步与 `## implement job的结果`（`pi -p --mode json` 已换成 pi-durable 库 + 自写 runner，结果由 Result tool + Job annotation 承载，见 [ADR-0008](docs/adr/0008-durable-runtime-base.md) / [ADR-0007](docs/adr/0007-run-result-contract.md)）、`## implement ticket prompt` 与 `## implement Spec prompt` 两节（镜像里没有 skill 层、e2e 已撤销、`Closes` 由 App 写进 PR body，见 [ADR-0004](docs/adr/0004-prompts-live-in-configmap.md) 与 [prompt 清单](docs/agents/prompt-checklist.md)）。改写时机与归属由 spec 阶段收口。
+
 ## 运行环境
 
 k8s @/root/clone/home-ops(git@github.com:2017fighting/home-ops.git)
@@ -11,7 +13,7 @@ App ID: 5390512
 Client ID: Iv23lipjSurEcAJNUaNW
 Homepage URL: https://remote-agent.raenzo.com/
 Webhook URL: https://remote-agent.raenzo.com/webhook
-WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3
+WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3  # ⚠️ 已泄漏（明文进过 git 历史）——按 #12 的动作项在 GitHub App 后台重设、新值进 home-ops 的 sops，这里只留作对照，别当现役值用
 
 ## mattpocock-skills 生成的issue label
 
@@ -45,7 +47,7 @@ spec-ticket的关系是一对多的，spec会有sub issue，ticket通常没有(e
 
 ## 如何找spec当前frontier ticket
 
-list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ no `agent:*` label），first wins.
+list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ no `agent:*` label），first wins。**门还有 k8s 半边**：该 ticket 确定性名下的 Job 对象还在（终态与否）就不 Claim、不建、不读旧 annotation，等它的 `DELETED` 事件唤醒下一轮（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。
 
 ## job并发
 
@@ -53,7 +55,7 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 
 ## branch
 
-每个spec一个branch`agent/spec-<spec-issue-number>`，这个spec下的sub issue，都在这个branch下工作，每次工作前都从最新commit开始，多个job并发时，由后面`push`的job解决冲突
+每个spec一个branch`agent/spec-<spec-issue-number>`，这个spec下的sub issue，都在这个branch下工作，每次工作前都从最新commit开始。**v1 每 spec 串行、单写者**（#4 / #13），所以「多个 job 并发、后 push 的解决冲突」不成立：远端已前进（非 FF）即按异常处理，runner 不自动 rebase / pull（[ADR-0009](docs/adr/0009-ticket-volume-seeding.md)）；并发共享同一分支的 rebase-and-retry 在地图的 Out of scope 里。
 
 ## Spec implement循环
 
@@ -62,7 +64,7 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 直到所有`ready-for-agent`的issue都被实现完成
 如果当前spec没有任何open的sub issue了，则由`github app`新开一个k8s job去做最后的收尾工作，并提交pr
 
-如果某个ticket并未完全complete，给这个ticket添加`agent:blocked`的label，由agent去给这个issue写评论，说明做了什么（这时不close issue），并停下来
+如果某个ticket并未完全complete，给这个ticket添加`agent:blocked`的label，并由 App 按 run result 的 `commentBody` 转写一条评论说明做了什么（agent 不碰 GitHub，[ADR-0002](docs/adr/0002-app-is-sole-github-writer.md)；这时不 close issue），然后停下来
 
 ## k8s job的pvc哪来
 
@@ -122,9 +124,10 @@ commit需要有`Closes #<spec-issue-number>`
 
 ```
 open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ 无任何 agent:*
+        ∧ 确定性 Job 名下无未删的 Job 对象（k8s 半边，ADR-0013）
 ```
 
-四条件缺一不动。`ready-for-agent` 是门的一部分而不是装饰：spec 收尾后把它换成 `ready-for-human`，就是靠这一条退出门。额度满时 **Defer**（本轮不建 Job、不改 label、不评论，只写一条日志，见 #13）。
+四条件缺一不动；k8s 半边不满足时同样不动，只是等 `DELETED` 事件唤醒，见 [ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)。`ready-for-agent` 是门的一部分而不是装饰：spec 收尾后把它换成 `ready-for-human`，就是靠这一条退出门。额度满时 **Defer**（本轮不建 Job、不改 label、不评论，只写一条日志，见 #13）。
 
 | 场景（Job 终态 · annotation） | ticket 的 label | spec 的 label |
 |---|---|---|

@@ -41,7 +41,7 @@ App 侧四个 env 覆盖（默认值就是上表）：`JOB_PVC_SIZE` / `JOB_ACTI
 
 ## Consequences
 
-- **App 的 env 面多三个键**（默认值在代码里），home-ops 的 HelmRelease 可以不带它们就跑。
+- **App 的 env 面多三个键**（默认值在代码里；加上 [ADR-0012](0012-job-deletion-ttl.md) 的 `JOB_TTL_SECONDS_AFTER_FINISHED` 是四个，[ADR-0014](0014-wake-surface-periodic-resync.md) 的 `RESYNC_INTERVAL_SECONDS` 之后是五个），home-ops 的 HelmRelease 可以不带它们就跑。
 - **Ticket PVC 上多一层 `home/`**：`repo/`（工作副本）、`state/`（durable sqlite + marker）之外还有 HOME 的缓存。播种仍然只碰 `repo/`，从不碰 `state/` 与 `home/`。
 - **`disk` 这个失败类终于有了触发点**：ADR-0009 的五个分类里原本只列了名字。
 - **以后要跑 e2e 或 `next build` 时这些数要重估**：6Gi 的上限容不下一次 `next build` 加 chromium。那是新的一次决策，不是把 6Gi 调大就行。

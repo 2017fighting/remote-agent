@@ -2,7 +2,7 @@
 
 本文件把**已经定下来的设计**（`README.md` + `docs/adr/`）画成图，方便对照代码与排查。
 
-图里的名词一律取自 `GLOSSARY.md`。与 ADR 不一致的地方不在这里偷偷改，集中在[第 8 节](#8-两处缺口)列出。
+图里的名词一律取自 `GLOSSARY.md`。与 ADR 不一致的地方不在这里偷偷改，集中在[第 8 节](#8-两处缺口)列出。部署面与 OmniRoute 接线的**已定事实**（namespace、RBAC、secret、镜像、Job env、provider 接线）另在 [`docs/deployment.md`](deployment.md)，不在这里重画。
 
 > **⚠️ 部分图已过期（[ADR-0008](adr/0008-durable-runtime-base.md)）**：执行面基座从 `pi -p --mode json` 换成了 pi-durable（库）+ 自写 runner，因此**第 1、2、6、7 节的图**与**第 8 节的缺口 A** 不再成立：Base PVC / Sync Job / Job snapshot 已退出 v1，终态只有三种（Job `Complete` / `backoffLimit` 耗尽 / `DeadlineExceeded`），pod 重启对 GitHub 不可见，`error` 不再自动重试。**第 3 节的 Spec 循环图另有两处失效（[#16](https://github.com/2017fighting/remote-agent/issues/16)）**：收尾 Job **不再跑 e2e**（`/implement-spec` 原文里没有 e2e，v1 不自行加），`Closes #<spec>` **不由 commit 带**，而是 App 开 PR 时追加进 PR body（ADR-0002 下 agent 不碰 GitHub）。重画归属 spec 阶段（见地图的「Not yet specified」）；在此之前以 `docs/adr/0003`、`0004`、`0005`、`0007`、`0008` 为准。
 
@@ -151,7 +151,7 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 | **T3L** 自环 · pod 在重启 | 非终态（pod 重启，`resume()` 从 checkpoint 续） | **与 T3 一字不差** | k8s（无人写 GitHub） | 任何 pod 层失败 | 回到 T3，直到 Job 终态；`backoffLimit` 耗尽才走 T6b |
 | **T4** done | `Complete` · `{outcome:"done", summary, commentBody?, newTickets?}` | `closed` · `[ready-for-agent, agent:implement]` | App（关票、摘 `agent:in-progress`；`commentBody` 有则转成评论） | T3 ∧ Complete ∧ done | 终态，出局。`newTickets` 非空时**先建 sub-issue、再关票**（反过来会在两写之间留下「票已关、新票还没建」的空窗） |
 | **T5** blocked | `Complete` · `{outcome:"blocked", commentBody}` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | App（摘 `ready-for-agent`、加 `ready-for-human`、加 `agent:blocked`、置评论） | T3 ∧ Complete ∧ blocked | 人重入（T8） |
-| **T6a** error · 自述 | `Complete` · `{outcome:"error", reason}` | `open` · `[ready-for-human, agent:implement, agent:error]` + App 评论 | App | T3 ∧ Complete ∧ error（防御分支：ADR-0007 下 agent 只自述 done/blocked） | 人重入（T8） |
+| **T6a** error · 自述 | `Complete` · `{outcome:"error", summary}` · **无 `reason`**（防御分支：ADR-0007 下 agent 只自述 done/blocked，载荷里也没有 `reason`——细分原因是 App 证据评论的事） | `open` · `[ready-for-human, agent:implement, agent:error]` + App 评论 | App | T3 ∧ Complete ∧ error | 人重入（T8） |
 | **T6b** error · backoff 耗尽 | `Failed` · `reason=BackoffLimitExceeded` · **无 annotation** | 同 T6a | App | T3L 超过 `backoffLimit` | 人重入（T8） |
 | **T6c** error · 超时 | `Failed` · `reason=DeadlineExceeded` · **无 annotation** | 同 T6a | App | T3 跑过 `activeDeadlineSeconds` | 人重入（T8） |
 | **T6d** error · no-result | `Complete` · annotation **缺失或不可解析** | 同 T6a | App | Job 已终态却读不到 annotation（ADR-0007 兜底） | 人重入（T8） |
@@ -235,7 +235,7 @@ flowchart TD
 
 annotation 只有 runner 在**终态**才写，所以 T6b/T6c/T6d/T6e 这四条路上**根本没有 annotation**——人看到的就是一个光秃秃的 `agent:error`。所以 App 在这四种情况下自己发一条评论，内容固定为：
 
-- `outcome=error` 与 `reason`（`backoff-exhausted` / `deadline-exceeded` / `no-result` / `no-job` / annotation 自带的值）；
+- `outcome=error` 与 App 自己判的 `reason`（`backoff-exhausted` / `deadline-exceeded` / `no-result` / `no-job`）——**`reason` 不在载荷里**（[ADR-0007](adr/0007-run-result-contract.md)：agent 不能自述 `error`），它是 App 从 Job 终态与「annotation 有没有」得出的；
 - Job 名、pod 名；
 - **重入提示（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）**：人重入后，若旧 Job 还在保留窗里，新一轮最迟 30 分钟内起跑；等不及可 `kubectl delete job <Job 名>`，删除事件立即唤醒 Claim；
 - pod 终态证据（`OOMKilled` / `exitCode` / `DeadlineExceeded`）与容器日志末尾；
@@ -341,7 +341,7 @@ flowchart LR
 
 - **ADR-0001**：无状态 reconciler，没有地方存「哪个 ticket 现在能看到什么」的索引。任何跨 reconcile 的索引都要重新论证。
 - **ADR-0002**：App 是唯一 GitHub writer。人的介入（steer、改 prompt、重跑）会成为第二个 writer，需要重新划界。
-- **ADR-0007**：Job 与 pod 在 App 读到 result 之前不得被删。观察通道会延长这个保留窗口。
+- **ADR-0007 / ADR-0012**：Job 在 App 读到 result 之前不得被删——这条已被改写成「TTL 1800 秒 = App 的读取预算」（[ADR-0012](adr/0012-job-deletion-ttl.md)）。观察通道会延长这个保留窗口。
 
 **这里还有一个词汇缺口**：这个能力在 `GLOSSARY.md` 里没有名字。按 `docs/agents/domain.md`，不要直接造词——留给 `/domain-modeling` 定名，再开 ADR。
 
