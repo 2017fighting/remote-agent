@@ -75,7 +75,7 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
   // The `code_review` tool is registered before the harness exists (the registry
   // is a Harness input), so it reaches the harness through this holder.
   const handle: HarnessHandle[] = [];
-  const harness = await openHarness(deps, storage, createRegistry(), handle);
+  const harness = await openHarness(deps, storage, handle);
   handle.push(harness);
   try {
     const root = await harness.root(context, { agent: implementerAgent(deps) });
@@ -119,7 +119,6 @@ function runRequestId(deps: RunDeps): string {
 async function openHarness(
   deps: RunDeps,
   storage: Storage,
-  registry: ReturnType<typeof createRegistry>,
   handle: HarnessHandle[],
 ): Promise<HarnessHandle> {
   if (deps.env.thinkingLevel !== THINKING_LEVEL) {
@@ -127,9 +126,31 @@ async function openHarness(
     // App-side wiring bug and the runner does not silently substitute one.
     throw new Error(`AGENT_THINKING_LEVEL=${deps.env.thinkingLevel} is not the pinned level ${THINKING_LEVEL}`);
   }
+  return Harness.open(
+    storage,
+    {
+      models: deps.models,
+      registry: buildRegistry(deps, handle),
+      env: () => new NodeExecutionEnv({ cwd: deps.paths.repo }),
+      now: () => (deps.now?.() ?? new Date()).getTime(),
+      onReport: (error) => deps.log(`runner-report error=${String(error)}`),
+    },
+    context,
+  );
+}
+
+/**
+ * Every extension one run installs: the coding tools, the reviewer's three tools
+ * (selectable by a reviewer conversation, removed from the implementer's agent),
+ * and the Result tools plus `code_review` for the role. Exported so a test can
+ * resolve a conversation's tool table against the same registry the run used.
+ */
+export function buildRegistry(
+  deps: Pick<RunDeps, "env" | "paths" | "log" | "standardsFiles">,
+  handle: HarnessHandle[],
+): ReturnType<typeof createRegistry> {
+  const registry = createRegistry();
   registry.install(CodingTools);
-  // Installed so a reviewer conversation can select it by name; the implementer's
-  // agent removes it, and a reviewer selects nothing else (spec #33 §6).
   registry.install(reviewerExtension());
   registry.install(
     resultExtension([
@@ -157,19 +178,7 @@ async function openHarness(
       }),
     ]),
   );
-
-  const harness = await Harness.open(
-    storage,
-    {
-      models: deps.models,
-      registry,
-      env: () => new NodeExecutionEnv({ cwd: deps.paths.repo }),
-      now: () => (deps.now?.() ?? new Date()).getTime(),
-      onReport: (error) => deps.log(`runner-report error=${String(error)}`),
-    },
-    context,
-  );
-  return harness;
+  return registry;
 }
 
 /**
