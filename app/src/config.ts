@@ -20,6 +20,12 @@ export interface AppConfig {
   maxJobsPerRepo: number;
   githubApiBaseUrl: string;
   gitBaseUrl: string;
+  /**
+   * GitHub App id. Two readers: the Octokit constructor, and the Job env that
+   * gives agent commits their bot identity (ADR-0009). Empty is a valid value —
+   * the runner then commits as `remote-agent[bot]` without the id prefix.
+   */
+  githubAppId: string;
   /** Namespace Jobs / Secrets / Ticket PVCs are created in. */
   namespace: string;
   /** OmniRoute base URL injected into every Job (docs/deployment.md §9). */
@@ -63,6 +69,7 @@ export function readAppConfig(env: EnvSource = process.env): AppConfig {
     maxJobsPerRepo: readNonNegativeInt(env, APP_ENV_KEYS.maxJobsPerRepo, DEFAULT_MAX_JOBS_PER_REPO),
     githubApiBaseUrl: readString(env, APP_ENV_KEYS.githubApiBaseUrl, DEFAULT_GITHUB_API_BASE_URL),
     gitBaseUrl: readString(env, APP_ENV_KEYS.gitBaseUrl, DEFAULT_GIT_BASE_URL),
+    githubAppId: readString(env, APP_ENV_KEYS.githubAppId, ""),
     namespace: readString(env, APP_ONLY_ENV_KEYS.namespace, DEFAULT_NAMESPACE),
     omniRouteBaseUrl: readString(env, APP_ONLY_ENV_KEYS.omniRouteBaseUrl, DEFAULT_OMNIROUTE_BASE_URL),
     jobPvcSize: readString(env, APP_ENV_KEYS.jobPvcSize, DEFAULT_JOB_PVC_SIZE),

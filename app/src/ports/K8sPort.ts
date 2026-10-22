@@ -100,6 +100,8 @@ export interface K8sEnvVar {
   value?: string;
   /** Exact single-key reference — never `envFrom` (user story 57). */
   secretKeyRef?: { name: string; key: string };
+  /** Downward API: the pod's own `metadata.name` / `metadata.namespace` (ADR-0007). */
+  valueFrom?: { fieldRef: { fieldPath: string } };
 }
 
 export interface K8sResourceRequirements {

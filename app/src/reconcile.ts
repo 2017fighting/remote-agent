@@ -152,6 +152,9 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
       renderWorkItem({
         issue: ticket,
         specNumber: spec.number,
+        // The spec was read during planning, so the ticket's Spec axis costs no
+        // extra read: a ticket run must carry the parent spec's body.
+        specBody: spec.body,
         comments: await github.listComments(ticket.ownerRepo, ticket.number),
       }),
     );

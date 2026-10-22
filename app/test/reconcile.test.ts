@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { JOB_ENV_KEYS, isWorkItemV1, type WorkItemV1 } from "@remote-agent/shared";
 import { runReconcilePass, type WorldSnapshot } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
@@ -129,6 +130,46 @@ describe("reconcile pass: Slot occupancy", () => {
       k8s.pods.push({ name: `${job.name}-${phase}`, namespace: "remote-agent", ownerJobName: job.name, phase, deleting: false });
     }
     expect((await runReconcilePass({ github, k8s, config }, "tick")).slotsUsed).toBe(1);
+  });
+});
+
+describe("reconcile pass: the claimed ticket's work item", () => {
+  /** The `AGENT_WORK_ITEM` the pass put on the Job it created, parsed as v1. */
+  function claimedWorkItem(k8s: FakeK8s): WorkItemV1 {
+    const env = k8s.jobManifests[0]!.podTemplate.containers[0]!.env!;
+    const raw = env.find((e) => e.name === JOB_ENV_KEYS.agentWorkItem)?.value;
+    const parsed: unknown = JSON.parse(raw ?? "null");
+    expect(isWorkItemV1(parsed)).toBe(true);
+    return parsed as WorkItemV1;
+  }
+
+  it("carries the parent spec's body so the Spec axis has something to review", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    github.issues[0]!.body = "## Spec 33\n\nthe spec's own body";
+    const k8s = new FakeK8s();
+
+    await runReconcilePass({ github, k8s, config }, "webhook");
+
+    const workItem = claimedWorkItem(k8s);
+    expect(workItem.number).toBe(34);
+    expect(workItem.specNumber).toBe(33);
+    expect(workItem.specBody).toBe("## Spec 33\n\nthe spec's own body");
+    // The ticket's own body is untouched: `specBody` is the parent, not a copy.
+    expect(workItem.body).toBe("Body of #34");
+  });
+
+  it("costs no extra GitHub read: the spec was already read during planning", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    const getIssue = github.getIssue.bind(github);
+    let specReads = 0;
+    github.getIssue = async (ownerRepo: string, issueNumber: number) => {
+      if (issueNumber === 33) specReads += 1;
+      return getIssue(ownerRepo, issueNumber);
+    };
+
+    await runReconcilePass({ github, k8s: new FakeK8s(), config }, "webhook");
+
+    expect(specReads).toBe(0);
   });
 });
 
