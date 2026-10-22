@@ -696,4 +696,83 @@ async function assertFinalWorld(runner: Runner, context: string, options: RunOpt
   // 4. The pods that ran are still identifiable, and none is crash-looping.
   const pods = await kubectlJson<K8sObjectList<K8sPodObject>>(runner, context, NAMESPACE, "pod");
   if (pods === null) throw new Error("no pods in the namespace at the end of the run");
+
+  // 5. The GitHub-side end state. This is the half the ticket's acceptance
+  //    criteria name explicitly — both tickets closed, the spec moved out of the
+  //    gate, one ready PR on the spec branch whose body carries `Closes #<spec>`
+  //    — and it can only be asserted against the stub's own world.
+  const state = await readStubState(runner, context);
+  for (const ticketNumber of TICKET_NUMBERS) {
+    const ticket = state.issues.find((issue) => issue.number === ticketNumber);
+    if (ticket === undefined) throw new Error(`ticket #${ticketNumber} is missing from the world`);
+    if (ticket.state !== "closed") {
+      throw new Error(`ticket #${ticketNumber} is ${ticket.state}, expected closed (T4)`);
+    }
+    if (ticket.labels.includes("agent:in-progress")) {
+      throw new Error(`ticket #${ticketNumber} still carries agent:in-progress after being closed`);
+    }
+  }
+
+  const spec = state.issues.find((issue) => issue.number === SPEC_NUMBER);
+  if (spec === undefined) throw new Error("the spec is missing from the world");
+  if (!spec.labels.includes("ready-for-human")) {
+    throw new Error(`spec #${SPEC_NUMBER} labels are ${JSON.stringify(spec.labels)}, expected ready-for-human`);
+  }
+  if (spec.labels.includes("ready-for-agent")) {
+    throw new Error(`spec #${SPEC_NUMBER} still carries ready-for-agent; the closeout must move it out of the gate`);
+  }
+  if (spec.labels.includes("agent:in-progress")) {
+    throw new Error(`spec #${SPEC_NUMBER} carries agent:in-progress; a spec never gets that label`);
+  }
+
+  const specBranch = `agent/spec-${SPEC_NUMBER}`;
+  const prs = state.pullRequests.filter((pr) => pr.headBranch === specBranch);
+  if (prs.length !== 1) {
+    throw new Error(`expected exactly one PR on ${specBranch}, found ${prs.length}`);
+  }
+  const pr = prs[0]!;
+  if (pr.draft) throw new Error(`the PR on ${specBranch} is a draft; the contract says ready (spec §0)`);
+  if (pr.baseBranch !== "main") throw new Error(`the PR targets ${pr.baseBranch}, expected main`);
+  const closesCount = pr.body.match(new RegExp(`Closes #${SPEC_NUMBER}\\b`, "g"))?.length ?? 0;
+  if (closesCount !== 1) {
+    throw new Error(`the PR body must carry exactly one "Closes #${SPEC_NUMBER}", found ${closesCount}`);
+  }
+
+  // 6. The git traffic was real: at least one clone and one push went through
+  //    `git http-backend`, not a mocked object.
+  const services = new Set(state.gitOperations.filter((op) => op.exitCode === 0).map((op) => op.service));
+  if (!services.has("upload-pack")) throw new Error("no successful git upload-pack: the clone was not real git");
+  if (!services.has("receive-pack")) throw new Error("no successful git receive-pack: the push was not real git");
+
+  runner.section("assert", "final world: GitHub side");
+  runner.write(
+    [
+      `tickets closed: ${TICKET_NUMBERS.join(", ")}`,
+      `spec labels: ${JSON.stringify(spec.labels)}`,
+      `PR: #${pr.number} ${pr.headBranch} -> ${pr.baseBranch} (draft=${pr.draft})`,
+      `PR body carries Closes #${SPEC_NUMBER}: yes (once)`,
+      `real git services observed: ${[...services].sort().join(", ")}`,
+    ].join("\n"),
+  );
+}
+
+interface StubState {
+  issues: Array<{ number: number; state: string; labels: string[]; comments: string[] }>;
+  pullRequests: Array<{ number: number; state: string; draft: boolean; headBranch: string; baseBranch: string; body: string }>;
+  gitOperations: Array<{ service: string; exitCode: number }>;
+}
+
+/** Read the stub's final world over the cluster network, from the App's own pod. */
+async function readStubState(runner: Runner, context: string): Promise<StubState> {
+  const result = await runner.run(
+    "kubectl",
+    ["--context", context, "-n", NAMESPACE, "exec", "deploy/stub-github", "--",
+     "node", "-e",
+     'process.stdout.write(await (await fetch("http://127.0.0.1:8080/__state")).text())'],
+    { allowFailure: true },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`could not read the stub's final world: ${result.stderr || result.stdout}`);
+  }
+  return JSON.parse(result.stdout) as StubState;
 }
