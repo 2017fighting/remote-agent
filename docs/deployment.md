@@ -64,7 +64,7 @@ App 必须把「创建被拒（403 quota exceeded）」当正常分支：本轮�
 
 共享一个 `agent-job` SA（agent Job 用它），Role 只给 `batch/jobs` 的 `get, patch`（run result 写在 Job 自己的 annotation 上，[ADR-0007](adr/0007-run-result-contract.md)），`automountServiceAccountToken: true`。
 
-Job 名是动态生成的，RBAC 收窄不到 `resourceNames`，所以这是 namespace 级权限：一个 Job pod 理论上能改同 namespace 里另一个 Job 的注解。**App 侧的应对**：只信带自己 label 的 Job，并校验注解里的 Job 名与对象一致（注解不是无签名真相）。
+Job 名是动态生成的，RBAC 收窄不到 `resourceNames`，所以这是 namespace 级权限：一个 Job pod 理论上能改同 namespace 里另一个 Job 的注解。**App 侧的应对只有两条，都很薄**：outcome 判定只读**确定性名字**下的那一个 Job（载荷里没有 Job 名，所以没有「名字与对象对不上」这种校验）；Slot 计数、token 续期与回收只算带 `app.kubernetes.io/managed-by: remote-agent` 标签的对象。注解里没有签名，也没有第二个标识——一个恶意 Job 如果知道另一个票的确定性名字，就能写它的 annotation。这是 v1 接受的代价（共享 SA + namespace 级权限），不是已解决的问题。
 
 ## 6. Job 模板与镜像
 
