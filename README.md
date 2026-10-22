@@ -150,7 +150,7 @@ open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ �
 |---|---|---|
 | —（Claim：Job 非终态，含 pod 重启自环） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | `[ready-for-agent, agent:implement]`（不变，spec 不写 `agent:in-progress`） |
 | `Complete` · `done` | `closed` · `[ready-for-agent, agent:implement]` | `[ready-for-human, agent:implement]` + 已开 PR |
-| `Complete` · `done` + `newTickets` | `closed` · 同上，新 sub-issue 已建 | `[ready-for-agent, agent:implement]`（**不开 PR**，新票进 frontier） |
+| `Complete` · `done` + `newTickets` | 同 `done`（但 ticket 的 `finish_ticket` 没有 `newTickets` 参数，所以这个形状只有 spec 收尾能产出） | `[ready-for-agent, agent:implement]`（**不开 PR**，新 sub-issue 已建；新票带 `ready-for-agent` 但没 `agent:implement`，等人授权） |
 | `Complete` · `blocked` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | 同左 |
 | 任何 `error`（自述 / backoffLimit / DeadlineExceeded / no-result / no-job） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | 同左 |
 | 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent` | 同左 |
