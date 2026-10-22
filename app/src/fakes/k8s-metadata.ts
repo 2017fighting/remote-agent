@@ -87,3 +87,33 @@ export function assertMetadataValid(input: {
     `${input.kind} ${JSON.stringify(input.name)} is invalid: ${causes.join("; ")}`,
   );
 }
+
+/**
+ * `Secret.data` values must be base64 on the wire; `stringData` is the plaintext
+ * escape hatch. The fake used to accept plaintext, which hid a 400 on **every**
+ * Secret create: Claim stops at its second write, so no Job is ever created in a
+ * real cluster while the suite stays green. Same rule as the metadata grammar
+ * above — the fake validates what the server validates.
+ */
+export function assertSecretDataEncoded(kind: string, name: string, data?: Record<string, string>): void {
+  if (data === undefined) return;
+  const causes: string[] = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (!isBase64(value)) {
+      causes.push(`data[${JSON.stringify(key)}]: Invalid value: illegal base64 data`);
+    }
+  }
+  if (causes.length === 0) return;
+  throw new K8sApiError(
+    422,
+    `${kind} ${JSON.stringify(name)} is invalid: ${causes.join("; ")}`,
+  );
+}
+
+/** `Buffer.from(s, "base64")` is lenient, so re-encoding is the reliable check. */
+function isBase64(value: string): boolean {
+  if (value === "") return true;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return false;
+  if (value.length % 4 !== 0) return false;
+  return Buffer.from(value, "base64").toString("base64") === value;
+}

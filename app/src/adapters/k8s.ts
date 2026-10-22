@@ -188,13 +188,20 @@ export class KubeClientK8s implements K8sPort {
 
   // --- Secrets ---
 
+  /**
+   * `K8sSecret.data` carries **plaintext** (the port's contract, shared with the
+   * fakes); the API server requires base64 in `Secret.data`, so the encoding is
+   * done exactly here and decoded back in `toSecret`. Getting this wrong is not a
+   * test failure, it is a 400 on every Secret create — which stops Claim at its
+   * second write and means no Job is ever created in a real cluster.
+   */
   async createSecret(secret: K8sSecret): Promise<K8sSecret> {
     try {
       const created = await this.core.createNamespacedSecret({
         namespace: secret.namespace,
         body: {
           metadata: { name: secret.name, annotations: secret.annotations, labels: secret.labels },
-          data: secret.data,
+          data: encodeSecretData(secret.data),
           type: "Opaque",
         },
       });
@@ -233,7 +240,7 @@ export class KubeClientK8s implements K8sPort {
           apiVersion: "v1",
           kind: "Secret",
           metadata: { name, namespace: this.namespace, ...(patch.annotations ? { annotations: patch.annotations } : {}) },
-          ...(patch.data ? { data: patch.data } : {}),
+          ...(patch.data ? { data: encodeSecretData(patch.data) } : {}),
         },
         undefined,
         undefined,
@@ -500,9 +507,27 @@ function toSecret(secret: V1Secret): K8sSecret {
     namespace: meta.namespace,
     annotations: meta.annotations,
     labels: meta.labels,
-    data: secret.data ?? {},
+    data: decodeSecretData(secret.data ?? {}),
     ...(meta.creationTimestamp === undefined ? {} : { creationTimestamp: meta.creationTimestamp }),
   };
+}
+
+/** Port plaintext -> API base64. */
+function encodeSecretData(data: Record<string, string>): Record<string, string> {
+  const encoded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data)) {
+    encoded[key] = Buffer.from(value, "utf8").toString("base64");
+  }
+  return encoded;
+}
+
+/** API base64 -> port plaintext, so renewal comparisons and the Job's file mount agree. */
+function decodeSecretData(data: Record<string, string>): Record<string, string> {
+  const decoded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data)) {
+    decoded[key] = Buffer.from(value, "base64").toString("utf8");
+  }
+  return decoded;
 }
 
 function toPvc(pvc: V1PersistentVolumeClaim): K8sPvc {

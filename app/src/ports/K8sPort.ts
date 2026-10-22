@@ -55,6 +55,13 @@ export interface K8sSecret {
   annotations: Record<string, string>;
   /** Provenance labels, same surface as Jobs / Ticket PVCs. */
   labels: Record<string, string>;
+  /**
+   * **Plaintext**, keyed by Secret key — the same shape the fakes hold and the
+   * token-renewal comparison expects. The adapter owns the base64 boundary in
+   * both directions: `Secret.data` on the wire must be base64, and sending
+   * plaintext is a 400 on every create (which silently stops Claim before the
+   * Job is built).
+   */
   data: Record<string, string>;
   /**
    * Server-assigned RFC3339. Carried because the API returns it, but renewal
