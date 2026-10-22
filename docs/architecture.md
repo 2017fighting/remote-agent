@@ -293,7 +293,7 @@ flowchart LR
 
 - **`expires-at` 不存在 = 不可删**。Claim 时清掉它，判 outcome 那一次 reconcile 里 set-if-absent 写一次；所以 T3 / T3L（在跑 / pod 重启）的卷一定带着「不可删」。
 - **孤儿兜底只看 k8s**：无 `expires-at` ∧ 没有任何未到终态的 Job 引用它 ∧ `creationTimestamp` 超 30 天。覆盖两类永远走不到 outcome 的卷：issue 被删 / 转走，或 App 在 Job 保留窗内没能读到结果。
-- **一个 pass 内的顺序是先判后收**：label 与 `expires-at` 先落到终值，再跑回收（且回收自己重读 PVC / Job）。否则一轮 straddle 边界时会把刚打上保留期的卷当过期删掉。
+- **一个 pass 内的顺序是先判后收**：label 与 `expires-at` 先落到终值，再跑回收（且回收自己重读 PVC / Job）。否则一轮 straddle 边界时会把刚打上 `expires-at` 的卷当过期删掉。
 
 spec 的收尾 Job 同一套：自己的 Ticket PVC、同一个确定性命名规则（作用在 spec 号上）、同一条 `expires-at` 规则。回收的单位是「这块卷 + 同名的 per-Job Secret」；Job 本身归 k8s 的 `ttlSecondsAfterFinished`（[ADR-0012](adr/0012-job-deletion-ttl.md)），App 既无 Job 的 `delete` 也无 `patch` 权。
 

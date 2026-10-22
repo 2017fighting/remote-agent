@@ -124,7 +124,7 @@ App 看到的东西（四种）：
 | --- | --- |
 | `Complete` · `done` | ticket：关票、摘 `agent:in-progress`、`commentBody` 有就转成评论；spec：开 PR + `ready-for-human`（或 `newTickets` 时只建 sub-issue） |
 | `Complete` · `blocked` | 摘 `ready-for-agent`、加 `ready-for-human` + `agent:blocked`，把 `commentBody` 转成评论；不关票 |
-| `Failed`（backoff 耗尽 / 超时）· **无 annotation** | 加 `agent:error` + 一条 App 自己的证据评论（reason、Job/pod 名、pod 终态、Ticket PVC 名与保留期、`kubectl logs` 指引） |
+| `Failed`（backoff 耗尽 / 超时）· **无 annotation** | 加 `agent:error` + 一条 App 自己的证据评论（reason、Job/pod 名、pod 终态、Ticket PVC 名与它的 `remote-agent/expires-at`、`kubectl logs` 指引） |
 | `Complete` 但 annotation 缺失/不可解析，或 label 说在跑却没有 Job | 同上（`no-result` / `no-job`） |
 
 ## issue状态机
