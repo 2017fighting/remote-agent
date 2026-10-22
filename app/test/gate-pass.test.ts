@@ -37,11 +37,16 @@ interface Case {
    * so the "no action" assertion does not apply to it.
    */
   inProgress?: boolean;
+  /**
+   * The one case where "nothing to claim" still means a write: with every
+   * sub-issue closed the spec loop starts its closeout Job (§4.5 S1 → S2).
+   */
+  closeout?: boolean;
 }
 
 const cases: Case[] = [
   { name: "the baseline: every condition holds → claim", },
-  { name: "ticket closed", ticketState: "closed" },
+  { name: "ticket closed", ticketState: "closed", closeout: true },
   { name: "ticket has an open blocker", blocker: { open: true } },
   { name: "ticket missing ready-for-agent", ticketLabels: ["agent:implement"] },
   { name: "ticket missing agent:implement", ticketLabels: ["ready-for-agent"] },
@@ -99,6 +104,21 @@ describe("Gate: each condition missing alone means no action", () => {
           `createJob agent-2017fighting-remote-agent-35`,
         ]);
         expect(github.writeLog).toContain(`editLabels ${REPO}#35 +[agent:in-progress] -[]`);
+        return;
+      }
+
+      if (c.closeout) {
+        // No claim, but the spec has no open sub-issue left: S2 starts the
+        // closeout Job, which is a Job like any other (same PVC/Secret/name).
+        expect(k8s.writeLog).toEqual([
+          `createPvc agent-2017fighting-remote-agent-33`,
+          `createSecret agent-2017fighting-remote-agent-33-token`,
+          `createJob agent-2017fighting-remote-agent-33`,
+        ]);
+        // The only GitHub write is the token mint: a spec never gets a label
+        // change from the closeout Job (§4.5 — no `agent:in-progress`).
+        expect(github.writeLog).toEqual([`mintInstallationToken ${REPO}`]);
+        expect((await github.getIssue(REPO, 33))?.labels).toEqual(GATE_LABELS);
         return;
       }
 

@@ -73,6 +73,37 @@ export function managedJob(
   };
 }
 
+/**
+ * The spec's closeout Job (`implement-spec`) under its deterministic name: the
+ * same naming rule as a ticket Job, applied to the spec's own number.
+ */
+export function closeoutJob(
+  ownerRepo: string,
+  specNumber: number,
+  options: { finished?: boolean; annotation?: string; failedReason?: string } = {},
+): K8sJob {
+  const job = managedJob(ownerRepo, specNumber, { finished: options.finished ?? false, role: "implement-spec" });
+  if (options.failedReason !== undefined) {
+    job.conditions = [{ type: "Failed", status: "True", reason: options.failedReason }];
+  } else if (options.finished) {
+    job.conditions = [{ type: "Complete", status: "True" }];
+  }
+  if (options.annotation !== undefined) job.annotations["remote-agent/run-result"] = options.annotation;
+  return job;
+}
+
+/** A spec whose every sub-issue is closed: the closeout Job's turn (S1 → S2). */
+export function closedOutSpecWorld(options: { specNumber: number; subIssueNumbers: number[] }) {
+  const spec = issue(options.specNumber, GATE_LABELS);
+  const subs = options.subIssueNumbers.map((n) => issue(n, GATE_LABELS, { state: "closed" }));
+  return new FakeGitHub({
+    issues: [spec, ...subs],
+    subIssues: [
+      { ownerRepo: REPO, specNumber: options.specNumber, issueNumbers: options.subIssueNumbers },
+    ],
+  });
+}
+
 /** A Ticket PVC as the App created it, provenance labels included (ADR-0011). */
 export function ticketPvc(
   ownerRepo: string,

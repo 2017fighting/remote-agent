@@ -103,7 +103,10 @@ describe("pass ordering: Claim before reclamation", () => {
     const pvc = k8s.pvcs[0]!;
     expect(pvc.annotations[ANNOTATIONS.expiresAt]).toBe(daysFromNow(7));
     expect(k8s.writeLog.filter((entry) => entry.startsWith("deletePvc"))).toEqual([]);
-    expect(result.volumeStats.live).toBe(1);
+    // Two volumes now: the judged ticket's, and the spec closeout volume that
+    // #38 starts once this was the last open sub-issue (S1's second branch).
+    // The judged volume still carries its own clock and is never deleted here.
+    expect(result.volumeStats.live).toBe(2);
     expect(result.volumeStats.oldestExpiry).toBe(daysFromNow(7));
   });
 });

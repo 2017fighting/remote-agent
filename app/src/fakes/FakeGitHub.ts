@@ -154,6 +154,16 @@ export class FakeGitHub implements GitHubPort {
     return created;
   }
 
+  async addSubIssue(ownerRepo: string, specNumber: number, issueNumber: number): Promise<void> {
+    this.requireIssue(ownerRepo, specNumber);
+    this.requireIssue(ownerRepo, issueNumber);
+    const key = this.key(ownerRepo, specNumber);
+    const listed = this.subIssues.get(key) ?? [];
+    if (listed.includes(issueNumber)) return;
+    this.subIssues.set(key, [...listed, issueNumber]);
+    this.record(`addSubIssue ${ownerRepo}#${specNumber} <- #${issueNumber}`);
+  }
+
   async closeIssue(ownerRepo: string, issueNumber: number): Promise<void> {
     const issue = this.requireIssue(ownerRepo, issueNumber);
     if (issue.state !== "closed") {

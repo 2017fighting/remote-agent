@@ -398,8 +398,10 @@ describe("outcome: expires-at lifecycle", () => {
 
     expect(k8s.pvcs[0]!.annotations[ANNOTATIONS.expiresAt]).toBeUndefined();
     expect(await labelsOf(github)).toContain("agent:in-progress");
-    // The volume was reused, not recreated.
-    expect(k8s.writeLog.filter((w) => w.startsWith("createPvc"))).toHaveLength(0);
+    // The volume was reused, not recreated. (The closeout Job that starts now
+    // that the spec has no open sub-issue brings its own volume; that is a
+    // different issue's PVC.)
+    expect(k8s.writeLog.filter((w) => w === `createPvc ${jobName(REPO, TICKET)}`)).toHaveLength(0);
   });
 
   it("a Claim on a fresh volume writes no expires-at at all", async () => {
