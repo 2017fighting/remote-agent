@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@remote-agent/shared": "*"
+    "@kubernetes/client-node": "^2.0.1",
+    "@remote-agent/shared": "*",
+    "octokit": "^5.0.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
