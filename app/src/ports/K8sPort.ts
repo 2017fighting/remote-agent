@@ -121,6 +121,8 @@ export interface K8sVolume {
   name: string;
   persistentVolumeClaim?: { claimName: string };
   secret?: { secretName: string };
+  /** The prompt ConfigMap `remote-agent-prompts` (ADR-0004 / docs/deployment.md §8). */
+  configMap?: { name: string };
 }
 
 export interface K8sContainer {
