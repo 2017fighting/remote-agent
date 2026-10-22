@@ -27,7 +27,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 - **为什么必写**：`code-review` 的 spec 查找顺序是 commit message 的 issue 引用 → 参数路径 → `docs|specs|.scratch` 匹配文件 → **问用户**，它**没有** parent/sub-issue 遍历；`/implement` 也是拿到无歧义的 ticket 引用才开工（`implement/SKILL.md:9`）。AFK 下最后一档「问用户」等于卡死。
 - **不写会怎样**：reviewer 的 Spec 轴静默跳过并报「no spec available」，整轮「Spec 轴通过」是假的；或模型凭上下文猜错对象，审了别人的活。
-- **写什么**：我们是在写叙述，不是真调 skill——review 步骤直接写明「spec 来源 = `<owner/repo>#<n>`」，值由 runner 渲染时注入；并要求每条 commit message 以 `#<n>` 开头（spec 收尾 role 用 `#<spec>`），留给人和 PR 做溯源。commit 的成色是**软约束**：不阻断、不重试，代码与 review 不依赖它。
+- **写什么**：我们是在写叙述，不是真调 skill——review 步骤直接写明「spec 来源 = `<owner/repo>#<n>`」，值由 runner 渲染时注入；并要求每条 commit 标题**沿用目标仓 `git log` 的既有形态**（试点仓 pi-web 是 Conventional Commits 在前、`(#n)` 收尾，如 `fix: … (#1308)`；prompt 不整段复述规则，只要求「照既有形态、带 `(#n>)`」）。commit 的成色是**软约束**：不阻断、不重试，代码与 review 不依赖它（形态由 [#24](https://github.com/2017fighting/remote-agent/issues/24) 拍板）。
 - **落点**：prompt（正文与 spec 正文由 **App** 读好、经 Job 参数交给 runner 渲染——模型手上没有 `gh` 与凭证，见 [#14](https://github.com/2017fighting/remote-agent/issues/14)）。
 
 ### 2. review 的固定点 → `_common`，值由 runner 注入
@@ -108,7 +108,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 - **为什么必写**：tdd 规定「**没确认 seam 不许写测试**」并会问用户，而这是 `/implement` 三个提问点之一（另两个是 ticket 引用歧义、code-review 的固定点/spec 来源）。AFK 下没人在线确认。
 - **不写会怎样**：模型要么停下来等人（死锁到 `DeadlineExceeded`），要么偷偷按实现细节写测试，review 时没人能对账。
-- **写什么**：agent 自己列 seam（公开接口 + 一句「它抓住什么、漏掉什么」），写进首条 commit message 的 body 或 run result 的 `summary`；ticket/spec 正文自带 `## Seams` 就照它。**不**上升成 Gate 条件（不碰 #10 已定的入场门）。
+- **写什么**：agent 自己列 seam（公开接口 + 一句「它抓住什么、漏掉什么」），写进首条 commit message 的 body（[#24](https://github.com/2017fighting/remote-agent/issues/24) 拍板：不再「或 summary」二选一）；ticket/spec 正文自带 `## Seams` 就照它。**不**上升成 Gate 条件（不碰 #10 已定的入场门）。
 - **落点**：prompt。
 
 ## 两份模板的骨架
