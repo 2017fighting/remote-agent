@@ -45,11 +45,15 @@ _Avoid_: test repo
 _Avoid_: bot, orchestrator, controller, github app 服务端
 
 **Reconcile pass**:
-一次幂等的重算：从 GitHub 与 k8s 读出全部相关状态，算出该做什么并执行。
+一次幂等的重算：从 GitHub 与 k8s 读出全部相关状态，算出该做什么并执行。唤醒源有三种——webhook、Job watch、Resync tick（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）；同一时刻只跑一轮，期间的触发合并成恰好一次后续 pass。
 _Avoid_: sync loop, poll, tick, 轮询
 
+**Resync tick**:
+每 5 分钟一次（`RESYNC_INTERVAL_SECONDS`）的周期性唤醒：只当「去跑一轮 pass」的信号，自己不重算、不读 GitHub、不持有状态（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）。
+_Avoid_: poller, 轮询器, cron job, sync loop
+
 **Defer**:
-额度已满时本轮什么都不做——不建 Job、不改 label、不评论——等下一次 reconcile 自然重试。
+额度已满时本轮什么都不做——不建 Job、不改 label、不评论——等下一次唤醒自然重试；它的重试上界就是 Resync tick 的间隔。
 _Avoid_: queue, 排队, 延后重试
 
 **Agent role**:

@@ -16,6 +16,7 @@ flowchart TB
 
     subgraph AppSvc["App · 单副本 TypeScript 服务"]
         Hook["webhook 端点"]
+        Timer["resync tick<br/>每 5 分钟"]
         Recon["Reconcile pass<br/>幂等重算，无数据库"]
     end
 
@@ -33,6 +34,7 @@ flowchart TB
     Route["OmniRoute<br/>Job 从不持有上游 key"]
 
     Hook --> Recon
+    Timer -->|单飞：期间触发合并成一次后续 pass| Recon
     Recon -->|"读 issue / label / sub-issue / blocker"| Issues
     Recon -->|"读 Job 列表"| NS
     Recon -->|"写 label · 评论 · 关 issue · 开 PR"| Issues
@@ -48,7 +50,7 @@ flowchart TB
 
 - **App 是唯一的 GitHub writer**（ADR-0002）。Job 只推 commit 和写自己的 annotation。
 - **Sync Job 是 Base PVC 唯一的写者**（ADR-0006）。Agent Job 只见快照，所以同步不需要排空正在跑的 Job。
-- **reconcile 的触发是 webhook**，不是轮询；ADR-0001 的幂等性让"定时兜底一次 reconcile"不冲突，但不存在一个 poller 角色。
+- **reconcile 有三个唤醒源，不是轮询**：webhook、Job watch、resync tick 每 5 分钟一次（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)）。三者都只是「去跑一轮 pass」的信号，落点都是同一个 `reconcile()`；同一时刻只跑一轮，期间的触发合并成恰好一次后续 pass；tick 不引入控制面状态（[ADR-0001](adr/0001-stateless-reconciler.md)），失败的轮不自排。
 
 ## 2. 一次 ticket 运行
 
@@ -245,13 +247,13 @@ annotation 只有 runner 在**终态**才写，所以 T6b/T6c/T6d/T6e 这四条�
 
 ```mermaid
 flowchart TD
-    Trig["webhook 到达"] --> Recon["Reconcile pass"]
+    Trig["webhook / Job watch / Resync tick"] --> Recon["Reconcile pass（单飞）"]
     Recon --> Read["读：GitHub issue 状态 + k8s Job 列表"]
     Read --> Calc["算 Frontier 与 Slot 占用"]
     Calc --> Check{"Slot 够吗？<br/>全局 ≤ 3 · 每 target repo ≤ 2"}
     Check -->|"不够"| Defer["Defer：不建 Job · 不改 label · 不评论"]
     Check -->|"够"| Act["Sync Job → snapshot → Agent Job"]
-    Defer -.->|"等下一次 reconcile 自然重试"| Recon
+    Defer -.->|"等下一次唤醒自然重试：上界 = tick 间隔（ADR-0014）"| Recon
 ```
 
 两个语义容易混：
@@ -352,4 +354,4 @@ flowchart LR
 | control-plane 持有 `index.sqlite` | ADR-0001 无状态 reconciler | App 不保存控制面状态；GitHub issue 状态与 k8s Job 列表就是唯一真相 |
 | attach pod 作为第二种 pod | ADR-0003 一个 ticket 一个 Job | 目前只有 Agent Job 与 Sync Job 两种；运行中观察是缺口 B |
 | Job 通过 `onReport` 上报给 App | ADR-0002 App 是唯一 GitHub writer | Job 只推 commit、只写自己的 annotation；App 主动来读 |
-| 轮询 GitHub API 作为触发 | README 已定 webhook，ADR-0001 只要求 reconcile 幂等 | 触发是 webhook；定时兜底一次 reconcile 不冲突，但没有一个 poller 角色 |
+| 轮询 GitHub API 作为触发 | ADR-0014 把 resync tick 定为第三条唤醒源 | 有周期 tick，但它只当「去跑一轮 pass」的信号：不重算、不持有状态、同一时刻只跑一轮（[ADR-0014](adr/0014-wake-surface-periodic-resync.md)） |
