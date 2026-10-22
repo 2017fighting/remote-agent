@@ -17,13 +17,15 @@ describe("deterministic naming", () => {
     expect(secretName(ownerRepo, 34)).toBe(`${jobName(ownerRepo, 34)}-token`);
   });
 
-  it("truncates the slug so the whole name fits 63 chars with the suffix budget", () => {
+  it("truncates the slug so every name fits 63 chars with the suffix budget", () => {
     const long = "A".repeat(80);
     const n = 123456;
-    expect(jobName(long, n).length).toBe(K8S_NAME_MAX_LENGTH);
+    // The Secret is the longest name; at max truncation it is exactly 63.
+    expect(secretName(long, n).length).toBe(K8S_NAME_MAX_LENGTH);
+    expect(secretName(long, n).endsWith("-token")).toBe(true);
+    expect(jobName(long, n).length).toBeLessThanOrEqual(K8S_NAME_MAX_LENGTH);
     expect(jobName(long, n).startsWith("agent-")).toBe(true);
     expect(jobName(long, n).endsWith(`-${n}`)).toBe(true);
-    expect(secretName(long, n).length).toBeLessThanOrEqual(K8S_NAME_MAX_LENGTH);
     expect(pvcName(long, n).length).toBeLessThanOrEqual(K8S_NAME_MAX_LENGTH);
   });
 
