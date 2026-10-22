@@ -55,7 +55,6 @@ describe("reconcile pass: counters", () => {
     const cases: Record<string, string[]> = {
       blocked: ["ready-for-human", "agent:blocked", "agent:implement"],
       errored: ["ready-for-human", "agent:error", "agent:implement"],
-      "already claimed": [...GATE_LABELS, "agent:in-progress"],
       "not authorized yet": ["ready-for-agent"],
     };
     for (const [name, labels] of Object.entries(cases)) {
@@ -65,6 +64,24 @@ describe("reconcile pass: counters", () => {
       expect(result.deferred, name).toBe(0);
       expect(github.writeLog, name).toEqual([]);
     }
+  });
+
+  it("an already-claimed ticket with no Job is judged T6e, not counted as waiting", async () => {
+    // `waiting` is the gate shape (no agent:in-progress). An in-progress ticket
+    // whose deterministic-name Job is gone is the T6e fallback instead.
+    const github = specWorld({
+      specNumber: 33,
+      subIssueNumbers: [34],
+      subIssueLabels: { 34: [...GATE_LABELS, "agent:in-progress"] },
+    });
+    const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
+    expect(result.waiting).toBe(0);
+    expect(result.deferred).toBe(0);
+    expect((await github.getIssue(REPO, 34))?.labels).toEqual([
+      "agent:implement",
+      "ready-for-human",
+      "agent:error",
+    ]);
   });
 });
 

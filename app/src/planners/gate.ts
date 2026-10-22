@@ -17,8 +17,11 @@ import type { K8sJob } from "../ports/K8sPort.js";
  */
 
 export const LABEL_READY_FOR_AGENT = "ready-for-agent";
+export const LABEL_READY_FOR_HUMAN = "ready-for-human";
 export const LABEL_AGENT_IMPLEMENT = "agent:implement";
 export const LABEL_AGENT_IN_PROGRESS = "agent:in-progress";
+export const LABEL_AGENT_BLOCKED = "agent:blocked";
+export const LABEL_AGENT_ERROR = "agent:error";
 
 /**
  * Every `agent:*` label other than `agent:implement` is an exit marker

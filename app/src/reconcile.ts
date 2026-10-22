@@ -8,6 +8,7 @@ import { claimGate, labelGate } from "./planners/gate.js";
 import { admitSlot, countSlotUsage, occupySlot } from "./planners/slots.js";
 import { renderWorkItem, serializeWorkItem } from "./renders/work-item.js";
 import { claimTicket } from "./claim.js";
+import { handleOutcomes } from "./outcome.js";
 
 export type { PassCounters };
 
@@ -25,6 +26,8 @@ export interface ReconcileDeps {
   config: AppConfig;
   /** Test observation hook: called once per pass with the freshly read world. */
   onWorldRead?: (world: WorldSnapshot) => void;
+  /** Judged-at clock for outcome retention (`expires-at`); defaults to wall clock. */
+  now?: () => Date;
 }
 
 /**
@@ -32,10 +35,11 @@ export interface ReconcileDeps {
  * Stateless across passes — every pass rebuilds its view from GitHub and k8s;
  * nothing is cached between passes.
  *
- * This ticket implements step 3, Claim: specs in ascending number order each
- * contribute at most one candidate — their Frontier — and tickets are claimed
- * until a Slot is refused. Outcome handling, spec advance/closeout and
- * reclamation arrive in #36–#38.
+ * Steps implemented so far: (2) outcome handling for `agent:in-progress`
+ * tickets and (3) Claim. Outcome handling runs first because Claim's gate
+ * depends on it: a judged ticket loses `agent:in-progress`, which is what lets
+ * the next pass see it as re-enterable instead of occupied. Spec
+ * advance/closeout and reclamation arrive in #37 / #38.
  *
  * Replayability is a hard requirement: a second pass over an unchanged world
  * issues zero new external writes.
@@ -53,12 +57,24 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   const world: WorldSnapshot = { issues, jobs, pods, pvcs };
   deps.onWorldRead?.(world);
 
-  // 2. Slot occupancy from the pods the world already has (Terminating counts).
+  // 2. Outcome handling: every ticket carrying `agent:in-progress` is judged
+  //    against its deterministic-name Job. This is the one place the run-result
+  //    annotation is read (ADR-0007 / ADR-0013), and it only runs for tickets
+  //    that are still in T3 — so a replay over the post-judge world cannot read
+  //    it a second time.
+  await handleOutcomes(
+    { config, github, k8s, now: deps.now ?? (() => new Date()) },
+    issues,
+    new Map(jobs.map((job) => [job.name, job])),
+    pods,
+  );
+
+  // 3. Slot occupancy from the pods the world already has (Terminating counts).
   let usage = countSlotUsage(jobs, pods);
   let deferred = 0;
   let waiting = 0;
 
-  // 3. Candidates: specs ascending by number, each contributing its Frontier.
+  // 4. Candidates: specs ascending by number, each contributing its Frontier.
   const jobsByName = new Map(world.jobs.map((job) => [job.name, job]));
   const candidates: Array<{ spec: GitHubIssue; ticket: GitHubIssue }> = [];
   for (const spec of specsInOrder(world.issues)) {
@@ -70,7 +86,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
     if (plan.kind === "claimable") candidates.push({ spec, ticket: plan.ticket });
   }
 
-  // 4. Execute claims serially until a Slot is refused or a claim fails.
+  // 5. Execute claims serially until a Slot is refused or a claim fails.
   for (const candidate of candidates) {
     const { spec, ticket } = candidate;
     const decision = admitSlot(usage, ticket.ownerRepo, config);

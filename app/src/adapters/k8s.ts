@@ -59,6 +59,9 @@ export class KubeClientK8s implements K8sPort {
   patchPvcAnnotations(): Promise<never> {
     return this.notImplemented("patchPvcAnnotations");
   }
+  clearPvcAnnotation(): Promise<never> {
+    return this.notImplemented("clearPvcAnnotation");
+  }
   deletePvc(): Promise<never> {
     return this.notImplemented("deletePvc");
   }
