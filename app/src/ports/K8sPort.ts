@@ -56,6 +56,18 @@ export interface K8sSecret {
   /** Provenance labels, same surface as Jobs / Ticket PVCs. */
   labels: Record<string, string>;
   data: Record<string, string>;
+  /**
+   * Server-assigned RFC3339. Carried because the API returns it, but renewal
+   * never reads it: a patch does not move it, so judging token life from it
+   * would degrade into re-minting every pass (ADR-0014).
+   */
+  creationTimestamp?: string;
+}
+
+/** In-place Secret patch: renewal swaps the token and its expiry together (ADR-0014). */
+export interface K8sSecretPatch {
+  data?: Record<string, string>;
+  annotations?: Record<string, string>;
 }
 
 export interface K8sPvc {
@@ -63,6 +75,11 @@ export interface K8sPvc {
   namespace: string;
   annotations: Record<string, string>;
   labels: Record<string, string>;
+  /**
+   * Server-assigned RFC3339. Only the orphan fallback reads it (ADR-0011): age
+   * is the safety pad for the window between Claim and Job creation.
+   */
+  creationTimestamp?: string;
 }
 
 export interface K8sPvcSpec {
@@ -163,7 +180,7 @@ export interface K8sPort {
   // --- Secrets ---
   createSecret(secret: K8sSecret): Promise<K8sSecret>;
   getSecret(name: string): Promise<K8sSecret | null>;
-  patchSecretAnnotations(name: string, annotations: Record<string, string>): Promise<K8sSecret>;
+  patchSecret(name: string, patch: K8sSecretPatch): Promise<K8sSecret>;
   deleteSecret(name: string): Promise<void>;
 
   // --- Ticket PVCs ---

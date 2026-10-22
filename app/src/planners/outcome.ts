@@ -92,6 +92,19 @@ export function ticketPvcExpiresAt(outcome: keyof typeof TICKET_PVC_RETENTION_DA
   return new Date(now.getTime() + TICKET_PVC_RETENTION_DAYS[outcome] * DAY_MS).toISOString();
 }
 
+/**
+ * What a Job's terminal state says, with no issue attached: the ticket judge and
+ * the spec closeout judge differ only in the label sets they apply, so the
+ * reading of the Job is shared. `running` covers both "not finished" and "no
+ * Job object at all" being impossible to judge — the caller decides whether an
+ * absent object is a fallback (`no-job`) or the normal pre-run state.
+ */
+export type JobVerdict =
+  | { kind: "running" }
+  | { kind: "done"; result: RunResultV1 }
+  | { kind: "blocked"; result: RunResultV1 }
+  | { kind: "error"; reason: AppErrorReason; summary: string | null };
+
 export interface OutcomeInput {
   issue: GitHubIssue;
   /** The Job under `jobName(issue.ownerRepo, issue.number)`, or null when it does not exist. */
@@ -102,39 +115,52 @@ export function judgeOutcome(input: OutcomeInput): OutcomeTransition {
   const { issue, job } = input;
   if (!issue.labels.includes(LABEL_AGENT_IN_PROGRESS)) return { kind: "none" };
 
-  // T6e: the label says a Job occupies this ticket, k8s says none exists.
-  if (job === null) return errorTransition("no-job", null);
-
-  // T3 / T3L: a live Job (pod restarting or not) is not a result.
-  if (!job.finished) return { kind: "none" };
-
-  if (!isComplete(job)) {
-    // T6b / T6c: a Failed Job never wrote an annotation, so none is read here.
-    const reason = failedReason(job);
-    return errorTransition(reason === "DeadlineExceeded" ? "deadline-exceeded" : "backoff-exhausted", null);
+  const verdict = judgeJob(job);
+  if (verdict.kind === "running") return { kind: "none" };
+  if (verdict.kind === "done") {
+    return { kind: "done", result: verdict.result, addLabels: DONE_LABELS.add, removeLabels: DONE_LABELS.remove };
   }
-
-  // The one and only read of `remote-agent/run-result`.
-  const parsed = parseRunResultAnnotation(job.annotations[ANNOTATIONS.runResult]);
-  if (parsed === null) return errorTransition("no-result", null); // T6d
-
-  if (parsed.outcome === "done") {
-    return { kind: "done", result: parsed.result, addLabels: DONE_LABELS.add, removeLabels: DONE_LABELS.remove };
-  }
-  if (parsed.outcome === "blocked") {
+  if (verdict.kind === "blocked") {
     return {
       kind: "blocked",
-      result: parsed.result,
+      result: verdict.result,
       addLabels: BLOCKED_LABELS.add,
       removeLabels: BLOCKED_LABELS.remove,
     };
   }
-  // T6a: the contract's shape allows `error` even though the agent cannot mean it.
-  return errorTransition("app-judged", parsed.outcome === "error" ? parsed.summary : null);
+  return { kind: "error", reason: verdict.reason, summary: verdict.summary, addLabels: ERROR_LABELS.add, removeLabels: ERROR_LABELS.remove };
 }
 
-function errorTransition(reason: AppErrorReason, summary: string | null): OutcomeTransition {
-  return { kind: "error", reason, summary, addLabels: ERROR_LABELS.add, removeLabels: ERROR_LABELS.remove };
+/**
+ * T4–T6e as a pure read of one Job (or its absence). `null` is the T6e shape: an
+ * issue the App believes is occupied, with no object under the deterministic
+ * name.
+ */
+export function judgeJob(job: K8sJob | null): JobVerdict {
+  // T6e: the label says a Job occupies this issue, k8s says none exists.
+  if (job === null) return errorVerdict("no-job", null);
+
+  // T3 / T3L: a live Job (pod restarting or not) is not a result.
+  if (!job.finished) return { kind: "running" };
+
+  if (!isComplete(job)) {
+    // T6b / T6c: a Failed Job never wrote an annotation, so none is read here.
+    const reason = failedReason(job);
+    return errorVerdict(reason === "DeadlineExceeded" ? "deadline-exceeded" : "backoff-exhausted", null);
+  }
+
+  // The one and only read of `remote-agent/run-result`.
+  const parsed = parseRunResultAnnotation(job.annotations[ANNOTATIONS.runResult]);
+  if (parsed === null) return errorVerdict("no-result", null); // T6d
+
+  if (parsed.outcome === "done") return { kind: "done", result: parsed.result };
+  if (parsed.outcome === "blocked") return { kind: "blocked", result: parsed.result };
+  // T6a: the contract's shape allows `error` even though the agent cannot mean it.
+  return errorVerdict("app-judged", parsed.outcome === "error" ? parsed.summary : null);
+}
+
+function errorVerdict(reason: AppErrorReason, summary: string | null): JobVerdict {
+  return { kind: "error", reason, summary };
 }
 
 function isComplete(job: K8sJob): boolean {

@@ -1,8 +1,8 @@
-import { jobName } from "@remote-agent/shared";
+import { ANNOTATIONS, LABELS, jobName, pvcName, tokenSecretName } from "@remote-agent/shared";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { GitHubIssue } from "../src/ports/GitHubPort.js";
-import type { K8sJob } from "../src/ports/K8sPort.js";
+import type { K8sJob, K8sPvc, K8sSecret } from "../src/ports/K8sPort.js";
 
 /** Shared world builder for the App seam (spec #33 Testing Decisions 1). */
 
@@ -70,5 +70,76 @@ export function managedJob(
     annotations: {},
     conditions: [],
     finished: options.finished ?? false,
+  };
+}
+
+/**
+ * The spec's closeout Job (`implement-spec`) under its deterministic name: the
+ * same naming rule as a ticket Job, applied to the spec's own number.
+ */
+export function closeoutJob(
+  ownerRepo: string,
+  specNumber: number,
+  options: { finished?: boolean; annotation?: string; failedReason?: string } = {},
+): K8sJob {
+  const job = managedJob(ownerRepo, specNumber, { finished: options.finished ?? false, role: "implement-spec" });
+  if (options.failedReason !== undefined) {
+    job.conditions = [{ type: "Failed", status: "True", reason: options.failedReason }];
+  } else if (options.finished) {
+    job.conditions = [{ type: "Complete", status: "True" }];
+  }
+  if (options.annotation !== undefined) job.annotations["remote-agent/run-result"] = options.annotation;
+  return job;
+}
+
+/** A spec whose every sub-issue is closed: the closeout Job's turn (S1 → S2). */
+export function closedOutSpecWorld(options: { specNumber: number; subIssueNumbers: number[] }) {
+  const spec = issue(options.specNumber, GATE_LABELS);
+  const subs = options.subIssueNumbers.map((n) => issue(n, GATE_LABELS, { state: "closed" }));
+  return new FakeGitHub({
+    issues: [spec, ...subs],
+    subIssues: [
+      { ownerRepo: REPO, specNumber: options.specNumber, issueNumbers: options.subIssueNumbers },
+    ],
+  });
+}
+
+/** A Ticket PVC as the App created it, provenance labels included (ADR-0011). */
+export function ticketPvc(
+  ownerRepo: string,
+  issueNumber: number,
+  options: { expiresAt?: string; creationTimestamp?: string; spec?: number } = {},
+): K8sPvc {
+  return {
+    name: pvcName(ownerRepo, issueNumber),
+    namespace: "remote-agent",
+    annotations: options.expiresAt === undefined ? {} : { [ANNOTATIONS.expiresAt]: options.expiresAt },
+    labels: {
+      [LABELS.managedBy]: LABELS.managedByValue,
+      [LABELS.ticket]: `${ownerRepo}#${issueNumber}`,
+      [LABELS.spec]: String(options.spec ?? 33),
+    },
+    creationTimestamp: options.creationTimestamp,
+  };
+}
+
+/** A per-Job token Secret as Claim left it (ADR-0009). */
+export function tokenSecret(
+  ownerRepo: string,
+  issueNumber: number,
+  options: { tokenExpiresAt?: string; creationTimestamp?: string; token?: string } = {},
+): K8sSecret {
+  return {
+    name: tokenSecretName(jobName(ownerRepo, issueNumber)),
+    namespace: "remote-agent",
+    annotations:
+      options.tokenExpiresAt === undefined ? {} : { [ANNOTATIONS.tokenExpiresAt]: options.tokenExpiresAt },
+    labels: {
+      [LABELS.managedBy]: LABELS.managedByValue,
+      [LABELS.ticket]: `${ownerRepo}#${issueNumber}`,
+      [LABELS.spec]: "33",
+    },
+    data: { token: options.token ?? "ghs_existing" },
+    creationTimestamp: options.creationTimestamp,
   };
 }

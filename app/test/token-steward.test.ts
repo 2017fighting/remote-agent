@@ -9,8 +9,8 @@ import { GATE_LABELS, REPO, specWorld } from "./world.js";
 /**
  * Per-Job credential (ADR-0009): an installation token scoped to the target
  * repo with `contents: write` only, written into `agent-<repo-slug>-<issue#>-token`
- * with GitHub's `expires_at` on `remote-agent/token-expires-at`. Renewal and
- * deletion belong to #37; this ticket mints at claim time.
+ * with GitHub's `expires_at` on `remote-agent/token-expires-at`. This file pins
+ * the mint-at-Claim half; renewal lives in token-renewal.test.ts.
  */
 
 const config = testConfig();
@@ -51,7 +51,7 @@ describe("token steward: mint at claim", () => {
     });
   });
 
-  it("mints nothing when the Secret is already there (no renewal in this ticket)", async () => {
+  it("mints nothing when the Secret is already there", async () => {
     const github = specWorld({ specNumber: 33, subIssueNumbers: [35] });
     const k8s = new FakeK8s({
       secrets: [
@@ -84,11 +84,13 @@ describe("token steward: mint at claim", () => {
   });
 });
 
-describe("token steward: scope of this ticket", () => {
-  it("does not patch or delete Secrets (renewal and recycling are #37)", async () => {
+describe("token steward: claim-time scope", () => {
+  it("leaves the Secret alone on the pass that claimed the ticket", async () => {
+    // A freshly claimed Job is not in the world the renewal step reads, and its
+    // token was just minted; renewal cases live in token-renewal.test.ts.
     const { github, k8s } = oneTicket();
     await runReconcilePass({ github, k8s, config }, "webhook");
-    expect(k8s.writeLog.filter((w) => w.startsWith("patchSecretAnnotations"))).toEqual([]);
+    expect(k8s.writeLog.filter((w) => w.startsWith("patchSecret"))).toEqual([]);
     expect(k8s.writeLog.filter((w) => w.startsWith("deleteSecret"))).toEqual([]);
   });
 

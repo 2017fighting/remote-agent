@@ -40,8 +40,9 @@ describe("startApp wiring", () => {
       webhookSecret: SECRET,
     });
     try {
-      // One structured line for the startup pass.
+      // One structured line for the startup pass, plus its volume stats line.
       expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0");
+      expect(logLines).toContain("volumes live=0 oldest-expiry=none per-spec=none");
 
       const payload = JSON.stringify({ action: "labeled" });
       const port = Number(logLines.find((l) => l.startsWith("webhook listening"))!.match(/:(\d+)/)![1]);
@@ -60,6 +61,8 @@ describe("startApp wiring", () => {
       const passLines = logLines.filter((l) => l.startsWith("pass "));
       expect(passLines).toHaveLength(2);
       expect(passLines[1]).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0");
+      // Every pass also emits the volume stats line (ADR-0011).
+      expect(logLines.filter((l) => l.startsWith("volumes "))).toHaveLength(2);
     } finally {
       await app.stop();
     }
