@@ -190,4 +190,4 @@ combo 的兜底会静默换上游模型，但**不需要新机制**：durable �
 
 ## 10. 本文件不覆盖
 
-App 与 runner 的**内部结构**（模块划分、durable 的 task/phase、工具集、prompt section 拼接）、观测性、探针与 Service 细节，归 spec 阶段的 `/codebase-design`。Ticket PVC 的容量与回收见 [ADR-0010](adr/0010-job-resource-budget.md) / [ADR-0011](adr/0011-ticket-pvc-recycling.md)；状态机见 [architecture.md §4](architecture.md#4-状态机)。
+App 与 runner 的**内部结构**（模块划分、durable 的 task/phase、工具集、prompt section 拼接）、观测性、探针与 Service 细节不在这里：读 `app/src/`、`job/src/` 的模块注释，入口是 `app/src/main.ts` 与 `job/src/runner.ts`。Ticket PVC 的容量与回收见 [ADR-0010](adr/0010-job-resource-budget.md) / [ADR-0011](adr/0011-ticket-pvc-recycling.md)；状态机见 [architecture.md §4](architecture.md#4-状态机)。
