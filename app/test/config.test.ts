@@ -8,7 +8,7 @@ import {
 } from "../src/config.js";
 
 function env(entries: Record<string, string>): EnvSource {
-  return { get: (key) => entries[key] };
+  return entries;
 }
 
 describe("readAppConfig (App env read at startup)", () => {

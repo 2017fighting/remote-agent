@@ -18,9 +18,7 @@ export const DEFAULT_MAX_JOBS_PER_REPO = 2;
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 const DEFAULT_GIT_BASE_URL = "https://github.com";
 
-export interface EnvSource {
-  get(key: string): string | undefined;
-}
+export type EnvSource = Record<string, string | undefined>;
 
 /** Read once at process startup; never re-read during a pass. */
 export function readAppConfig(env: EnvSource = process.env): AppConfig {
@@ -35,8 +33,8 @@ export function readAppConfig(env: EnvSource = process.env): AppConfig {
     resyncIntervalSeconds: resync,
     maxJobsGlobal: readNonNegativeInt(env, APP_ENV_KEYS.maxJobsGlobal, DEFAULT_MAX_JOBS_GLOBAL),
     maxJobsPerRepo: readNonNegativeInt(env, APP_ENV_KEYS.maxJobsPerRepo, DEFAULT_MAX_JOBS_PER_REPO),
-    githubApiBaseUrl: env.get(APP_ENV_KEYS.githubApiBaseUrl)?.trim() || DEFAULT_GITHUB_API_BASE_URL,
-    gitBaseUrl: env.get(APP_ENV_KEYS.gitBaseUrl)?.trim() || DEFAULT_GIT_BASE_URL,
+    githubApiBaseUrl: env[APP_ENV_KEYS.githubApiBaseUrl]?.trim() || DEFAULT_GITHUB_API_BASE_URL,
+    gitBaseUrl: env[APP_ENV_KEYS.gitBaseUrl]?.trim() || DEFAULT_GIT_BASE_URL,
   };
 }
 
@@ -47,13 +45,13 @@ function parseIntOrThrow(key: string, raw: string): number {
 }
 
 function readPositiveInt(env: EnvSource, key: string, fallback: number): number {
-  const raw = env.get(key);
+  const raw = env[key];
   if (raw === undefined || raw.trim() === "") return fallback;
   return parseIntOrThrow(key, raw);
 }
 
 function readNonNegativeInt(env: EnvSource, key: string, fallback: number): number {
-  const raw = env.get(key);
+  const raw = env[key];
   if (raw === undefined || raw.trim() === "") return fallback;
   const value = parseIntOrThrow(key, raw);
   if (value < 0) throw new Error(`${key}=${value} must be >= 0`);
