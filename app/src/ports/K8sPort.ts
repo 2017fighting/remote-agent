@@ -80,6 +80,8 @@ export interface K8sResourceRequirements {
 export interface K8sVolumeMount {
   name: string;
   mountPath: string;
+  /** Mount a single key of a Secret/ConfigMap as one file (used for the token, ADR-0009). */
+  subPath?: string;
   readOnly?: boolean;
 }
 

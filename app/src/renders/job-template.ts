@@ -1,4 +1,4 @@
-import { JOB_ENV_KEYS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
+import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, LABELS, VOLUME_PATHS, jobName, secretName } from "@remote-agent/shared";
 import type { AppConfig } from "../config.js";
 import { JOB_IMAGE } from "../job-image.js";
 import type { K8sContainer, K8sEnvVar, K8sJobManifest } from "../ports/K8sPort.js";
@@ -27,6 +27,9 @@ export const OMNIROUTE_DEFAULT_MODEL = "default";
 export const OMNIROUTE_REVIEW_MODEL = "review";
 /** The one sops secret the Job reads, and the one key it takes from it (never `envFrom`). */
 export const OMNIROUTE_API_KEY_SECRET = "remote-agent-secret";
+
+/** The single key inside the per-Job token Secret, mounted as the token file. */
+export const TOKEN_SECRET_KEY = "token";
 
 /** Code constants, not env overrides (ADR-0010: they follow the image's toolchain). */
 export const AGENT_CONTAINER_NAME = "runner";
@@ -116,7 +119,12 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     name: AGENT_CONTAINER_NAME,
     image: JOB_IMAGE,
     env: renderJobEnv(input),
-    volumeMounts: [...ticketVolumeMounts(), { name: "token", mountPath: VOLUME_PATHS.tokenMount, readOnly: true }],
+    // The token is mounted as one file at the shared path the runner reads at
+    // push time — never as env (ADR-0009).
+    volumeMounts: [
+      ...ticketVolumeMounts(),
+      { name: "token", mountPath: JOB_MOUNT_PATHS.token, subPath: TOKEN_SECRET_KEY, readOnly: true },
+    ],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
 }

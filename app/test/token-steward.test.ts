@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANNOTATIONS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
+import { ANNOTATIONS, JOB_MOUNT_PATHS, jobName, secretName } from "@remote-agent/shared";
 import { runReconcilePass } from "../src/reconcile.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import { testConfig } from "./helpers.js";
@@ -76,7 +76,7 @@ describe("token steward: mint at claim", () => {
       name: "token",
       secret: { secretName: secretName(REPO, 35) },
     });
-    expect(VOLUME_PATHS.tokenFile.startsWith(VOLUME_PATHS.tokenMount)).toBe(true);
+    expect(JOB_MOUNT_PATHS.token.startsWith("/mnt/")).toBe(true);
     const envNames = job.podTemplate.containers[0]!.env!.map((e) => e.name);
     expect(envNames).not.toContain("GITHUB_TOKEN");
     expect(envNames).not.toContain("TOKEN");

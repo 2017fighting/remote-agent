@@ -11,8 +11,7 @@ import type { K8sSecret } from "../ports/K8sPort.js";
  * This ticket only mints at claim time; renewal and deletion are #37.
  */
 
-/** The token file name inside the mounted directory — the value the runner reads at push time. */
-export const TOKEN_DATA_KEY = "token";
+import { TOKEN_SECRET_KEY } from "./job-template.js";
 
 export function renderTokenSecret(input: {
   namespace: string;
@@ -31,6 +30,6 @@ export function renderTokenSecret(input: {
       [LABELS.ticket]: `${targetRepo}#${issueNumber}`,
       [LABELS.spec]: String(specNumber),
     },
-    data: { [TOKEN_DATA_KEY]: minted.token },
+    data: { [TOKEN_SECRET_KEY]: minted.token },
   };
 }

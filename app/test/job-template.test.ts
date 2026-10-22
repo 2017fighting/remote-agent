@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { JOB_ENV_KEYS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
+import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
 import { runReconcilePass } from "../src/reconcile.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { K8sJobManifest } from "../src/ports/K8sPort.js";
 import { JOB_IMAGE } from "../src/job-image.js";
-import { renderJobManifest } from "../src/renders/job-template.js";
+import { TOKEN_SECRET_KEY, renderJobManifest } from "../src/renders/job-template.js";
 import { testConfig } from "./helpers.js";
 import { REPO, specWorld } from "./world.js";
 
@@ -154,8 +154,12 @@ describe("job template: volumes and mounts", () => {
 
   it("mounts the token Secret as a read-only file path, never as env", () => {
     const mounts = manifest().podTemplate.containers[0]!.volumeMounts!;
-    expect(mounts).toContainEqual({ name: "token", mountPath: VOLUME_PATHS.tokenMount, readOnly: true });
-    expect(VOLUME_PATHS.tokenFile.startsWith(`${VOLUME_PATHS.tokenMount}/`)).toBe(true);
+    expect(mounts).toContainEqual({
+      name: "token",
+      mountPath: JOB_MOUNT_PATHS.token,
+      subPath: TOKEN_SECRET_KEY,
+      readOnly: true,
+    });
   });
 });
 
