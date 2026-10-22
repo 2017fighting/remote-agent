@@ -88,11 +88,17 @@ export class OctokitGitHub implements GitHubPort {
    * Every issue the installation can see, across its repositories — the
    * universe a pass recomputes from. Pull requests come back from the issues
    * endpoint too and are not issues for the Gate, so they are dropped.
+   *
+   * This is also where the per-repo installation clients are learned, so the
+   * rest of the pass reuses them instead of resolving an installation id per
+   * repo (one fewer App-JWT round trip, and the world always contains the
+   * target repo).
    */
   async listIssues(): Promise<GitHubIssue[]> {
     const issues: GitHubIssue[] = [];
     for await (const { octokit, repository } of this.app.eachRepository.iterator()) {
       const client = octokit as OctokitClient;
+      this.clients.set(repository.full_name, client);
       const { owner, repo } = splitRepo(repository.full_name);
       const items = await client.paginate("GET /repos/{owner}/{repo}/issues", {
         owner,
@@ -187,9 +193,12 @@ export class OctokitGitHub implements GitHubPort {
   // --- writes (App is the sole GitHub writer, ADR-0002) ---
 
   /**
-   * Set semantics: add the wanted labels, then drop the unwanted ones. A
-   * removal of a label that is already gone is a 404 and a no-op — that is
-   * what keeps a replayed pass write-free.
+   * Set semantics. GitHub's issue PATCH takes the *whole* label set in one
+   * request, which is the only shape that cannot leave a half-migrated label
+   * set behind (a crash between an add and a remove would), and the shape both
+   * the fake and the e2e stub model (`state.setLabels`). So this reads the
+   * current set, computes the target, and writes nothing when it already
+   * matches — a replayed pass issues no label write at all.
    */
   async editLabels(
     ownerRepo: string,
@@ -199,26 +208,26 @@ export class OctokitGitHub implements GitHubPort {
   ): Promise<void> {
     const client = await this.clientFor(ownerRepo);
     const { owner, repo } = splitRepo(ownerRepo);
-    if (add.length > 0) {
-      await client.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
-        owner,
-        repo,
-        issue_number: issueNumber,
-        labels: add,
-      });
-    }
-    for (const name of remove) {
-      try {
-        await client.request("DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}", {
-          owner,
-          repo,
-          issue_number: issueNumber,
-          name,
-        });
-      } catch (error) {
-        if (!isNotFound(error)) throw error;
-      }
-    }
+    const { data } = await client.request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
+      owner,
+      repo,
+      issue_number: issueNumber,
+    });
+    const current = (data.labels ?? []).map((label) =>
+      typeof label === "string" ? label : (label.name ?? ""),
+    );
+    const target = new Set(current);
+    for (const name of add) target.add(name);
+    for (const name of remove) target.delete(name);
+    const labels = [...target];
+    if (labels.length === current.length && labels.every((name, index) => name === current[index])) return;
+
+    await client.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", {
+      owner,
+      repo,
+      issue_number: issueNumber,
+      labels,
+    });
   }
 
   async addComment(ownerRepo: string, issueNumber: number, body: string): Promise<void> {

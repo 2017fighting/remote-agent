@@ -114,8 +114,6 @@ function defaultHandler(request: StubRequest) {
     return json(200, [pullPayload()]);
   }
   // Writes the tests do not override succeed with an empty body.
-  if (method === "POST" && path === `/repos/${OWNER}/${NAME}/issues/1/labels`) return json(200, []);
-  if (method === "DELETE" && path.startsWith(`/repos/${OWNER}/${NAME}/issues/1/labels/`)) return json(200, []);
   if (method === "POST" && path === `/repos/${OWNER}/${NAME}/issues/1/comments`) return json(201, { id: 30 });
   if (method === "PATCH" && path === `/repos/${OWNER}/${NAME}/issues/1`) return json(200, issuePayload({ state: "closed" }));
   return undefined;
@@ -234,37 +232,33 @@ describe("OctokitGitHub: reads", () => {
 });
 
 describe("OctokitGitHub: writes", () => {
-  it("editLabels adds with POST and removes one DELETE per label", async () => {
+  it("editLabels writes the whole target set in one PATCH", async () => {
     const github = await adapter();
 
+    // Current set is ["ready-for-agent", "agent:implement"] (the default payload).
     await github.editLabels(REPO, 1, ["agent:in-progress"], ["ready-for-agent"]);
 
-    const writes = stub.requests.filter((r) => r.method !== "GET" && !r.path.includes("access_tokens"));
-    expect(writes.map((r) => `${r.method} ${r.path}`)).toEqual([
-      `POST /repos/${OWNER}/${NAME}/issues/1/labels`,
-      `DELETE /repos/${OWNER}/${NAME}/issues/1/labels/ready-for-agent`,
-    ]);
-    expect(writes[0]?.json()).toEqual({ labels: ["agent:in-progress"] });
+    const writes = stub.requests.filter((r) => r.method === "PATCH");
+    expect(writes.map((r) => r.path)).toEqual([`/repos/${OWNER}/${NAME}/issues/1`]);
+    expect(writes[0]?.json()).toEqual({ labels: ["agent:implement", "agent:in-progress"] });
   });
 
-  it("editLabels tolerates removing a label that is already gone (404 = no-op)", async () => {
+  it("editLabels writes nothing when the label set already matches (replay)", async () => {
+    const github = await adapter();
+
+    await github.editLabels(REPO, 1, ["agent:implement"], []);
+
+    expect(stub.requests.filter((r) => r.method === "PATCH")).toEqual([]);
+  });
+
+  it("editLabels still throws on a failure", async () => {
     stub = await startStubServer((request) => {
-      if (request.method === "DELETE") return json(404, { message: "Label does not exist" });
+      if (request.method === "PATCH") return json(422, { message: "Validation Failed" });
       return defaultHandler(request);
     });
     const github = new OctokitGitHub({ appId: APP_ID, privateKey: TEST_PRIVATE_KEY, apiBaseUrl: stub.url });
 
-    await expect(github.editLabels(REPO, 1, [], ["agent:blocked"])).resolves.toBeUndefined();
-  });
-
-  it("editLabels still throws on a non-404 failure", async () => {
-    stub = await startStubServer((request) => {
-      if (request.method === "DELETE") return json(422, { message: "Validation Failed" });
-      return defaultHandler(request);
-    });
-    const github = new OctokitGitHub({ appId: APP_ID, privateKey: TEST_PRIVATE_KEY, apiBaseUrl: stub.url });
-
-    await expect(github.editLabels(REPO, 1, [], ["agent:blocked"])).rejects.toThrow();
+    await expect(github.editLabels(REPO, 1, ["agent:blocked"], [])).rejects.toThrow();
   });
 
   it("addComment posts the body to the issue comments endpoint", async () => {
