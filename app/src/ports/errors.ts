@@ -28,3 +28,8 @@ export function isAlreadyExists(error: unknown): boolean {
 export function isQuotaExceeded(error: unknown): boolean {
   return error instanceof K8sApiError && error.status === 403 && /exceeded quota/i.test(error.message);
 }
+
+/** The object is already gone, which is exactly the intent of a delete (reclamation, ADR-0011). */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof K8sApiError && error.status === 404;
+}

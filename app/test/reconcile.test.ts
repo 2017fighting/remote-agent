@@ -29,7 +29,14 @@ describe("reconcile pass: counters", () => {
   it("returns the five counters and the global Slot cap", async () => {
     const { github, k8s } = idleWorld();
     const result = await runReconcilePass({ github, k8s, config }, "startup");
-    expect(result).toEqual({ slotsUsed: 0, slotsMax: 3, deferred: 0, renewed: 0, waiting: 0 });
+    expect(result).toEqual({
+      slotsUsed: 0,
+      slotsMax: 3,
+      deferred: 0,
+      renewed: 0,
+      waiting: 0,
+      volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
+    });
   });
 
   it("reports the configured global cap (MAX_JOBS_GLOBAL)", async () => {

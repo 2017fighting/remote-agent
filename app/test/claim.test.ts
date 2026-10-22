@@ -185,7 +185,7 @@ describe("claim: Guardrail quota denial is a normal branch", () => {
 
     const result = await runReconcilePass({ github, k8s, config }, "webhook");
 
-    expect(result).toEqual({ slotsUsed: 0, slotsMax: 3, deferred: 0, renewed: 0, waiting: 0 });
+    expect(result).toMatchObject({ slotsUsed: 0, slotsMax: 3, deferred: 0, renewed: 0, waiting: 0 });
     expect(k8s.jobs).toEqual([]);
     expect(github.writeLog).toEqual([`mintInstallationToken ${REPO}`]);
     expect(github.comments).toEqual([]);

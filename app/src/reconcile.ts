@@ -7,10 +7,13 @@ import { planFrontier, type FrontierOutcome } from "./planners/frontier.js";
 import { claimGate } from "./planners/gate.js";
 import { admitSlot, countSlotUsage, occupySlot } from "./planners/slots.js";
 import { closeoutJobName, planSpecStep, type SpecStep } from "./planners/spec-loop.js";
+import type { VolumeStats } from "./planners/pvc-steward.js";
 import { renderWorkItem, serializeWorkItem } from "./renders/work-item.js";
 import { claimTicket } from "./claim.js";
 import { handleOutcomes } from "./outcome.js";
 import { applySpecStep, startSpecCloseout, type SpecLoopDeps } from "./spec-loop.js";
+import { reclaimVolumes } from "./reclamation.js";
+import { renewTokens } from "./token-renewal.js";
 
 export type { PassCounters };
 
@@ -32,24 +35,47 @@ export interface ReconcileDeps {
   now?: () => Date;
 }
 
+/** Pass counters plus the volume stats the pass-log's second line reports (ADR-0011). */
+export interface ReconcileResult extends PassCounters {
+  volumeStats: VolumeStats;
+}
+
 /**
  * One reconcile pass (spec #33 §2): read world → plan → execute → counters.
  * Stateless across passes — every pass rebuilds its view from GitHub and k8s;
  * nothing is cached between passes.
+ * Steps in execution order, which is load-bearing:
  *
- * Steps implemented so far: (2) outcome handling for `agent:in-progress`
- * tickets, (3) Claim, (4) spec advance (start the closeout Job) and (5) the
- * closeout outcome (PR / sub-issues / spec failure). Outcome handling runs first
- * because Claim's gate depends on it: a judged ticket loses
- * `agent:in-progress`, which is what lets the next pass see it as re-enterable
- * instead of occupied. Reclamation arrives in #37.
+ * 1. Read the world (issues, Jobs, pods, PVCs).
+ * 2. Outcome handling for `agent:in-progress` tickets. This runs before Claim
+ *    because Claim's gate depends on it: a judged ticket loses
+ *    `agent:in-progress`, which is what lets the next pass see it as
+ *    re-enterable instead of occupied.
+ * 3–5. Slot occupancy, candidates, and Claim serially until a Slot is refused;
+ *    then the spec advance (start the closeout Job) and the closeout outcome
+ *    (PR / sub-issues / spec failure).
+ * 6. Token renewal for the Jobs still running (ADR-0009 / ADR-0014).
+ * 7. Reclamation of expired volumes and orphan fallbacks (ADR-0011).
+ *
+ * Steps 2–5 run **before** 6–7 on purpose: labels, `expires-at` and Claim's
+ * clear of `expires-at` are already at their end-of-pass values when anything
+ * is deleted, so a volume claimed this pass is never mistaken for expired, and
+ * a volume judged this pass carries its fresh retention clock before the
+ * delete decision is taken.
+ *
+ * The App never deletes or patches a Job: `ttlSecondsAfterFinished` is the only
+ * Job deleter (ADR-0012).
  *
  * Replayability is a hard requirement: a second pass over an unchanged world
  * issues zero new external writes.
  */
-export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): Promise<PassCounters> {
+export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): Promise<ReconcileResult> {
   const { github, k8s, config } = deps;
-  const now = deps.now ?? (() => new Date());
+  // One judged-at instant for the whole pass, shared by outcome handling, the
+  // spec loop, renewal and reclamation — otherwise a pass that straddles a
+  // boundary could judge and then immediately reclaim the same volume.
+  const clock = deps.now ?? (() => new Date());
+  const now = clock();
 
   // 1. Read the world: issues, Jobs, pods, PVCs.
   const [issues, jobs, pods, pvcs] = await Promise.all([
@@ -66,7 +92,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   //    annotation is read (ADR-0007 / ADR-0013), and it only runs for tickets
   //    that are still in T3 — so a replay over the post-judge world cannot read
   //    it a second time.
-  await handleOutcomes({ github, k8s, now }, issues, new Map(jobs.map((job) => [job.name, job])), pods);
+  await handleOutcomes({ github, k8s, now: clock }, issues, new Map(jobs.map((job) => [job.name, job])), pods);
 
   // 3. Slot occupancy from the pods the world already has (Terminating counts).
   let usage = countSlotUsage(jobs, pods);
@@ -163,14 +189,14 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
       deferred += 1;
       continue;
     }
-    await startSpecCloseout(specLoopDeps(deps, now), spec);
+    await startSpecCloseout(specLoopDeps(deps, clock), spec);
     usage = occupySlot(usage, closeoutJobName(spec.ownerRepo, spec.number), spec.ownerRepo);
   }
 
   // 5. Closeout outcome → S3 (PR) / S3N (sub-issues) / S4 / S5.
   for (const { spec, step } of specSteps) {
     await applySpecStep(
-      specLoopDeps(deps, now),
+      specLoopDeps(deps, clock),
       spec,
       step,
       jobsByName.get(closeoutJobName(spec.ownerRepo, spec.number)) ?? null,
@@ -178,12 +204,21 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
     );
   }
 
+  // 6. Token renewal: only the Jobs still running can have a token in use.
+  const renewed = await renewTokens({ github, k8s, now }, jobs);
+
+  // 7. Reclamation: expired volumes + their Secrets, then the orphan fallback.
+  //    Runs last and re-reads the volumes/Jobs it judges, so the writes above
+  //    are already in the world it sees.
+  const { stats } = await reclaimVolumes({ k8s, now });
+
   return {
     slotsUsed: usage.total,
     slotsMax: config.maxJobsGlobal,
     deferred,
-    renewed: 0,
+    renewed,
     waiting,
+    volumeStats: stats,
   };
 }
 

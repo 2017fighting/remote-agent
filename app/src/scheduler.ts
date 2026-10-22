@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config.js";
+import type { VolumeStats } from "./planners/pvc-steward.js";
 
 /** ADR-0014 wake sources. The `job-watch` source arrives in a later ticket; its slot exists now so the log line vocabulary is stable. */
 export type Trigger = "webhook" | "job-watch" | "tick" | "startup";
@@ -13,6 +14,8 @@ export interface PassCounters {
 
 export interface PassLog extends PassCounters {
   trigger: Trigger;
+  /** Volume usage of the post-reclamation world; the pass log's second line (ADR-0011). */
+  volumeStats: VolumeStats;
 }
 
 /** One structured line per pass (ADR-0014): `pass trigger=<t> slots=<used>/<max> deferred=<n> renewed=<n> waiting=<n>`. */
@@ -23,9 +26,23 @@ export function formatPassLog(line: PassLog): string {
   );
 }
 
+/**
+ * The pass's second line (ADR-0011): live volume count / oldest expiry / this
+ * spec's usage. Delete-policy volumes are invisible to `pv-audit` and the
+ * provenance labels take them out of `pvc-audit`, so this line is the only
+ * leak signal the App produces itself.
+ */
+export function formatVolumeStatsLog(stats: VolumeStats): string {
+  const perSpec = stats.perSpec.map((entry) => `spec${entry.spec}=${entry.count}`).join(",");
+  return (
+    `volumes live=${stats.live} oldest-expiry=${stats.oldestExpiry ?? "none"}` +
+    ` per-spec=${perSpec === "" ? "none" : perSpec}`
+  );
+}
+
 export interface SchedulerDeps {
   /** The single reconcile() every wake source lands in. Returns the pass counters for the log line. */
-  reconcile: (trigger: Trigger) => Promise<PassCounters>;
+  reconcile: (trigger: Trigger) => Promise<PassCounters & { volumeStats: VolumeStats }>;
   /** The startup list (trigger=startup does a list + one pass; ADR-0014). */
   listIssues: () => Promise<unknown[]>;
   onPassLog: (line: PassLog) => void;
@@ -69,8 +86,8 @@ export function createScheduler(config: AppConfig, deps: SchedulerDeps): Schedul
 
   async function runPass(trigger: Trigger): Promise<void> {
     try {
-      const counters = await deps.reconcile(trigger);
-      deps.onPassLog({ trigger, ...counters });
+      const { volumeStats, ...counters } = await deps.reconcile(trigger);
+      deps.onPassLog({ trigger, ...counters, volumeStats });
     } catch (error) {
       // A failed pass logs one line and is never re-enqueued (ADR-0014); the
       // next real trigger — at the latest the tick — naturally recalculates.
