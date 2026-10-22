@@ -12,7 +12,7 @@ import {
   type V1Pod,
   type V1Secret,
 } from "@kubernetes/client-node";
-import { AGENT_CONTAINER_NAME } from "../renders/job-template.js";
+import { AGENT_CONTAINER_NAME, SEED_CONTAINER_NAME } from "../renders/job-template.js";
 import { K8sApiError } from "../ports/errors.js";
 import type {
   K8sEvent,
@@ -152,14 +152,33 @@ export class KubeClientK8s implements K8sPort {
     }
   }
 
-  /** Container log tail; the caller truncates to the comment's budget. */
+  /**
+   * Container log tail; the caller truncates to the comment's budget.
+   *
+   * The agent container is the interesting one, but the most common `error`
+   * path is a seed failure — and then the agent container never started, so its
+   * log does not exist. Falling back to the init container is what keeps the
+   * evidence comment from saying "no logs available" exactly when the seed is
+   * the thing that broke (ADR-0009).
+   */
   async getPodLog(podName: string): Promise<string> {
+    try {
+      return await this.podLog(podName, AGENT_CONTAINER_NAME);
+    } catch (error) {
+      try {
+        return await this.podLog(podName, SEED_CONTAINER_NAME);
+      } catch {
+        throw toK8sApiError(error);
+      }
+    }
+  }
+
+  private async podLog(podName: string, container: string): Promise<string> {
     try {
       return await this.core.readNamespacedPodLog({
         name: podName,
         namespace: this.namespace,
-        // The same container name the Job template declares (one spelling).
-        container: AGENT_CONTAINER_NAME,
+        container,
         tailLines: LOG_TAIL_LINES,
       });
     } catch (error) {
@@ -195,8 +214,19 @@ export class KubeClientK8s implements K8sPort {
     }
   }
 
-  /** In-place renewal (ADR-0014): a merge patch moves `data` and `annotations` together. */
+  /**
+   * In-place renewal (ADR-0014): a merge patch moves `data` and `annotations`
+   * together. Nothing changed = no write, so a replayed pass issues nothing.
+   */
   async patchSecret(name: string, patch: K8sSecretPatch): Promise<K8sSecret> {
+    const current = await this.getSecret(name);
+    if (current === null) {
+      throw new K8sApiError(404, `secrets "${name}" not found`);
+    }
+    const unchanged =
+      Object.entries(patch.data ?? {}).every(([key, value]) => current.data[key] === value) &&
+      Object.entries(patch.annotations ?? {}).every(([key, value]) => current.annotations[key] === value);
+    if (unchanged) return current;
     try {
       const patched = await this.objects.patch(
         {
@@ -268,7 +298,13 @@ export class KubeClientK8s implements K8sPort {
     }
   }
 
+  /** Set-if-changed: an identical annotation set is not a write (replayability). */
   async patchPvcAnnotations(name: string, annotations: Record<string, string>): Promise<K8sPvc> {
+    const current = await this.getPvc(name);
+    if (current === null) {
+      throw new K8sApiError(404, `persistentvolumeclaims "${name}" not found`);
+    }
+    if (Object.entries(annotations).every(([key, value]) => current.annotations[key] === value)) return current;
     try {
       const patched = await this.objects.patch(
         {
@@ -294,6 +330,13 @@ export class KubeClientK8s implements K8sPort {
    * no write", which only the caller's world state can decide.
    */
   async clearPvcAnnotation(name: string, key: string): Promise<K8sPvc> {
+    const current = await this.getPvc(name);
+    if (current === null) {
+      throw new K8sApiError(404, `persistentvolumeclaims "${name}" not found`);
+    }
+    // Absent key = no write (the port's contract), which is what makes a
+    // replayed Claim issue nothing.
+    if (current.annotations[key] === undefined) return current;
     try {
       // `null` is the JSON-merge-patch delete marker, which the generated
       // `V1ObjectMeta` type does not model (it types annotation values as

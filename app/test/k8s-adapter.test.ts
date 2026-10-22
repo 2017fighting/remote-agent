@@ -48,6 +48,8 @@ interface FakeWorld {
   /** Injected failures, keyed by `METHOD path`, consumed once. */
   failures: Map<string, () => ReturnType<typeof statusFailure>>;
   watchEvents: string[];
+  /** Containers whose log endpoint 400s, as Kubernetes does for a container that never started. */
+  missingContainers: Set<string>;
 }
 
 function fakeApi(world: Partial<FakeWorld> = {}) {
@@ -58,6 +60,7 @@ function fakeApi(world: Partial<FakeWorld> = {}) {
     pvcs: [],
     failures: new Map(),
     watchEvents: [],
+    missingContainers: new Set<string>(),
     ...world,
   };
 
@@ -117,10 +120,19 @@ function fakeApi(world: Partial<FakeWorld> = {}) {
       return json(200, { kind: "PodList", items: state.pods });
     }
     if (path.startsWith(`${PODS_PATH}/`) && path.endsWith("/log")) {
+      // A seed failure has no runner container to read, which is the real 400
+      // Kubernetes returns; the fake mirrors it so the fallback is exercised.
+      if (state.missingContainers.has(request.query.get("container") ?? "")) {
+        return statusFailure(
+          400,
+          `container ${request.query.get("container")} is not valid for pod`,
+          "BadRequest",
+        );
+      }
       return {
         status: 200,
         headers: { "content-type": "text/plain" },
-        body: "seed ok\nrunner: working\n",
+        body: request.query.get("container") === "seed" ? "seed failed\n" : "seed ok\nrunner: working\n",
       };
     }
     if (path.startsWith(`${PODS_PATH}/`) && method === "GET") {
@@ -359,6 +371,21 @@ describe("KubeClientK8s: Pods and logs", () => {
     expect(await k8s.getPod("gone")).toBeNull();
   });
 
+  it("getPodLog falls back to the seed container when the runner never started", async () => {
+    const { k8s, state, requests } = await adapter({
+      pods: [{ metadata: { name: "agent-x-abcde", namespace: NAMESPACE }, status: { phase: "Failed" } }],
+    });
+    state.missingContainers.add("runner");
+
+    const log = await k8s.getPodLog("agent-x-abcde");
+
+    expect(log).toBe("seed failed\n");
+    expect(requests().filter((request) => request.path.endsWith("/log")).map((r) => r.query.get("container"))).toEqual([
+      "runner",
+      "seed",
+    ]);
+  });
+
   it("getPodLog reads the runner container's tail as text", async () => {
     const { k8s, requests } = await adapter({
       pods: [{ metadata: { name: "agent-x-abcde", namespace: NAMESPACE }, status: { phase: "Running" } }],
@@ -407,6 +434,28 @@ describe("KubeClientK8s: Secrets", () => {
     expect(await k8s.getSecret(secret.name)).toBeNull();
   });
 
+  it("patchSecret writes nothing when the patch changes nothing (replayability)", async () => {
+    const { k8s, requests } = await adapter();
+    await k8s.createSecret(secret);
+    const before = requests().length;
+
+    await k8s.patchSecret(secret.name, {
+      data: secret.data,
+      annotations: secret.annotations,
+    });
+
+    expect(requests().slice(before).filter((request) => request.method === "PATCH")).toEqual([]);
+  });
+
+  it("patchSecret on a missing Secret is NotFound, not a silent create", async () => {
+    const { k8s } = await adapter();
+
+    const error = await k8s.patchSecret("absent", { data: { token: "x" } }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(K8sApiError);
+    expect(isNotFound(error)).toBe(true);
+  });
+
   it("getSecret returns null on 404", async () => {
     const { k8s } = await adapter();
 
@@ -433,7 +482,7 @@ describe("KubeClientK8s: Ticket PVCs", () => {
   });
 
   it("get/list/patch/clear/delete round-trip", async () => {
-    const { k8s } = await adapter();
+    const { k8s, requests } = await adapter();
     await k8s.createPvc(pvcManifest("agent-x"));
 
     expect((await k8s.listPvcs()).map((pvc) => pvc.name)).toEqual(["agent-x"]);
@@ -443,6 +492,13 @@ describe("KubeClientK8s: Ticket PVCs", () => {
 
     const cleared = await k8s.clearPvcAnnotation("agent-x", "remote-agent/expires-at");
     expect(cleared.annotations["remote-agent/expires-at"]).toBeUndefined();
+
+    // Absent key and identical annotations are both no-writes.
+    const writesBefore = requests().filter((request) => request.method === "PATCH").length;
+    await k8s.clearPvcAnnotation("agent-x", "remote-agent/expires-at");
+    await k8s.patchPvcAnnotations("agent-x", { "remote-agent/expires-at": "2026-01-08T00:00:00Z" });
+    await k8s.patchPvcAnnotations("agent-x", { "remote-agent/expires-at": "2026-01-08T00:00:00Z" });
+    expect(requests().filter((request) => request.method === "PATCH").length).toBe(writesBefore + 1);
 
     await k8s.deletePvc("agent-x");
     expect(await k8s.getPvc("agent-x")).toBeNull();
