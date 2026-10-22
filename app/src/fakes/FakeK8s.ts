@@ -8,6 +8,7 @@ import type {
   K8sPvc,
   K8sPvcManifest,
   K8sSecret,
+  K8sSecretPatch,
 } from "../ports/K8sPort.js";
 
 /**
@@ -36,6 +37,9 @@ export class FakeK8s implements K8sPort {
     if (world?.secrets) this.secrets.push(...world.secrets);
     if (world?.pvcs) this.pvcs.push(...world.pvcs);
   }
+
+  /** Server clock for `creationTimestamp` on objects the App creates. */
+  clock: () => string = () => new Date().toISOString();
 
   private record(entry: string): void {
     this.writeLog.push(entry);
@@ -135,23 +139,27 @@ export class FakeK8s implements K8sPort {
     const existing = this.secrets.find((s) => s.name === secret.name);
     if (existing) throw new K8sApiError(409, `secrets "${secret.name}" already exists`);
     this.takeInjectedFailure("secret");
-    this.secrets.push(secret);
+    const created: K8sSecret = { ...secret, creationTimestamp: secret.creationTimestamp ?? this.clock() };
+    this.secrets.push(created);
     this.record(`createSecret ${secret.name}`);
-    return secret;
+    return created;
   }
 
   async getSecret(name: string): Promise<K8sSecret | null> {
     return this.secrets.find((s) => s.name === name) ?? null;
   }
 
-  async patchSecretAnnotations(name: string, annotations: Record<string, string>): Promise<K8sSecret> {
+  async patchSecret(name: string, patch: K8sSecretPatch): Promise<K8sSecret> {
     const secret = this.secrets.find((s) => s.name === name);
     if (!secret) throw new Error(`secret not found: ${name}`);
-    const changed = Object.entries(annotations).some(([k, v]) => secret.annotations[k] !== v);
-    if (changed) {
-      secret.annotations = { ...secret.annotations, ...annotations };
-      this.record(`patchSecretAnnotations ${name}`);
-    }
+    const nextAnnotations = { ...secret.annotations, ...patch.annotations };
+    const nextData = { ...secret.data, ...patch.data };
+    const annotationsChanged = Object.entries(nextAnnotations).some(([k, v]) => secret.annotations[k] !== v);
+    const dataChanged = Object.entries(nextData).some(([k, v]) => secret.data[k] !== v);
+    if (!annotationsChanged && !dataChanged) return secret;
+    secret.annotations = nextAnnotations;
+    secret.data = nextData;
+    this.record(`patchSecret ${name}`);
     return secret;
   }
 
@@ -172,6 +180,7 @@ export class FakeK8s implements K8sPort {
       namespace: pvc.namespace,
       annotations: { ...pvc.annotations },
       labels: { ...pvc.labels },
+      creationTimestamp: this.clock(),
     };
     this.pvcs.push(created);
     this.pvcManifests.push(pvc);

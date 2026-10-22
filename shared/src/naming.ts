@@ -35,8 +35,17 @@ export function jobName(ownerRepo: string, issueNumber: number): string {
   return `agent-${slugForBudget(ownerRepo, `-${issueNumber}`)}-${issueNumber}`;
 }
 
+/**
+ * The per-Job Secret name, derived from a Job (or Ticket PVC) name — the one
+ * spelling of the `-token` suffix. Renewal and reclamation only ever hold the
+ * object name, never the `owner/name#number` triple.
+ */
+export function tokenSecretName(name: string): string {
+  return `${name}-token`;
+}
+
 export function secretName(ownerRepo: string, issueNumber: number): string {
-  return `${jobName(ownerRepo, issueNumber)}-token`;
+  return tokenSecretName(jobName(ownerRepo, issueNumber));
 }
 
 /** Ticket PVC shares the Job name (one ticket, one Job, one volume). */

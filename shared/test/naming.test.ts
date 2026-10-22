@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { K8S_NAME_MAX_LENGTH, jobName, pvcName, repoSlug, secretName } from "../src/naming.js";
+import { K8S_NAME_MAX_LENGTH, jobName, pvcName, repoSlug, secretName, tokenSecretName } from "../src/naming.js";
 
 describe("deterministic naming", () => {
   it("lowercases owner-repo and maps non [a-z0-9-] chars to -", () => {
@@ -15,6 +15,11 @@ describe("deterministic naming", () => {
     const ownerRepo = "2017fighting/remote-agent";
     expect(pvcName(ownerRepo, 34)).toBe(jobName(ownerRepo, 34));
     expect(secretName(ownerRepo, 34)).toBe(`${jobName(ownerRepo, 34)}-token`);
+  });
+
+  it("derives the Secret name from an object name (reclamation holds no repo/number pair)", () => {
+    expect(tokenSecretName("agent-o-r-34")).toBe("agent-o-r-34-token");
+    expect(tokenSecretName(jobName("o/r", 34))).toBe(secretName("o/r", 34));
   });
 
   it("truncates the slug so every name fits 63 chars with the suffix budget", () => {

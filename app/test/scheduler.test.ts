@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createScheduler,
   formatPassLog,
+  formatVolumeStatsLog,
   type PassCounters,
   type PassLog,
   type Trigger,
 } from "../src/scheduler.js";
+import type { VolumeStats } from "../src/planners/pvc-steward.js";
 import { testConfig } from "./helpers.js";
 
 /**
@@ -75,8 +77,15 @@ function makeHarness(options?: { failOn?: Trigger }): Harness {
   };
 }
 
-function zeroCounters(): PassCounters {
-  return { slotsUsed: 0, slotsMax: config.maxJobsGlobal, deferred: 0, renewed: 0, waiting: 0 };
+function zeroCounters(): PassCounters & { volumeStats: VolumeStats } {
+  return {
+    slotsUsed: 0,
+    slotsMax: config.maxJobsGlobal,
+    deferred: 0,
+    renewed: 0,
+    waiting: 0,
+    volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
+  };
 }
 
 /** Start the scheduler and release its blocked startup pass. */
@@ -277,10 +286,50 @@ describe("pass log line", () => {
     expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0");
   });
 
+  it("formats the volume stats line: live count, oldest expiry, per-spec usage", () => {
+    expect(formatVolumeStatsLog({ live: 0, oldestExpiry: null, perSpec: [] })).toBe(
+      "volumes live=0 oldest-expiry=none per-spec=none",
+    );
+    expect(
+      formatVolumeStatsLog({
+        live: 3,
+        oldestExpiry: "2025-03-08T12:00:00.000Z",
+        perSpec: [
+          { spec: "33", count: 2 },
+          { spec: "34", count: 1 },
+        ],
+      }),
+    ).toBe("volumes live=3 oldest-expiry=2025-03-08T12:00:00.000Z per-spec=spec33=2,spec34=1");
+  });
+
+  it("carries the volume stats of every pass through to the log line", async () => {
+    const lines: PassLog[] = [];
+    const scheduler = createScheduler(config, {
+      reconcile: async () => ({
+        ...zeroCounters(),
+        volumeStats: { live: 1, oldestExpiry: "2025-03-08T12:00:00.000Z", perSpec: [{ spec: "33", count: 1 }] },
+      }),
+      listIssues: async () => [],
+      onPassLog: (line) => lines.push(line),
+      onPassError: () => {},
+    });
+    await scheduler.start();
+    expect(formatVolumeStatsLog(lines[0]!.volumeStats)).toBe(
+      "volumes live=1 oldest-expiry=2025-03-08T12:00:00.000Z per-spec=spec33=1",
+    );
+  });
+
   it("carries all five counters from the reconcile result", async () => {
     const lines: PassLog[] = [];
     const scheduler = createScheduler(config, {
-      reconcile: async () => ({ slotsUsed: 2, slotsMax: 3, deferred: 1, renewed: 4, waiting: 5 }),
+      reconcile: async () => ({
+        slotsUsed: 2,
+        slotsMax: 3,
+        deferred: 1,
+        renewed: 4,
+        waiting: 5,
+        volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
+      }),
       listIssues: async () => [],
       onPassLog: (line) => lines.push(line),
       onPassError: () => {},

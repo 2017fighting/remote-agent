@@ -6,9 +6,10 @@ import type { K8sSecret } from "../ports/K8sPort.js";
  * Per-Job credential (ADR-0009): one installation token scoped to the target
  * repo with `contents: write` only, written into `agent-<repo-slug>-<issue#>-token`
  * and mounted as a file. The expiry is GitHub's own `expires_at`, stored on the
- * Secret so renewal (#37) never has to guess from `creationTimestamp`.
+ * Secret so renewal never has to guess from `creationTimestamp` (ADR-0014).
  *
- * This ticket only mints at claim time; renewal and deletion are #37.
+ * This renders the mint-at-Claim shape; `token-renewal.ts` patches the same two
+ * fields in place when the token is close to expiring.
  */
 
 import { TOKEN_SECRET_KEY } from "./job-template.js";

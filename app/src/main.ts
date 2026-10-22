@@ -1,5 +1,5 @@
 import { readAppConfig } from "./config.js";
-import { createScheduler, formatPassLog } from "./scheduler.js";
+import { createScheduler, formatPassLog, formatVolumeStatsLog } from "./scheduler.js";
 import { createWebhookServer } from "./server.js";
 import { runReconcilePass } from "./reconcile.js";
 import { OctokitGitHub } from "./adapters/octokit.js";
@@ -36,7 +36,11 @@ export async function startApp(options?: {
   const scheduler = createScheduler(config, {
     reconcile: (trigger) => runReconcilePass({ github, k8s, config }, trigger),
     listIssues: () => github.listIssues(),
-    onPassLog: (line) => log(formatPassLog(line)),
+    onPassLog: (line) => {
+      log(formatPassLog(line));
+      // Second line of every pass: the App's own volume usage (ADR-0011).
+      log(formatVolumeStatsLog(line.volumeStats));
+    },
     onPassError: (trigger, error) =>
       log(`pass-error trigger=${trigger} error=${error instanceof Error ? error.message : String(error)}`),
   });
