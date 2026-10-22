@@ -6,7 +6,7 @@ import {
   type PassLog,
   type Trigger,
 } from "../src/scheduler.js";
-import type { AppConfig } from "../src/config.js";
+import { testConfig } from "./helpers.js";
 
 /**
  * Scheduler semantics pinned by ADR-0014 (spec #33 §1):
@@ -20,13 +20,7 @@ import type { AppConfig } from "../src/config.js";
  *   holds no state
  */
 
-const config: AppConfig = {
-  resyncIntervalSeconds: 300,
-  maxJobsGlobal: 3,
-  maxJobsPerRepo: 2,
-  githubApiBaseUrl: "https://api.github.com",
-  gitBaseUrl: "https://github.com",
-};
+const config = testConfig();
 
 interface RecordedPass {
   trigger: Trigger;

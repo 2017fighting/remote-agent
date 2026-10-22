@@ -3,6 +3,7 @@ import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { GitHubPort } from "../src/ports/GitHubPort.js";
 import type { K8sPort } from "../src/ports/K8sPort.js";
+import { jobManifest, pvcManifest } from "./helpers.js";
 
 describe("fakes and production share port signatures", () => {
   it("FakeGitHub satisfies GitHubPort", async () => {
@@ -15,35 +16,27 @@ describe("fakes and production share port signatures", () => {
 
   it("FakeK8s satisfies K8sPort", async () => {
     const k8s: K8sPort = new FakeK8s();
-    const job = await k8s.createJob({
-      name: "agent-o-r-1",
-      namespace: "remote-agent",
-      labels: {},
-      annotations: {},
-      conditions: [],
-      finished: false,
-    });
+    const job = await k8s.createJob(jobManifest("agent-o-r-1"));
     expect(job.name).toBe("agent-o-r-1");
   });
 });
 
 describe("FakeK8s create-if-absent (409 = success)", () => {
-  it("returns the existing object without a second write", async () => {
+  it("rejects a duplicate create with 409 and leaves the world untouched", async () => {
     const k8s = new FakeK8s();
-    const spec = { name: "agent-o-r-1", namespace: "remote-agent", labels: {}, annotations: {}, conditions: [], finished: false };
-    await k8s.createJob(spec);
-    await k8s.createJob({ ...spec, annotations: { "other": "1" } });
+    await k8s.createJob(jobManifest("agent-o-r-1"));
+    await expect(k8s.createJob(jobManifest("agent-o-r-1"))).rejects.toMatchObject({ status: 409 });
     expect(k8s.jobs).toHaveLength(1);
     expect(k8s.writeLog).toEqual(["createJob agent-o-r-1"]);
 
-    await k8s.createPvc({ name: "agent-o-r-1", namespace: "remote-agent", annotations: {}, labels: {} });
-    await k8s.createPvc({ name: "agent-o-r-1", namespace: "remote-agent", annotations: {}, labels: {} });
+    await k8s.createPvc(pvcManifest("agent-o-r-1"));
+    await expect(k8s.createPvc(pvcManifest("agent-o-r-1"))).rejects.toMatchObject({ status: 409 });
     expect(k8s.writeLog.filter((w) => w.startsWith("createPvc"))).toHaveLength(1);
   });
 
   it("records patch writes only when annotations actually change", async () => {
     const k8s = new FakeK8s({
-      secrets: [{ name: "s", namespace: "remote-agent", annotations: { "a": "1" }, data: {} }],
+      secrets: [{ name: "s", namespace: "remote-agent", annotations: { "a": "1" }, labels: {}, data: {} }],
     });
     await k8s.patchSecretAnnotations("s", { "a": "1" });
     expect(k8s.writeLog).toHaveLength(0);

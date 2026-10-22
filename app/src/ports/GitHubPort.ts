@@ -18,6 +18,8 @@ export interface GitHubComment {
   id: number;
   ownerRepo: string;
   issueNumber: number;
+  /** Login of the comment author; carried into AGENT_WORK_ITEM for the agent's context. */
+  author?: string;
   body: string;
   createdAt: string;
 }

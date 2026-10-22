@@ -1,23 +1,33 @@
+import { isAlreadyExists, K8sApiError } from "../ports/errors.js";
 import type {
   K8sEvent,
   K8sJob,
+  K8sJobManifest,
   K8sPod,
   K8sPort,
   K8sPvc,
+  K8sPvcManifest,
   K8sSecret,
 } from "../ports/K8sPort.js";
 
 /**
  * In-memory K8sPort fake (App seam, spec #33 Testing Decisions 1).
  * Holds full world state and records every write call; `create*` is
- * create-if-absent (409 semantics = success).
+ * create-if-absent (409 semantics = success). Created manifests are kept so
+ * tests can assert the Job's decision surface (image, env, volumes, budgets,
+ * `podFailurePolicy`, TTL, labels) — read objects carry no pod template.
  */
 export class FakeK8s implements K8sPort {
   jobs: K8sJob[] = [];
   pods: K8sPod[] = [];
   secrets: K8sSecret[] = [];
   pvcs: K8sPvc[] = [];
+  /** Every create payload, in call order. */
+  jobManifests: K8sJobManifest[] = [];
+  pvcManifests: K8sPvcManifest[] = [];
   writeLog: string[] = [];
+  /** When set, the next matching create throws this error (failure injection). */
+  failNextCreate?: { object: "job" | "secret" | "pvc"; error: Error };
   private watchers: Array<(event: K8sEvent) => void> = [];
 
   constructor(world?: { jobs?: K8sJob[]; pods?: K8sPod[]; secrets?: K8sSecret[]; pvcs?: K8sPvc[] }) {
@@ -35,6 +45,13 @@ export class FakeK8s implements K8sPort {
     for (const w of this.watchers) w(event);
   }
 
+  private takeInjectedFailure(object: "job" | "secret" | "pvc"): void {
+    if (this.failNextCreate?.object !== object) return;
+    const { error } = this.failNextCreate;
+    this.failNextCreate = undefined;
+    throw error;
+  }
+
   async getJob(name: string): Promise<K8sJob | null> {
     return this.jobs.find((j) => j.name === name) ?? null;
   }
@@ -43,17 +60,36 @@ export class FakeK8s implements K8sPort {
     return [...this.jobs];
   }
 
-  async createJob(job: K8sJob): Promise<K8sJob> {
+  async createJob(job: K8sJobManifest): Promise<K8sJob> {
     const existing = this.jobs.find((j) => j.name === job.name);
-    if (existing) return existing;
-    this.jobs.push(job);
+    if (existing) throw new K8sApiError(409, `jobs.batch "${job.name}" already exists`);
+    this.takeInjectedFailure("job");
+    const created: K8sJob = {
+      name: job.name,
+      namespace: job.namespace,
+      labels: { ...job.labels },
+      annotations: { ...job.annotations },
+      conditions: [],
+      finished: false,
+    };
+    this.jobs.push(created);
+    this.jobManifests.push(job);
     this.record(`createJob ${job.name}`);
-    this.emit({ type: "ADDED", object: job });
-    return job;
+    this.emit({ type: "ADDED", object: created });
+    return created;
   }
 
   async watchJobs(onEvent: (event: K8sEvent) => void): Promise<void> {
     this.watchers.push(onEvent);
+  }
+
+  /** Simulate k8s TTL / manual deletion: removes the Job and emits DELETED. */
+  deleteJob(name: string): void {
+    const idx = this.jobs.findIndex((j) => j.name === name);
+    if (idx < 0) return;
+    const [job] = this.jobs.splice(idx, 1);
+    this.record(`deleteJob ${name}`);
+    if (job) this.emit({ type: "DELETED", object: job });
   }
 
   async listPods(): Promise<K8sPod[]> {
@@ -70,7 +106,8 @@ export class FakeK8s implements K8sPort {
 
   async createSecret(secret: K8sSecret): Promise<K8sSecret> {
     const existing = this.secrets.find((s) => s.name === secret.name);
-    if (existing) return existing;
+    if (existing) throw new K8sApiError(409, `secrets "${secret.name}" already exists`);
+    this.takeInjectedFailure("secret");
     this.secrets.push(secret);
     this.record(`createSecret ${secret.name}`);
     return secret;
@@ -99,12 +136,20 @@ export class FakeK8s implements K8sPort {
     }
   }
 
-  async createPvc(pvc: K8sPvc): Promise<K8sPvc> {
+  async createPvc(pvc: K8sPvcManifest): Promise<K8sPvc> {
     const existing = this.pvcs.find((p) => p.name === pvc.name);
-    if (existing) return existing;
-    this.pvcs.push(pvc);
+    if (existing) throw new K8sApiError(409, `persistentvolumeclaims "${pvc.name}" already exists`);
+    this.takeInjectedFailure("pvc");
+    const created: K8sPvc = {
+      name: pvc.name,
+      namespace: pvc.namespace,
+      annotations: { ...pvc.annotations },
+      labels: { ...pvc.labels },
+    };
+    this.pvcs.push(created);
+    this.pvcManifests.push(pvc);
     this.record(`createPvc ${pvc.name}`);
-    return pvc;
+    return created;
   }
 
   async getPvc(name: string): Promise<K8sPvc | null> {
@@ -134,3 +179,5 @@ export class FakeK8s implements K8sPort {
     }
   }
 }
+
+export { isAlreadyExists };
