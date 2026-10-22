@@ -23,7 +23,7 @@ _Avoid_: next task, queue head, 待办
 _Avoid_: 门槛, 准入, ready check
 
 **Claim**:
-App 给一张 ticket 加上 `agent:in-progress` 的那一次 label edit，表示此刻有一个 Job 占着它；去重靠它加确定性 Job 名（create-if-absent）。assignee 不参与状态机。
+App 给一张 ticket 加上 `agent:in-progress` 的那一次 label edit，表示此刻有一个 Job 占着它。门是双半边的：除了 label 门（无任何 `agent:*`），还要求该 ticket 确定性名下**无未删的旧 Job 对象**（终态与否）——名下 Job 还在就不 Claim、不读旧 annotation，等它的 `DELETED` 事件唤醒（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。去重靠这门 + 确定性 Job 名的 create-if-absent。assignee 不参与状态机。
 _Avoid_: lock, lease, 认领标记
 
 **Re-entry**:

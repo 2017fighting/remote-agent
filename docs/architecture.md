@@ -119,7 +119,8 @@ App 判 Job 终态只读 `Job.status.conditions`（`Complete` / `Failed` + `reas
 
 ```
 Gate(issue) ⟺ open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ 无任何 agent:*
-Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Gate 的
+Claim-gate(spec/ticket) ⟺ Gate ∧ 确定性名下无 Job 对象（终态与否）
+Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 ```
 
 四条各自挡一类错：
@@ -129,7 +130,13 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Gate 的
 - **`agent:implement`**：人授权过。「人授权过」不等于「此刻在跑」，所以 **App 永不删它**。
 - **无 `agent:*`**：`in-progress` 说此刻被占着，`error` / `blocked` 说该人接手。三个都是 exit 标记，不是 entry 标记。
 
-**assignee 不在门里。** App 设不了自己当 assignee（GitHub 不保证 bot 账号可被 assign），而 Claim 本来就是「App 写 `agent:in-progress`」那一次 label edit，去重靠它 + 确定性 Job 名（create-if-absent）。assignee 留给人自己用，App 不读也不写。
+**assignee 不在门里。** App 设不了自己当 assignee（GitHub 不保证 bot 账号可被 assign），而 Claim 本来就是「App 写 `agent:in-progress`」那一次 label edit，去重靠它 + 确定性 Job 名。assignee 留给人自己用，App 不读也不写。
+
+**门还有 k8s 半边（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）。** 重入 / 重开后旧 Job 大概率还在自己的保留窗里（[ADR-0012](adr/0012-job-deletion-ttl.md)），create-if-absent 会撞上它：新一轮起不来，或上一轮的 annotation 被当成新结果。所以 **Claim 的门在 label 之外还看 k8s：该 ticket 确定性名下的 Job 对象还存在（终态与否），本轮就不 Claim、不建、不读那条 annotation，等它的 `DELETED` 事件唤醒下一次 reconcile。** 这条「已终态旧 Job 在」⇒「annotation 已被消费」靠的是不变的消费时序：App 只在把票迁出 `agent:in-progress` 的那一次 reconcile 里读它，离开 T3 的前提就是 outcome 已消费。
+
+等待与 Defer 同形：不改 label、不建 Job、不评论，只打一行日志；不吃 Slot（终态 Job 名下没有未到终态的 pod）。它顺带收掉两个崩窗：人在 Job 跑动中手滑摘了 `agent:*`（门内 ∧ Job 活着，最迟 3h deadline + 30min TTL 后 `DELETED` 唤醒重新 Claim，同卷接续）；上一次 Claim 在「建 Job」与「写 label」之间崩掉的残留（写序因此定为先建 Job 后写 label）。spec 收尾 Job（S2）同规则：`implement-spec` 名下对象还在就不起。
+
+**逃逸口**：等不及的人可以 `kubectl delete job <名>`——删除事件立即唤醒 Claim，不用等满 30 分钟保留窗。
 
 ### 4.3 Ticket
 
@@ -137,8 +144,8 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Gate 的
 |---|---|---|---|---|---|
 | **T0** 人定出 | — | `open` · `[]` | 人 / 交互 agent | — | 加 `ready-for-agent` |
 | **T1** 可 AFK | — | `open` · `[ready-for-agent]` | 交互 agent | T0 | 人加 `agent:implement` |
-| **T2** 已授权 · 在门内 | — | `open` · `[ready-for-agent, agent:implement]` | 人 | T1，或人从 T5/T6 重入（T8） | App：Claim + 起 Job（T3）；Slot 满则 Defer（label 一字不变，只写一条日志） |
-| **T3** 被占 · 跑着 | 非终态（`Pending` / `Running`） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | App（一次 label edit + create-if-absent Job） | T2 ∧ Slot 够 | 见 T4–T6 |
+| **T2** 已授权 · 在门内 | — | `open` · `[ready-for-agent, agent:implement]` | 人 | T1，或人从 T5/T6 重入（T8） | App：Claim + 起 Job（T3）；Slot 满或名下旧 Job 未删则等（label 一字不变，只写一条日志） |
+| **T3** 被占 · 跑着 | 非终态（`Pending` / `Running`） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | App（先 create-if-absent Job、后写 label，[ADR-0013](adr/0013-claim-gates-on-job-absence.md)） | T2 ∧ Slot 够 ∧ 名下无未删旧 Job | 见 T4–T6 |
 | **T3L** 自环 · pod 在重启 | 非终态（pod 重启，`resume()` 从 checkpoint 续） | **与 T3 一字不差** | k8s（无人写 GitHub） | 任何 pod 层失败 | 回到 T3，直到 Job 终态；`backoffLimit` 耗尽才走 T6b |
 | **T4** done | `Complete` · `{outcome:"done", summary, commentBody?, newTickets?}` | `closed` · `[ready-for-agent, agent:implement]` | App（关票、摘 `agent:in-progress`；`commentBody` 有则转成评论） | T3 ∧ Complete ∧ done | 终态，出局。`newTickets` 非空时**先建 sub-issue、再关票**（反过来会在两写之间留下「票已关、新票还没建」的空窗） |
 | **T5** blocked | `Complete` · `{outcome:"blocked", commentBody}` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | App（摘 `ready-for-agent`、加 `ready-for-human`、加 `agent:blocked`、置评论） | T3 ∧ Complete ∧ blocked | 人重入（T8） |
@@ -155,6 +162,7 @@ flowchart TD
     T1 -->|"人加 agent:implement"| T2["open · [ready-for-agent, agent:implement]<br/>在门内"]
     T2 -->|"App：Claim（写 agent:in-progress）<br/>+ create-if-absent Job"| T3["open · [ready-for-agent, agent:implement, agent:in-progress]"]
     T2 -.->|"Slot 满 → Defer：label 一字不变，只写日志"| T2
+    T2 -.->|"名下旧 Job 未删 → 等：同 Defer 形<br/>TTL 删除的 DELETED 事件唤醒（ADR-0013）"| T2
     T3 --> S{"Job 终态？"}
     S -->|"否：pod 重启 / resume()"| T3L["自环：对 GitHub 不可见<br/>label 不动 · 不评论 · Slot 继续占"]
     T3L -->|"pod 又起来了"| S
@@ -203,7 +211,7 @@ flowchart TD
     S0["open · [ready-for-agent]"] -->|"人加 agent:implement"| S1["open · [ready-for-agent, agent:implement]<br/>在门内 · spec 上从不写 agent:in-progress"]
     S1 -->|"frontier 非空"| Claim["Claim 一张 ticket<br/>（ticket 走上面那张图）"]
     Claim --> S1
-    S1 -->|"frontier 空 ∧ 无 open sub-issue"| S2["起收尾 Job（implement-spec）"]
+    S1 -->|"frontier 空 ∧ 无 open sub-issue ∧ 收尾 Job 名下无未删旧对象"| S2["起收尾 Job（implement-spec）"]
     S1 -.->|"有 open sub-issue 但 frontier 空<br/>（票都 blocked / error）"| Idle["什么都不做，只写日志"]
     S2 -->|"Complete · done ∧ newTickets 为空"| S3["open · [ready-for-human, agent:implement]<br/>App 开 PR（按分支唯一，幂等）"]
     S2 -->|"Complete · done ∧ newTickets 非空"| S3N["open · [ready-for-agent, agent:implement]<br/>App 建 sub-issue，不开 PR"]
@@ -227,6 +235,7 @@ annotation 只有 runner 在**终态**才写，所以 T6b/T6c/T6d/T6e 这四条�
 
 - `outcome=error` 与 `reason`（`backoff-exhausted` / `deadline-exceeded` / `no-result` / `no-job` / annotation 自带的值）；
 - Job 名、pod 名；
+- **重入提示（[ADR-0013](adr/0013-claim-gates-on-job-absence.md)）**：人重入后，若旧 Job 还在保留窗里，新一轮最迟 30 分钟内起跑；等不及可 `kubectl delete job <Job 名>`，删除事件立即唤醒 Claim；
 - pod 终态证据（`OOMKilled` / `exitCode` / `DeadlineExceeded`）与容器日志末尾；
 - 这个 ticket 的 Ticket PVC 名（storage 里的对话全文在这儿）与 `kubectl logs` 指引，以及**这块卷的保留期**（`remote-agent/expires-at`，[ADR-0011](adr/0011-ticket-pvc-recycling.md)：`blocked` / `error` 留 30 天）。要提醒的是卷上**可能有未 push 的 commit**——`backoffLimit` / `DeadlineExceeded` / `no-result` 三条路上 runner 可能还没 push，卷是那部分工作的唯一副本。
 

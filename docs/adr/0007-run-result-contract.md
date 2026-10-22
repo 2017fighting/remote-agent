@@ -17,5 +17,6 @@
 - outcome 描述「这次运行是怎么结束的」，不描述为什么没做成：一切非 agent 自述的失败（`unanswered` 的 `model_error`/`no_model`/`faulted`/`aborted`/`missing_task`/`task_too_old`/`migration_failed`、`harness.closed` 的 `failed`、`backoffLimit` 耗尽、`DeadlineExceeded`、没有 annotation）都是 `error`；`blocked` 只留给「run 正常收尾 + agent 自述卡住」。agent 侧**没有** `error` 也没有 `reason`：细分原因由 App 写进它自己发的证据评论（`no-result` / `BackoffLimitExceeded` / `DeadlineExceeded` 等），不进载荷、不进状态机。
 - **`error` 不再自动重试**（ADR-0008）：重试的粒度是 k8s 重启 pod + 同卷 `resume()`，App 不重建 Job。所以 `error` 是**人的**入口，不是自动回路的入口。
 - **annotation 只在 outcome 已定时写**：runner 被 SIGTERM / OOM / 驱逐时只 `harness.close()` 然后非零退出，不写 annotation——那不是终态，pod 会被 k8s 重启并接着跑。因此不再需要「超时压过文件里的 `done`」这条特例；取而代之的是：Job 已是终态却读不到 annotation → App 兜底判 `error`（`reason=no-result`），证据取 pod 终态（`OOMKilled`/`DeadlineExceeded`/exitCode）与容器日志。
+- **annotation 恰好消费一次**：App 只在把票迁出 `agent:in-progress` 的那一次 reconcile 里读它（[ADR-0013](0013-claim-gates-on-job-absence.md)）；重入 / 重开后旧 Job 还在保留窗里时，票在门内但 App 不 Claim、不读那条旧 annotation——它必属已消费的上一轮，正确行为是等 Job 被删后再起新一轮。
 - **Job 至少活到 App 读完 annotation**：由 TTL 的保留预算保证（`ttlSecondsAfterFinished: 1800`，见 [ADR-0012](0012-job-deletion-ttl.md)）；Ticket PVC 比 Job 活得久（ADR-0008），所以「读不到」只发生在 runner 没走到终态的情形。
 - durable storage（session）在保留的 Ticket PVC 上是对话全文（含被截断的 `commentBody`）的家。

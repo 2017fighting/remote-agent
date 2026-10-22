@@ -25,6 +25,7 @@
 ## Consequences
 
 - **T6e（no-job）收窄为可用性兜底**：成因从「被 ttl 清掉 / 人手动删 / App 重启时已没了」改为「App 宕机超过保留窗 / 人手动删 / 灾难恢复」；正常自清发生在 App 读取**之后**，不落进 T6e。`docs/architecture.md` §4 的 T6e 行已同步改。**T6d 与 T6e 的分界线从此就是保留窗本身**：Job 在、读不到 annotation = T6d；Job 已不在 = T6e。
+- **保留窗多一个身份：重跑的起跑延迟上界**（[ADR-0013](0013-claim-gates-on-job-absence.md)）：重入 / 重开后旧 Job 还在窗里时，Claim 的门在 k8s 半边关着，新一轮最迟等它被删（保留窗剩余部分）才起跑；典型重入落在窗外，接近零等待。
 - **[#12](https://github.com/2017fighting/remote-agent/issues/12) 的「Job 靠 `ttlSecondsAfterFinished` 自清」拿到数值**；App 的最小 RBAC 不动。
 - **#27（重跑撞旧 Job）拿到输入**：人重入时旧 Job 大概率还在自己的 30 分钟窗里——Claim 的 create-if-absent 会撞上「已终态、annotation 已被消费的旧 Job」。机制归 #27（等 Job 删除事件唤醒下一次 reconcile 再 Claim 是自然候选）；App 不删 Job、不 `patch` Job（[ADR-0001](0001-stateless-reconciler.md)）维持不变。
 - **#26 的 resync 动机清单里没有这一条**：Job 终态读取由 watch + 重启 list + T6e 兜底闭环，周期性 resync 只剩 token 续期一个动机。
