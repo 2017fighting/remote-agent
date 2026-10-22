@@ -34,6 +34,8 @@ export interface StubGitHubOptions {
   port?: number;
   host?: string;
   tokenTtlSeconds?: number;
+  /** The installation id the stub reports for its one repo. */
+  installationId?: number;
 }
 
 export interface StubGitHub {
@@ -56,6 +58,7 @@ export async function startStubGitHub(options: StubGitHubOptions): Promise<StubG
     world,
     repo: scenario.repo,
     installationToken: options.token,
+    installationId: options.installationId ?? 1,
     tokenTtlSeconds: options.tokenTtlSeconds ?? 3600,
     now: () => new Date(),
   };

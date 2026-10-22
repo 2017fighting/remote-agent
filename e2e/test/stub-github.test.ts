@@ -203,6 +203,21 @@ describe("stub-github", () => {
     expect(new Date(minted.expires_at).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it("serves the installation flow octokit's App auth walks before any data read", async () => {
+    const { base } = await start();
+    const installations = await json<Array<{ id: number }>>(await fetch(`${base}/app/installations`));
+    expect(installations).toEqual([{ id: 1 }]);
+
+    const repositories = await json<{ total_count: number; repositories: Array<{ full_name: string }> }>(
+      await fetch(`${base}/installation/repositories`),
+    );
+    expect(repositories.total_count).toBe(1);
+    expect(repositories.repositories.map((repository) => repository.full_name)).toEqual([REPO]);
+
+    const installation = await json<{ id: number }>(await fetch(`${base}/repos/${REPO}/installation`));
+    expect(installation.id).toBe(1);
+  });
+
   it("404s a repo it does not serve and a route it does not implement", async () => {
     const { base } = await start();
     expect((await fetch(`${base}/repos/other/repo/issues`)).status).toBe(404);
