@@ -86,7 +86,7 @@ async function execute(
   pods: K8sPod[],
   transition: Exclude<OutcomeTransition, { kind: "none" }>,
 ): Promise<void> {
-  const { github, k8s } = deps;
+  const { github } = deps;
   const name = jobName(issue.ownerRepo, issue.number);
 
   if (transition.kind === "done") {
@@ -132,7 +132,7 @@ async function execute(
 
   // `expires-at` is written in the same pass that judged the outcome, and only
   // when absent: an existing value is the retention clock already running.
-  await setExpiresAtIfAbsent(deps, issue, transition.kind === "done" ? "done" : transition.kind === "blocked" ? "blocked" : "error");
+  await setExpiresAtIfAbsent(deps, issue, transition.kind);
 }
 
 /** T6b–T6e: the App's own account of a run that left no readable run result. */

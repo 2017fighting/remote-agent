@@ -1,4 +1,4 @@
-import { ANNOTATIONS } from "@remote-agent/shared";
+import { ANNOTATIONS, isRunResultV1 } from "@remote-agent/shared";
 import type { RunResultV1 } from "@remote-agent/shared";
 import type { GitHubIssue } from "../ports/GitHubPort.js";
 import type { K8sJob } from "../ports/K8sPort.js";
@@ -165,12 +165,14 @@ export function parseRunResultAnnotation(raw: string | undefined): ParsedRunResu
   }
   if (typeof value !== "object" || value === null) return null;
   const payload = value as Record<string, unknown>;
-  if (payload["v"] !== 1 || typeof payload["summary"] !== "string") return null;
 
-  const outcome = payload["outcome"];
-  if (outcome === "done" || outcome === "blocked") {
-    return { outcome, result: payload as unknown as RunResultV1 };
+  // The shared contract validator is the single spelling of "is this v1".
+  if (isRunResultV1(value)) return { outcome: value.outcome, result: value };
+
+  // T6a is the one shape outside the agent contract: `error` is never
+  // self-reported, but the payload shape allows it and must be judged.
+  if (payload["v"] === 1 && payload["outcome"] === "error" && typeof payload["summary"] === "string") {
+    return { outcome: "error", summary: payload["summary"] };
   }
-  if (outcome === "error") return { outcome: "error", summary: payload["summary"] };
   return null;
 }
