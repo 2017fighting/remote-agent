@@ -62,6 +62,10 @@ _Avoid_: poller, 轮询器, cron job, sync loop
 额度已满时本轮什么都不做——不建 Job、不改 label、不评论——等下一次唤醒自然重试；它的重试上界就是 Resync tick 的间隔。
 _Avoid_: queue, 排队, 延后重试
 
+**Idle**:
+某个 spec 在门内、有 open sub-issue、但 Frontier 空，于是本轮什么都不做——不建 Job、不改 label、不评论，只把它计进 pass 日志的 `idle` 数，并为它打一行 `idle-spec` 说清原因（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）。与 `Defer` 同形（都是「没动作但有原因」），区别是下一步：`Defer` 等额度，`Idle` 等人或等 label。
+_Avoid_: blocked, 空转, 无事可做
+
 **Agent role**:
 一次运行要扮演的角色（`implement-ticket` / `implement-spec`），决定用哪份 prompt 模板。
 _Avoid_: mode, action, agent type

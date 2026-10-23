@@ -1,9 +1,9 @@
 import type { AppConfig } from "./config.js";
 import type { GitHubIssue, GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sJob, K8sPod, K8sPort, K8sPvc } from "./ports/K8sPort.js";
-import type { PassCounters, Trigger } from "./scheduler.js";
+import type { IdleSpec, PassCounters, Trigger } from "./scheduler.js";
 import { jobName } from "@remote-agent/shared";
-import { planFrontier, type FrontierOutcome } from "./planners/frontier.js";
+import { planFrontier, type FrontierHoldout, type FrontierOutcome } from "./planners/frontier.js";
 import { claimGate } from "./planners/gate.js";
 import { admitSlot, countSlotUsage, occupySlot } from "./planners/slots.js";
 import { closeoutJobName, planSpecStep, type SpecStep } from "./planners/spec-loop.js";
@@ -35,8 +35,9 @@ export interface ReconcileDeps {
   now?: () => Date;
 }
 
-/** Pass counters plus the volume stats the pass-log's second line reports (ADR-0011). */
+/** Pass counters plus the per-spec `idle` detail and the volume stats line (ADR-0011, ticket #47). */
 export interface ReconcileResult extends PassCounters {
+  idleReasons: IdleSpec[];
   volumeStats: VolumeStats;
 }
 
@@ -98,6 +99,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   let usage = countSlotUsage(jobs, pods);
   let deferred = 0;
   let waiting = 0;
+  const idleReasons: IdleSpec[] = [];
 
   // Plan: every spec is read once. Its Frontier decides the S1 branch, and the
   // reads the spec loop needs (its own Gate, the closeout Job) are collected in
@@ -130,7 +132,18 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
       candidates.push({ spec, ticket: step.ticket });
     } else if (step.kind === "start-closeout") {
       closeoutStarts.push(spec);
-    } else if (step.kind !== "idle" && step.kind !== "closeout-running" && step.kind !== "out-of-gate") {
+    } else if (step.kind === "idle" && plan.frontier.kind === "no-frontier-open-sub-issues") {
+      // S1 third branch: in the gate, open sub-issues remain, Frontier empty.
+      // Same shape as Defer and the ADR-0013 wait — no Job, no label, no
+      // comment — but it is not one thing: the holdouts' gate reasons are what
+      // say whether a human must act or a label is missing (ticket #47).
+      const { holdouts } = plan.frontier;
+      idleReasons.push({
+        spec: spec.number,
+        openSubIssues: holdouts.length,
+        reasons: countReasons(holdouts),
+      });
+    } else if (step.kind !== "closeout-running" && step.kind !== "out-of-gate") {
       // S3 / S3N / S4 / S5: an outcome to act on. Executed after Claim, so the
       // documented pass order (3 claim → 4 advance → 5 closeout) holds.
       specSteps.push({ spec, step });
@@ -221,8 +234,17 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
     deferred,
     renewed,
     waiting,
+    idle: idleReasons.length,
+    idleReasons,
     volumeStats: stats,
   };
+}
+
+/** `idle`'s detail: the holdouts' gate reasons, counted (ticket #47). */
+function countReasons(holdouts: readonly FrontierHoldout[]): IdleSpec["reasons"] {
+  const reasons: IdleSpec["reasons"] = {};
+  for (const holdout of holdouts) reasons[holdout.reason] = (reasons[holdout.reason] ?? 0) + 1;
+  return reasons;
 }
 
 function specLoopDeps(deps: ReconcileDeps, now: () => Date): SpecLoopDeps {

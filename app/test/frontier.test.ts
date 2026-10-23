@@ -36,7 +36,52 @@ describe("frontier: three outcomes", () => {
       jobsByName: jobs(),
     });
     expect(outcome.kind).toBe("no-frontier-open-sub-issues");
-    expect(outcome.kind === "no-frontier-open-sub-issues" && outcome.openSubIssues.map((i) => i.number)).toEqual([35, 36]);
+    // Each holdout carries the gate condition that held it, so the log can say
+    // why the Frontier is empty (ticket #47).
+    expect(outcome.kind === "no-frontier-open-sub-issues" && outcome.holdouts.map((h) => h.issue.number)).toEqual([
+      35, 36,
+    ]);
+    expect(outcome.kind === "no-frontier-open-sub-issues" && outcome.holdouts.map((h) => h.reason)).toEqual([
+      "exit-marker",
+      "exit-marker",
+    ]);
+  });
+
+  it("names the action that unblocks each holdout, not the raw gate verdict", () => {
+    // The `idle` log line's reason vocabulary (ticket #47): every gate condition
+    // is mapped to "who fixes it", because a blocked ticket also lost
+    // `ready-for-agent` and would otherwise read as "just re-add the label".
+    const cases: Array<{ name: string; labels: string[]; blockers?: number; reason: string }> = [
+      { name: "blocked", labels: ["ready-for-human", "agent:blocked"], reason: "exit-marker" },
+      { name: "errored", labels: ["ready-for-human", "agent:error"], reason: "exit-marker" },
+      { name: "still running", labels: ["ready-for-agent", "agent:in-progress"], reason: "in-flight" },
+      { name: "never triaged in", labels: ["agent:implement"], reason: "not-ready" },
+      { name: "open blocker", labels: GATE_LABELS, blockers: 1, reason: "open-blocker" },
+      { name: "no authorization anywhere", labels: ["ready-for-agent"], reason: "unauthorized" },
+    ];
+    for (const c of cases) {
+      const outcome = planFrontier({
+        ownerRepo: REPO,
+        subIssues: [issue(35, c.labels)],
+        openBlockerCounts: new Map(c.blockers === undefined ? [] : [[35, c.blockers]]),
+        jobsByName: jobs(),
+        parentSpec: { issue: issue(33, ["ready-for-agent"]), openBlockerCount: 0 },
+      });
+      expect(
+        outcome.kind === "no-frontier-open-sub-issues" ? outcome.holdouts.map((h) => h.reason) : outcome.kind,
+        c.name,
+      ).toEqual([c.reason]);
+    }
+  });
+
+  it("a running ticket is in-flight, not a re-entry — it needs no human", () => {
+    const outcome = planFrontier({
+      ownerRepo: REPO,
+      subIssues: [issue(35, [...GATE_LABELS, "agent:in-progress"])],
+      openBlockerCounts: new Map(),
+      jobsByName: jobs(),
+    });
+    expect(outcome.kind === "no-frontier-open-sub-issues" && outcome.holdouts[0]!.reason).toBe("in-flight");
   });
 
   it("all-closed: every sub-issue is closed (the closeout Job's turn)", () => {

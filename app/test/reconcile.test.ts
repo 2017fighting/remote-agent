@@ -37,6 +37,8 @@ describe("reconcile pass: counters", () => {
       deferred: 0,
       renewed: 0,
       waiting: 0,
+      idle: 0,
+      idleReasons: [],
       volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
     });
   });
@@ -251,5 +253,92 @@ describe("reconcile pass: statelessness and replayability", () => {
     const result = await runReconcilePass({ github, k8s, config }, "tick");
     expect(k8s.jobs.map((job) => job.name)).toEqual([jobName(REPO, 34)]);
     expect(result.slotsUsed).toBe(1);
+  });
+});
+
+describe("reconcile pass: idle counter (ticket #47)", () => {
+  /**
+   * `idle` counts specs that are inside the label gate, still have open
+   * sub-issues, and have an empty Frontier: the S1 third branch. Same shape as
+   * `deferred` / `waiting` — no write, only a counter — but with a reason, so
+   * the log alone says what to do next.
+   */
+
+  it("counts one idle spec and reports why, without any write", async () => {
+    const github = specWorld({
+      specNumber: 33,
+      subIssueNumbers: [34, 35],
+      subIssueLabels: {
+        34: ["ready-for-human", "agent:implement", "agent:blocked"],
+        35: ["ready-for-human", "agent:implement", "agent:error"],
+      },
+    });
+    const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
+    expect(result.idle).toBe(1);
+    expect(result.idleReasons).toEqual([{ spec: 33, openSubIssues: 2, reasons: { "exit-marker": 2 } }]);
+    expect(github.writeLog).toEqual([]);
+  });
+
+  it("separates a ticket that needs a human from one that needs authorization", async () => {
+    // Two specs, same pass, same counter — the reason is what tells them apart.
+    const github = specWorld({
+      specNumber: 33,
+      subIssueNumbers: [34],
+      subIssueLabels: { 34: ["ready-for-human", "agent:implement", "agent:blocked"] },
+    });
+    // A second spec whose sub-issue is merely unauthorized (no own
+    // `agent:implement`, parent without one either).
+    const unauthorizedSpec = issue(40, ["ready-for-agent"]);
+    const unauthorizedTicket = issue(41, ["ready-for-agent"]);
+    github.issues.push(unauthorizedSpec, unauthorizedTicket);
+    github.subIssues.set(`${REPO}:40`, [41]);
+
+    const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
+    expect(result.idle).toBe(2);
+    expect(result.idleReasons).toEqual([
+      { spec: 33, openSubIssues: 1, reasons: { "exit-marker": 1 } },
+      { spec: 40, openSubIssues: 1, reasons: { unauthorized: 1 } },
+    ]);
+    expect(github.writeLog).toEqual([]);
+  });
+
+  it("stays zero when the Frontier is non-empty and a ticket is claimed", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    const k8s = new FakeK8s();
+    const result = await runReconcilePass({ github, k8s, config }, "tick");
+    expect(result.idle).toBe(0);
+    expect(result.idleReasons).toEqual([]);
+    expect(k8s.jobs.map((job) => job.name)).toEqual([jobName(REPO, 34)]);
+  });
+
+  it("counts a lingering Job object as idle too, and says so — waiting counts tickets, idle counts specs", async () => {
+    // Same branch, different reason: the Frontier is empty because of ADR-0013's
+    // k8s half. `idle` still counts the spec (the branch is what it counts); the
+    // per-spec reason is what tells the reader this one needs only the DELETED
+    // event, not a human.
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({ jobs: [managedJob(REPO, 34, { finished: true })] });
+    const result = await runReconcilePass({ github, k8s, config }, "tick");
+    expect(result.idle).toBe(1);
+    expect(result.idleReasons).toEqual([{ spec: 33, openSubIssues: 1, reasons: { "job-object-present": 1 } }]);
+    expect(result.waiting).toBe(1);
+  });
+
+  it("stays zero when every sub-issue is closed — that is the closeout branch, not idle", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    github.issues[1] = issue(34, GATE_LABELS, { state: "closed" });
+    const k8s = new FakeK8s();
+    const result = await runReconcilePass({ github, k8s, config }, "tick");
+    expect(result.idle).toBe(0);
+    expect(result.idleReasons).toEqual([]);
+    expect(k8s.jobs.map((job) => job.name)).toEqual([jobName(REPO, 33)]);
+  });
+
+  it("does not count a spec that is itself out of the gate", async () => {
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    github.issues[0] = issue(33, ["ready-for-human", "agent:blocked", "agent:implement"]);
+    const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
+    expect(result.idle).toBe(0);
+    expect(github.writeLog).toEqual([]);
   });
 });

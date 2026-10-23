@@ -94,7 +94,8 @@ describe("signed webhook → scheduler → one reconcile pass", () => {
     expect(Object.hasOwn(line, "deferred")).toBe(true);
     expect(Object.hasOwn(line, "renewed")).toBe(true);
     expect(Object.hasOwn(line, "waiting")).toBe(true);
-    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0");
+    expect(Object.hasOwn(line, "idle")).toBe(true);
+    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
     expect(errors).toEqual([]);
   });
 

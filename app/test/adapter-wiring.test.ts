@@ -124,7 +124,7 @@ describe("App on the production adapters", () => {
           `/api/v1/namespaces/${NAMESPACE}/persistentvolumeclaims`,
         ]),
       );
-      expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0");
+      expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
       // An empty world is also a write-free world: the only non-GET request is
       // the one token mint the installation client needed.
       expect(githubServer.requests.filter((request) => request.method !== "GET")).toHaveLength(1);

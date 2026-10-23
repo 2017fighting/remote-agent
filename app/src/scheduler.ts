@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config.js";
+import type { HoldoutReason } from "./planners/frontier.js";
 import type { VolumeStats } from "./planners/pvc-steward.js";
 
 /**
@@ -14,24 +15,65 @@ export interface PassCounters {
   deferred: number;
   renewed: number;
   waiting: number;
+  /** Specs inside the gate with open sub-issues and an empty Frontier (ticket #47). */
+  idle: number;
+}
+
+/**
+ * Why one spec was idle: how many of its open sub-issues the Frontier skipped,
+ * grouped by the action that would unblock each (ticket #47). `in-flight` only
+ * needs the run to finish, `exit-marker` / `not-ready` / `open-blocker` need a
+ * human, `unauthorized` needs the label, `job-object-present` needs the
+ * `DELETED` event.
+ */
+export interface IdleSpec {
+  spec: number;
+  openSubIssues: number;
+  reasons: Partial<Record<HoldoutReason, number>>;
 }
 
 export interface PassLog extends PassCounters {
   trigger: Trigger;
-  /** Volume usage of the post-reclamation world; the pass log's second line (ADR-0011). */
+  /** One entry per idle spec, in spec order; each also gets its own `idle-spec` line. */
+  idleReasons: IdleSpec[];
+  /** Volume usage of the post-reclamation world; the pass log's last line (ADR-0011). */
   volumeStats: VolumeStats;
 }
 
-/** One structured line per pass (ADR-0014): `pass trigger=<t> slots=<used>/<max> deferred=<n> renewed=<n> waiting=<n>`. */
+/**
+ * One structured line per pass (ADR-0014):
+ * `pass trigger=<t> slots=<used>/<max> deferred=<n> renewed=<n> waiting=<n> idle=<n>`.
+ *
+ * The three no-action counters are peers, and each names a different reason the
+ * pass did nothing: `deferred` = out of Slots, `waiting` = a lingering Job
+ * object, `idle` = in the gate with an empty Frontier. `idle`'s reason needs the
+ * per-spec line below, because it is not one thing.
+ */
 export function formatPassLog(line: PassLog): string {
   return (
     `pass trigger=${line.trigger} slots=${line.slotsUsed}/${line.slotsMax}` +
-    ` deferred=${line.deferred} renewed=${line.renewed} waiting=${line.waiting}`
+    ` deferred=${line.deferred} renewed=${line.renewed} waiting=${line.waiting} idle=${line.idle}`
   );
 }
 
 /**
- * The pass's second line (ADR-0011): live volume count / oldest expiry / this
+ * The `idle` counter's detail line (ticket #47), one per idle spec:
+ * `idle-spec spec=<n> open-sub-issues=<n> reasons=<reason>:<n>,…`
+ *
+ * Reasons are ordered by descending count, then name, so the same world always
+ * prints the same line. A spec with no reason at all is not idle, so `reasons`
+ * is never empty.
+ */
+export function formatIdleSpecLog(entry: IdleSpec): string {
+  const reasons = Object.entries(entry.reasons)
+    .sort(([a, countA], [b, countB]) => countB - countA || a.localeCompare(b))
+    .map(([reason, count]) => `${reason}:${count}`)
+    .join(",");
+  return `idle-spec spec=${entry.spec} open-sub-issues=${entry.openSubIssues} reasons=${reasons}`;
+}
+
+/**
+ * The pass's last line (ADR-0011): live volume count / oldest expiry / this
  * spec's usage. Delete-policy volumes are invisible to `pv-audit` and the
  * provenance labels take them out of `pvc-audit`, so this line is the only
  * leak signal the App produces itself.
@@ -46,7 +88,9 @@ export function formatVolumeStatsLog(stats: VolumeStats): string {
 
 export interface SchedulerDeps {
   /** The single reconcile() every wake source lands in. Returns the pass counters for the log line. */
-  reconcile: (trigger: Trigger) => Promise<PassCounters & { volumeStats: VolumeStats }>;
+  reconcile: (
+    trigger: Trigger,
+  ) => Promise<PassCounters & { idleReasons: IdleSpec[]; volumeStats: VolumeStats }>;
   /** The startup list (trigger=startup does a list + one pass; ADR-0014). */
   listIssues: () => Promise<unknown[]>;
   onPassLog: (line: PassLog) => void;

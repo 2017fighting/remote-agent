@@ -227,6 +227,37 @@ describe("S1 idle: open sub-issues but an empty Frontier", () => {
     expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
   });
 
+  it("is counted as idle=1 with the reason that says what to do next (ticket #47)", async () => {
+    // The shape that used to be entirely silent: the spec is in the gate, open
+    // sub-issues remain, the Frontier is empty because both tickets carry an
+    // exit marker. `idle` makes it a number; the reason says "a human must
+    // re-enter these", not "the webhook never arrived".
+    const github = specWorld({
+      specNumber: SPEC,
+      subIssueNumbers: [34, 35],
+      subIssueLabels: {
+        34: ["ready-for-human", "agent:implement", "agent:blocked"],
+        35: ["ready-for-human", "agent:implement", "agent:error"],
+      },
+    });
+
+    const result = await run({ github, k8s: new FakeK8s() });
+
+    expect(result.idle).toBe(1);
+    expect(result.idleReasons).toEqual([{ spec: SPEC, openSubIssues: 2, reasons: { "exit-marker": 2 } }]);
+  });
+
+  it("idle=0 when the Frontier is non-empty and a ticket is claimed", async () => {
+    const github = specWorld({ specNumber: SPEC, subIssueNumbers: [34, 35] });
+    const k8s = new FakeK8s();
+
+    const result = await run({ github, k8s });
+
+    expect(result.idle).toBe(0);
+    expect(result.idleReasons).toEqual([]);
+    expect(k8s.jobs.map((job) => job.name)).toEqual([jobName(REPO, 34)]);
+  });
+
   it("tries again next pass: a human re-entry puts the ticket back in the Frontier", async () => {
     const github = specWorld({
       specNumber: SPEC,

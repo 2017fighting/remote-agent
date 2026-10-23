@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createScheduler,
+  formatIdleSpecLog,
   formatPassLog,
   formatVolumeStatsLog,
+  type IdleSpec,
   type PassCounters,
   type PassLog,
   type Trigger,
@@ -77,13 +79,15 @@ function makeHarness(options?: { failOn?: Trigger }): Harness {
   };
 }
 
-function zeroCounters(): PassCounters & { volumeStats: VolumeStats } {
+function zeroCounters(): PassCounters & { idleReasons: IdleSpec[]; volumeStats: VolumeStats } {
   return {
     slotsUsed: 0,
     slotsMax: config.maxJobsGlobal,
     deferred: 0,
     renewed: 0,
     waiting: 0,
+    idle: 0,
+    idleReasons: [],
     volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
   };
 }
@@ -281,9 +285,22 @@ describe("pass log line", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("formats one structured line per pass with trigger and five counters", () => {
+  it("formats one structured line per pass with trigger and six counters", () => {
     const line: PassLog = { trigger: "webhook", ...zeroCounters() };
-    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0");
+    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
+  });
+
+  it("formats one idle-spec line per idle spec, with the reason counts that decide the next action", () => {
+    expect(
+      formatIdleSpecLog({ spec: 33, openSubIssues: 2, reasons: { "exit-marker": 2 } }),
+    ).toBe("idle-spec spec=33 open-sub-issues=2 reasons=exit-marker:2");
+    expect(
+      formatIdleSpecLog({
+        spec: 40,
+        openSubIssues: 3,
+        reasons: { unauthorized: 2, "open-blocker": 1 },
+      }),
+    ).toBe("idle-spec spec=40 open-sub-issues=3 reasons=unauthorized:2,open-blocker:1");
   });
 
   it("formats the volume stats line: live count, oldest expiry, per-spec usage", () => {
@@ -319,7 +336,7 @@ describe("pass log line", () => {
     );
   });
 
-  it("carries all five counters from the reconcile result", async () => {
+  it("carries all six counters from the reconcile result", async () => {
     const lines: PassLog[] = [];
     const scheduler = createScheduler(config, {
       reconcile: async () => ({
@@ -328,6 +345,8 @@ describe("pass log line", () => {
         deferred: 1,
         renewed: 4,
         waiting: 5,
+        idle: 6,
+        idleReasons: [{ spec: 33, openSubIssues: 2, reasons: { "exit-marker": 2 } }],
         volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
       }),
       listIssues: async () => [],
@@ -336,7 +355,10 @@ describe("pass log line", () => {
     });
     await scheduler.start();
     expect(formatPassLog(lines[0]!)).toBe(
-      "pass trigger=startup slots=2/3 deferred=1 renewed=4 waiting=5",
+      "pass trigger=startup slots=2/3 deferred=1 renewed=4 waiting=5 idle=6",
     );
+    expect(lines[0]!.idleReasons).toEqual([
+      { spec: 33, openSubIssues: 2, reasons: { "exit-marker": 2 } },
+    ]);
   });
 });

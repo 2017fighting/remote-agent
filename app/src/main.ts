@@ -1,6 +1,6 @@
 import { APP_ENV_KEYS } from "@remote-agent/shared";
 import { readAppConfig } from "./config.js";
-import { createScheduler, formatPassLog, formatVolumeStatsLog } from "./scheduler.js";
+import { createScheduler, formatIdleSpecLog, formatPassLog, formatVolumeStatsLog } from "./scheduler.js";
 import { createWebhookServer } from "./server.js";
 import { runReconcilePass } from "./reconcile.js";
 import { OctokitGitHub } from "./adapters/octokit.js";
@@ -36,7 +36,11 @@ export async function startApp(options?: {
     listIssues: () => github.listIssues(),
     onPassLog: (line) => {
       log(formatPassLog(line));
-      // Second line of every pass: the App's own volume usage (ADR-0011).
+      // One detail line per idle spec (ticket #47): the `idle` counter says how
+      // many, these say why — a blocked / errored ticket needs a human, an
+      // unauthorized one needs the label.
+      for (const entry of line.idleReasons) log(formatIdleSpecLog(entry));
+      // Last line of every pass: the App's own volume usage (ADR-0011).
       log(formatVolumeStatsLog(line.volumeStats));
     },
     onPassError: (trigger, error) =>
