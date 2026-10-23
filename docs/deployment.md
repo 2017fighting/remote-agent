@@ -137,6 +137,20 @@ init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOT
 
 `parallelism: 1`、`restartPolicy: Never`、`terminationGracePeriodSeconds: 120`、`fsGroup: 1000`、SA `agent-job`、PVC `ReadWriteOncePod` + SC `truenas-iscsi-delete`、agent 容器 requests `500m/2Gi` + memory limit `6Gi`、seed 容器 requests `100m/128Mi` 无 limit、`podFailurePolicy`：seed 容器 exit 78 → `FailJob`（[ADR-0009](adr/0009-ticket-volume-seeding.md) / [ADR-0010](adr/0010-job-resource-budget.md)）。
 
+### 6.1 Job 上的身份：标签只放合法值，机器可读的身份进注解
+
+spec §4 把 `remote-agent/ticket=<repo>#<n>` 与 `remote-agent/repo=<repo>` 写成**标签**，但这两个值含 `/` 与 `#`，API server 会直接 422（kind e2e 抓到的真 bug：照那个拼法一张 Job 都建不出来）。实际形态：
+
+| 载体 | 键 | 值 |
+| --- | --- | --- |
+| label | `app.kubernetes.io/managed-by` | `remote-agent` |
+| label | `remote-agent/spec` | `<n>` |
+| label | `remote-agent/role` | `implement-ticket` / `implement-spec` |
+| annotation | `remote-agent/ticket` | `<repo>#<n>` |
+| annotation | `remote-agent/repo` | `<repo>` |
+
+读 `owner/name` 的地方（token 续期、每 repo 的 Slot 计数）读**注解**，不读标签。改这里之前先读 [ADR-0011](adr/0011-ticket-pvc-recycling.md) 的那条 provenance 决定。
+
 ## 7. 护栏 quota
 
 `ResourceQuota` 只算对象数量：`count/jobs.batch: "10"`、`pods: "20"`，**不含 `requests.*` / `limits.*` 任何一个键**（只要出现这类键，k8s 就要求 namespace 里每个 Pod 都声明它，会把资源声明变成硬前置）。它只防「App 逻辑写错时无限起 Job」，**不承载并发语义**——并发是 App 自己算的 Slot（[#13](https://github.com/2017fighting/remote-agent/issues/13)，图见 [architecture.md §5](architecture.md#5-并发slot-与-defer)）。
