@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { JOB_ENTRY } from "../src/index.js";
 import { VOLUME_PATHS, jobName, secretName, pvcName } from "@remote-agent/shared";
+import { runRunner, runSeed } from "../src/index.js";
 
-/** #34 only wires the job workspace; it must resolve the shared contract module. */
+/** The job package resolves the shared contract module and exposes its entries. */
 describe("job workspace wiring", () => {
   it("resolves the shared contract module", () => {
     expect(VOLUME_PATHS.mountRoot).toBe("/mnt/agent");
@@ -11,7 +11,10 @@ describe("job workspace wiring", () => {
     expect(pvcName("2017fighting/remote-agent", 34)).toBe(n);
   });
 
-  it("marks the entry as not implemented in this ticket", () => {
-    expect(JOB_ENTRY).toMatch(/not-implemented/);
+  it("exports both executables, since the image bundles and runs them", () => {
+    // The init container's `command` and the image's `CMD` name these entries, so
+    // the package must actually export them.
+    expect(typeof runSeed).toBe("function");
+    expect(typeof runRunner).toBe("function");
   });
 });

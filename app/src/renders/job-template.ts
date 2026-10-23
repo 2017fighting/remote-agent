@@ -47,7 +47,8 @@ export const JOB_ONLY_ENV_KEYS = {
 } as const;
 
 /** Where the per-Job token is mounted as a file (ADR-0009: never env, never a URL). */
-export const TOKEN_MOUNT_PATH = "/mnt/credentials/token";
+/** Bound to the shared constant so the template and the image cannot drift apart. */
+export const TOKEN_MOUNT_PATH = JOB_MOUNT_PATHS.token;
 
 /**
  * The prompt ConfigMap (ADR-0004 / docs/deployment.md §8). The Job image carries

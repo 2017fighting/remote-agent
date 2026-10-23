@@ -166,3 +166,127 @@ describe("work item budget (512 KB)", () => {
     expect((JSON.parse(json) as WorkItemV1).body).toBe(body);
   });
 });
+
+/**
+ * The spec role's ticket map (spec #33 user story 26): the spec role must be
+ * able to read its whole acceptance surface — every sub-issue's title, body and
+ * comments in chronological order — without calling GitHub. `prompts/implement-spec`
+ * refers to it as "rendered above", so the App is the one that has to supply it.
+ */
+describe("work item ticket map (spec role)", () => {
+  function ticket(n: number, comments: GitHubComment[] = [], body = `Body of #${n}`) {
+    return { issue: issue(n, [], { title: `Ticket ${n}`, body }), comments };
+  }
+
+  function renderSpec(tickets: ReturnType<typeof ticket>[], comments: GitHubComment[] = []): WorkItemV1 {
+    return renderWorkItem({
+      issue: issue(33, GATE_LABELS, { title: "Spec 33", body: SPEC_BODY }),
+      specNumber: 33,
+      comments,
+      tickets,
+    });
+  }
+
+  it("carries every sub-issue with its title, body and comments in chronological order", () => {
+    const item = renderSpec([
+      ticket(34, [
+        comment(1, "first on 34", "2025-01-01T00:00:00Z", "alice"),
+        comment(2, "second on 34", "2025-01-02T00:00:00Z", "bob"),
+      ]),
+      ticket(35, [comment(3, "only on 35", "2025-01-03T00:00:00Z", "carol")]),
+    ]);
+
+    expect(item.tickets?.map((t) => t.number)).toEqual([34, 35]);
+    expect(item.tickets?.map((t) => t.title)).toEqual(["Ticket 34", "Ticket 35"]);
+    expect(item.tickets?.map((t) => t.body)).toEqual(["Body of #34", "Body of #35"]);
+    expect(item.tickets?.[0]?.comments.map((c) => c.body)).toEqual(["first on 34", "second on 34"]);
+    expect(item.tickets?.[0]?.comments.map((c) => c.author)).toEqual(["alice", "bob"]);
+    expect(item.tickets?.[1]?.comments.map((c) => c.body)).toEqual(["only on 35"]);
+  });
+
+  it("validates as work item v1, ticket map included", () => {
+    const json = serializeWorkItem(renderSpec([ticket(34, [comment(1, "hi", "2025-01-01T00:00:00Z")])]));
+    expect(isWorkItemV1(JSON.parse(json))).toBe(true);
+    const parsed = JSON.parse(json) as WorkItemV1;
+    expect(parsed.tickets?.[0]?.comments[0]?.body).toBe("hi");
+  });
+
+  it("yields an empty array for a spec with no sub-issues", () => {
+    const item = renderSpec([]);
+    expect(item.tickets).toEqual([]);
+    // Present, not absent: the spec role always carries the key.
+    expect(Object.keys(JSON.parse(serializeWorkItem(item)) as object)).toContain("tickets");
+  });
+
+  it("leaves the key out of a ticket's work item entirely", () => {
+    expect(render()).not.toHaveProperty("tickets");
+    expect(Object.keys(JSON.parse(serializeWorkItem(render())) as object)).not.toContain("tickets");
+  });
+
+  it("rejects a ticket map entry that is not a ticket", () => {
+    const broken = { ...renderSpec([ticket(34)]), tickets: [{ number: 34 }] };
+    expect(isWorkItemV1(broken)).toBe(false);
+  });
+});
+
+describe("work item budget with the ticket map", () => {
+  function ticket(n: number, comments: GitHubComment[], body = `Body of #${n}`) {
+    return { issue: issue(n, [], { title: `Ticket ${n}`, body }), comments };
+  }
+
+  it("truncates comments oldest-first across the whole payload, not per list", () => {
+    // 175 KB x3 = ~538 KB: over the 512 KB budget, so exactly ONE comment must be
+    // dropped. Sized deliberately — at 120 KB everything fits and the test would
+    // pass without exercising truncation at all.
+    const big = "x".repeat(175 * 1024);
+    // Interleaved in time: 34's oldest is the payload's oldest, then the spec's
+    // own comment, then 35's. Per-list truncation would keep the spec's comment.
+    const item = renderWorkItem({
+      issue: issue(33, GATE_LABELS, { title: "Spec 33", body: SPEC_BODY }),
+      specNumber: 33,
+      comments: [comment(2, `spec comment ${big}`, "2025-01-02T00:00:00Z")],
+      tickets: [
+        ticket(34, [comment(1, `oldest ${big}`, "2025-01-01T00:00:00Z")]),
+        ticket(35, [comment(3, `newest ${big}`, "2025-01-03T00:00:00Z")]),
+      ],
+    });
+
+    const json = serializeWorkItem(item);
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(WORK_ITEM_MAX_BYTES);
+
+    const parsed = JSON.parse(json) as WorkItemV1;
+    const [t34, t35] = parsed.tickets!;
+    // The globally oldest comment has to go. It belongs to #34 (01-01), so #34's
+    // list gets the pointer line while the spec's own comment (01-02) and #35's
+    // (01-03) survive untouched — which is what proves the order was global
+    // rather than per-list.
+    expect(t34!.comments.map((c) => c.body)).toEqual([OMITTED_COMMENTS_PLACEHOLDER]);
+    expect(parsed.comments.map((c) => c.body)).toEqual([`spec comment ${big}`]);
+    expect(t35!.comments.map((c) => c.body)).toEqual([`newest ${big}`]);
+    // Bodies are never truncated.
+    expect(parsed.body).toBe(SPEC_BODY);
+    expect(parsed.tickets!.map((t) => t.body)).toEqual(["Body of #34", "Body of #35"]);
+  });
+
+  it("drops only the globally oldest comment, and never a ticket itself", () => {
+    // Two ~300 KB comments (614 KB) exceed the budget; dropping the spec's own
+    // (the oldest) leaves ~307 KB, which fits — so #34's comment must SURVIVE.
+    // The point of this test is the boundary: truncation stops as soon as the
+    // payload fits, and a ticket entry is never removed, only its comments.
+    const big = "x".repeat(300 * 1024);
+    const item = renderWorkItem({
+      issue: issue(33, GATE_LABELS, { title: "Spec 33", body: SPEC_BODY }),
+      specNumber: 33,
+      comments: [comment(1, `spec ${big}`, "2025-01-01T00:00:00Z")],
+      tickets: [ticket(34, [comment(2, `t34 ${big}`, "2025-01-02T00:00:00Z")])],
+    });
+
+    const parsed = JSON.parse(serializeWorkItem(item)) as WorkItemV1;
+    // The ticket is always present, with its title and body intact.
+    expect(parsed.tickets?.map((t) => t.number)).toEqual([34]);
+    expect(parsed.tickets?.[0]?.body).toBe("Body of #34");
+    // The oldest comment is gone and marked; the newer one is untouched.
+    expect(parsed.comments.map((c) => c.body)).toEqual([OMITTED_COMMENTS_PLACEHOLDER]);
+    expect(parsed.tickets?.[0]?.comments.map((c) => c.body)).toEqual([`t34 ${big}`]);
+  });
+});

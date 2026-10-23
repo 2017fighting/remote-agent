@@ -1,7 +1,11 @@
 import type { AppConfig } from "./config.js";
 import type { VolumeStats } from "./planners/pvc-steward.js";
 
-/** ADR-0014 wake sources. The `job-watch` source arrives in a later ticket; its slot exists now so the log line vocabulary is stable. */
+/**
+ * ADR-0014's three wake sources plus the startup pass. All three land in the same
+ * `reconcile()`; `job-watch` is subscribed by `main.ts`, where ADDED and DELETED
+ * both coalesce into a pass (DELETED is what re-opens the Claim-gate).
+ */
 export type Trigger = "webhook" | "job-watch" | "tick" | "startup";
 
 export interface PassCounters {

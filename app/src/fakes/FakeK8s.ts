@@ -37,6 +37,11 @@ export class FakeK8s implements K8sPort {
   failNextCreate?: { object: "job" | "secret" | "pvc"; error: Error };
   private watchers: Array<(event: K8sEvent) => void> = [];
 
+  /** How many watch streams are subscribed — the App's third wake source, observable. */
+  get watcherCount(): number {
+    return this.watchers.length;
+  }
+
   constructor(world?: { jobs?: K8sJob[]; pods?: K8sPod[]; secrets?: K8sSecret[]; pvcs?: K8sPvc[] }) {
     if (world?.jobs) this.jobs.push(...world.jobs);
     if (world?.pods) this.pods.push(...world.pods);

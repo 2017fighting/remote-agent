@@ -68,6 +68,56 @@ describe("startApp wiring", () => {
     }
   });
 
+  it("the Job watch is a live wake source: a DELETED event wakes a pass", async () => {
+    // Story 8's escape hatch: `kubectl delete job <name>` must wake Claim
+    // immediately. The evidence comment promises exactly that, so a watch that is
+    // never subscribed would make the App lie to a human.
+    const github = new FakeGitHub();
+    const k8s = new FakeK8s();
+    const logLines: string[] = [];
+    const app = await startApp({
+      env: {},
+      github,
+      k8s,
+      log: (line) => logLines.push(line),
+      webhookSecret: SECRET,
+    });
+    try {
+      // The watch must be subscribed by startup, not on the first webhook.
+      expect(k8s.watcherCount).toBeGreaterThan(0);
+
+      // A real Job object has to exist for the DELETED event to fire.
+      await k8s.createJob({
+        name: "agent-o-r-1",
+        namespace: "remote-agent",
+        labels: {},
+        annotations: {},
+        parallelism: 1,
+        backoffLimit: 4,
+        activeDeadlineSeconds: 10800,
+        ttlSecondsAfterFinished: 1800,
+        podFailurePolicy: { rules: [] },
+        podTemplate: {
+          serviceAccountName: "agent-job",
+          restartPolicy: "Never",
+          terminationGracePeriodSeconds: 120,
+          securityContext: { fsGroup: 1000 },
+          initContainers: [],
+          containers: [],
+          volumes: [],
+        },
+      });
+      k8s.deleteJob("agent-o-r-1");
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const passLines = logLines.filter((line) => line.startsWith("pass "));
+      expect(passLines.at(-1)).toBe("pass trigger=job-watch slots=0/3 deferred=0 renewed=0 waiting=0");
+    } finally {
+      await app.stop();
+    }
+  });
+
   it("rejects a bad signature without waking a pass", async () => {
     const github = new FakeGitHub();
     const k8s = new FakeK8s();

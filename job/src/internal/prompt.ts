@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { WorkItemV1 } from "@remote-agent/shared";
+import type { WorkItemComment, WorkItemTicket, WorkItemV1 } from "@remote-agent/shared";
 import type { AgentRole } from "./env.js";
 
 /**
@@ -92,11 +92,48 @@ export function placeholderValues(input: RenderPromptInput): Record<string, stri
   return {
     work_ref: workRef,
     work_title: input.workItem.title,
-    work_body: input.workItem.body,
+    work_body: workBody(input.workItem),
     ticket_number: String(input.workItem.number),
     spec_number: String(input.workItem.specNumber),
     fixed_point: input.fixedPoint,
   };
+}
+
+/**
+ * The body the prompt shows: the work item's own body, followed by the ticket
+ * map when the App sent one (spec #33 user story 26). `prompts/implement-spec`
+ * calls the ticket map "rendered above", so it has to arrive inside the body
+ * section — the templates themselves are verbatim and never change.
+ */
+export function workBody(workItem: WorkItemV1): string {
+  const tickets = workItem.tickets;
+  if (tickets === undefined) return workItem.body;
+  return `${workItem.body}\n\n${renderTicketMap(tickets)}`;
+}
+
+/**
+ * The spec role's ticket map: every sub-issue in the spec's listed order
+ * (newest last), with its body and its comments in chronological order — the
+ * acceptance surface of the closeout run.
+ */
+export function renderTicketMap(tickets: WorkItemTicket[]): string {
+  if (tickets.length === 0) return "## Ticket map\n\n_This spec has no sub-issues._";
+  const lines = ["## Ticket map", ""];
+  for (const ticket of tickets) {
+    lines.push(`### #${ticket.number} — ${ticket.title}`, "", ticket.body.trimEnd(), "");
+    if (ticket.comments.length > 0) {
+      lines.push("#### Comments", "");
+      for (const comment of ticket.comments) lines.push(...commentLines(comment));
+      lines.push("");
+    }
+  }
+  return lines.join("\n").trimEnd();
+}
+
+function commentLines(comment: WorkItemComment): string[] {
+  const who = comment.author === "" ? "unknown" : comment.author;
+  const when = comment.createdAt === "" ? "" : ` (${comment.createdAt})`;
+  return [`**${who}**${when}:`, "", comment.body.trimEnd(), ""];
 }
 
 const PLACEHOLDER = /\{\{\s*([a-z_]+)\s*\}\}/g;

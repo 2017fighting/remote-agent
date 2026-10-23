@@ -9,6 +9,18 @@ export interface WorkItemComment {
   createdAt: string;
 }
 
+/**
+ * One ticket of the spec role's ticket map: the ticket as the App read it, with
+ * its own comments oldest first. `number` is what `Part of #<spec>` points back
+ * from; the title and body are the acceptance surface the prompt renders.
+ */
+export interface WorkItemTicket {
+  number: number;
+  title: string;
+  body: string;
+  comments: WorkItemComment[];
+}
+
 export interface WorkItemV1 {
   v: 1;
   /** Target repo as `owner/name`. */
@@ -26,6 +38,32 @@ export interface WorkItemV1 {
    */
   specBody?: string;
   comments: WorkItemComment[];
+  /**
+   * The spec role's ticket map: every sub-issue of the spec, newest last, each
+   * with its own comments in chronological order (spec #33 user story 26).
+   * Absent for the ticket role — its acceptance surface is its own body.
+   */
+  tickets?: WorkItemTicket[];
+}
+
+/** True when a parsed value is a work item's ticket entry (one nested level). */
+export function isWorkItemTicket(value: unknown): value is WorkItemTicket {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["number"] === "number" &&
+    Number.isInteger(v["number"]) &&
+    typeof v["title"] === "string" &&
+    typeof v["body"] === "string" &&
+    Array.isArray(v["comments"]) &&
+    v["comments"].every(isWorkItemComment)
+  );
+}
+
+function isWorkItemComment(value: unknown): value is WorkItemComment {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v["author"] === "string" && typeof v["body"] === "string" && typeof v["createdAt"] === "string";
 }
 
 export function isWorkItemV1(value: unknown): value is WorkItemV1 {
@@ -43,7 +81,9 @@ export function isWorkItemV1(value: unknown): value is WorkItemV1 {
     typeof v["body"] === "string" &&
     (v["specBody"] === undefined || typeof v["specBody"] === "string") &&
     Array.isArray(v["comments"]) &&
-    v["comments"].every((comment) => typeof comment === "object" && comment !== null)
+    v["comments"].every((comment) => typeof comment === "object" && comment !== null) &&
+    (v["tickets"] === undefined ||
+      (Array.isArray(v["tickets"]) && v["tickets"].every(isWorkItemTicket)))
   );
 }
 

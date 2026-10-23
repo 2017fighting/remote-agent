@@ -1,3 +1,4 @@
+import { commentMarker } from "@remote-agent/shared";
 import type { RunResultV1 } from "@remote-agent/shared";
 import type { AppErrorReason } from "../planners/outcome.js";
 
@@ -23,9 +24,9 @@ import type { AppErrorReason } from "../planners/outcome.js";
 
 export type CommentKind = "done" | "blocked" | "error" | "evidence";
 
-export function commentMarker(kind: CommentKind, jobName: string): string {
-  return `<!-- remote-agent:${kind}:${jobName} -->`;
-}
+// One definition of the marker, in the shared contract: the App writes it and the
+// dedupe read compares against it, so a drift here would double-post every comment.
+export { commentMarker };
 
 /** True when a comment body already carries this marker (dedupe on re-read). */
 export function hasCommentMarker(body: string, kind: CommentKind, jobName: string): boolean {

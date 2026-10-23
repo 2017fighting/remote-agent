@@ -2,14 +2,14 @@ import { jobName } from "@remote-agent/shared";
 import type { GitHubIssue, GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sJob, K8sPod, K8sPort } from "./ports/K8sPort.js";
 import { judgeOutcome, type OutcomeTransition } from "./planners/outcome.js";
-import { LABEL_AGENT_IN_PROGRESS } from "./planners/gate.js";
+import { LABEL_AGENT_IN_PROGRESS, LABEL_READY_FOR_AGENT, LABEL_READY_FOR_HUMAN } from "./planners/gate.js";
 import { renderDoneComment } from "./renders/comments.js";
 import {
   migrateLabels,
   postFailureComment,
   postOnce,
   setExpiresAtIfAbsent,
-  type FailureReport,
+  type FailureOutcome,
 } from "./outcome-effects.js";
 
 /**
@@ -94,7 +94,7 @@ async function execute(
     await github.closeIssue(issue.ownerRepo, issue.number);
   } else {
     await migrateLabels(github, issue, { add: transition.addLabels, remove: transition.removeLabels });
-    await postFailureComment(deps, issue, job, pods, asFailureReport(transition), judgedAt);
+    await postFailureComment(deps, issue, job, pods, asFailureOutcome(transition), judgedAt);
   }
 
   // `expires-at` is written in the same pass that judged the outcome, and only
@@ -102,7 +102,7 @@ async function execute(
   await setExpiresAtIfAbsent(deps, issue, transition.kind, judgedAt);
 }
 
-function asFailureReport(transition: Exclude<OutcomeTransition, { kind: "none" | "done" }>): FailureReport {
+function asFailureOutcome(transition: Exclude<OutcomeTransition, { kind: "none" | "done" }>): FailureOutcome {
   if (transition.kind === "blocked") return { outcome: "blocked", result: transition.result };
   return { outcome: "error", reason: transition.reason, summary: transition.summary };
 }
@@ -121,6 +121,6 @@ export async function createFollowUp(
     ownerRepo: issue.ownerRepo,
     title: ticket.title,
     body: ticket.body,
-    labels: [ticket.readyForAgent ? "ready-for-agent" : "ready-for-human"],
+    labels: [ticket.readyForAgent ? LABEL_READY_FOR_AGENT : LABEL_READY_FOR_HUMAN],
   });
 }

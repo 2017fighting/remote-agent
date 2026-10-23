@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANNOTATIONS, jobName, secretName, specBranch } from "@remote-agent/shared";
+import { ANNOTATIONS, isWorkItemV1, jobName, secretName, specBranch, type WorkItemV1 } from "@remote-agent/shared";
 import { runReconcilePass, type ReconcileDeps } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
@@ -91,6 +91,71 @@ describe("S1 → S2: frontier empty and no open sub-issue starts the closeout Jo
 
     expect(k8s.writeLog).toEqual([]);
     expect(github.pullRequests).toHaveLength(1);
+  });
+
+  it("hands the closeout Job the ticket map: every sub-issue with its title, body and comments", async () => {
+    // User story 26: the spec role must read its whole acceptance surface from
+    // AGENT_WORK_ITEM. `prompts/implement-spec` is verbatim and refers to the map
+    // as "rendered above", so the App is the one that has to put it there.
+    const github = new FakeGitHub({
+      issues: [
+        issue(SPEC, GATE_LABELS, { title: "Spec 33", body: "the spec body" }),
+        issue(34, GATE_LABELS, { state: "closed", title: "Ticket 34", body: "body of 34" }),
+        issue(35, GATE_LABELS, { state: "closed", title: "Ticket 35", body: "body of 35" }),
+      ],
+      subIssues: [{ ownerRepo: REPO, specNumber: SPEC, issueNumbers: [34, 35] }],
+      comments: [
+        { id: 1, ownerRepo: REPO, issueNumber: 34, author: "alice", body: "later on 34", createdAt: "2025-02-02T00:00:00Z" },
+        { id: 2, ownerRepo: REPO, issueNumber: 34, author: "bob", body: "earlier on 34", createdAt: "2025-02-01T00:00:00Z" },
+        { id: 3, ownerRepo: REPO, issueNumber: 35, author: "carol", body: "only on 35", createdAt: "2025-02-03T00:00:00Z" },
+        { id: 4, ownerRepo: REPO, issueNumber: SPEC, author: "human", body: "spec note", createdAt: "2025-01-30T00:00:00Z" },
+      ],
+    });
+    const k8s = new FakeK8s();
+
+    await run({ github, k8s });
+
+    const workItem = JSON.parse(
+      k8s.jobManifests[0]!.podTemplate.containers[0]!.env!.find((e) => e.name === "AGENT_WORK_ITEM")!.value!,
+    ) as WorkItemV1;
+    expect(workItem.tickets?.map((t) => t.number)).toEqual([34, 35]);
+    expect(workItem.tickets?.map((t) => t.title)).toEqual(["Ticket 34", "Ticket 35"]);
+    expect(workItem.tickets?.map((t) => t.body)).toEqual(["body of 34", "body of 35"]);
+    // Chronological, not list order: the fake stores them out of order on purpose.
+    expect(workItem.tickets?.[0]?.comments.map((c) => c.body)).toEqual(["earlier on 34", "later on 34"]);
+    expect(workItem.tickets?.[1]?.comments.map((c) => c.body)).toEqual(["only on 35"]);
+    // The spec's own comments stay on the spec, not mixed into a ticket.
+    expect(workItem.comments.map((c) => c.body)).toEqual(["spec note"]);
+    expect(isWorkItemV1(workItem)).toBe(true);
+  });
+
+  it("never starts a closeout for an issue with no sub-issues (that is not a spec)", async () => {
+    // "Having sub-issues is what makes an issue a spec" (user story 32), so this
+    // shape must start no Job at all — not a closeout with an empty ticket map.
+    // The empty-map path is unreachable through reconcile and is covered directly
+    // at the render seam (app/test/work-item.test.ts).
+    const github = new FakeGitHub({
+      issues: [issue(SPEC, GATE_LABELS, { title: "Spec 33", body: "the spec body" })],
+      subIssues: [{ ownerRepo: REPO, specNumber: SPEC, issueNumbers: [] }],
+    });
+    const k8s = new FakeK8s();
+
+    await run({ github, k8s });
+
+    expect(k8s.jobManifests).toHaveLength(0);
+  });
+
+  it("a ticket's work item carries no ticket map", async () => {
+    const github = specWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s();
+
+    await run({ github, k8s });
+
+    const workItem = JSON.parse(
+      k8s.jobManifests[0]!.podTemplate.containers[0]!.env!.find((e) => e.name === "AGENT_WORK_ITEM")!.value!,
+    ) as WorkItemV1;
+    expect(workItem.number).toBe(34);
+    expect(Object.keys(workItem)).not.toContain("tickets");
   });
 
   it("a replayed pass over the world it just produced writes nothing", async () => {

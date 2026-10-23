@@ -61,12 +61,39 @@ export async function startApp(options?: {
   // Startup: one list + one trigger=startup pass (ADR-0014), then the tick arms.
   await scheduler.start();
 
+  // Third wake source: the Job watch (ADR-0014). ADDED and DELETED both matter —
+  // DELETED is what re-opens the Claim-gate after a Job's TTL expires or a human
+  // runs `kubectl delete job`, which is the escape hatch the evidence comment
+  // promises. A closed or failed watch is not fatal: the resync tick is the
+  // documented backstop, so the stream is simply re-armed.
+  let watching = true;
+  const watchLoop = async (): Promise<void> => {
+    while (watching) {
+      try {
+        await k8s.watchJobs(() => scheduler.wake("job-watch"));
+      } catch (error) {
+        if (!watching) return;
+        log(`job-watch-error error=${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!watching) return;
+      // The stream ended (server-side close, restart, network). Wait one tick
+      // interval before re-arming so a persistently broken watch cannot spin.
+      await delay(config.resyncIntervalSeconds * 1000);
+    }
+  };
+  void watchLoop();
+
   return {
     stop: async () => {
+      watching = false;
       scheduler.stop();
       await server.close();
     },
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** `PORT` from the image env; absent or unusable means "let the OS choose". */
