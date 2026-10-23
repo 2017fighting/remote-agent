@@ -26,14 +26,14 @@ Webhook URL: https://remote-agent.raenzo.com/webhook
 
 ## 我们需要用到的issue label
 
-- `agent:implement`: 标记这个 issue(spec or ticket) 需要由 remote agent 进行实现；**人写，App 永不删**（它记的是「人授权过」，不是「此刻在跑」）。**一张 ticket 的授权可以继承自它的父 spec**：给 spec 加一次，它名下所有 `ready-for-agent` 的 sub-issue 都能被 Claim，不必逐票点火；票自己带 label 的用法保留，那是「只单独实现这一张」的手动入口。继承只影响判定、**不落到 label 上**——Claim 不在票上补写它，票上的 label 永远只记人写过的东西
+- `agent:implement`: 标记这个 issue(spec or ticket) 需要由 remote agent 进行实现；**人写，App 永不删**（它记的是「人授权过」，不是「此刻在跑」）。**一张 ticket 的授权可以继承自它的父 spec**：给 spec 加一次，它名下所有 `ready-for-agent` 的 sub-issue 都能被 Claim，不必逐票点火；票自己带 label 的用法保留，那是「只单独实现这一张」的手动入口。继承只影响判定、**不落到 label 上**——Claim 不在票上补写它，票上的 label 永远只记人写过的东西。**写在 spec 上时它授权的是整条 spec 循环**，包括收尾 Job 自己发现的新活（`newTickets` 建出的 `ready-for-agent` 票下一轮自己就跑），代价是轮数无上限，见 [`Spec implement循环`](#spec-implement循环)
 - `agent:in-progress`: App 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
 - `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 App 设置；**没有自动重试**，人改 label 是唯一重入方式
 - `agent:blocked`: agent 自述没做完、需要人做决定，由 App 按 run result 设置
 
 ## implement整体流程
 
-1. `人`：给 `ready-for-agent` 的 issue 加 `agent:implement` 的 label——**给 spec 加一次就够**，它的 sub-issue 继承这个授权（不必逐票点火）；只想单独跑某张票时，也可以把 label 加在那张票上
+1. `人`：给 `ready-for-agent` 的 issue 加 `agent:implement` 的 label——**给 spec 加一次就够**，它的 sub-issue 继承这个授权（不必逐票点火），**包括收尾 Job 自己建的新票**；只想单独跑某张票时，也可以把 label 加在那张票上
 2. `App`：收到 webhook（`issues` / `issue_comment` / `sub_issues` / `issue_dependencies` / `installation_repositories`），**只把它当「去跑一轮 pass」的信号**，不解析业务。唤醒源设计上共三个（webhook、Job watch、每 5 分钟的 resync tick），落点都是同一个 `reconcile()`（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）；**目前 Job watch 尚未 arm，在跑的是 webhook + tick**（见 [architecture.md §1](docs/architecture.md#1-系统全景) 的实现状态注）
 3. `App`：一轮 pass 从 GitHub 与 k8s 读出全部相关状态。有 sub-issue 的 issue 是 spec（算它的 Frontier，只实现 Frontier 那一张 ticket），没有 sub-issue 的是 ticket（实现它自己）
 4. `App`：Claim 这张 ticket——按写序建 Ticket PVC（若缺）、mint 只覆盖目标 repo 的 installation token 写进 `agent-<repo-slug>-<issue#>-token`、create-if-absent 建 Job，**最后**才写 `agent:in-progress`（反过来会在两写之间留下假的 no-job 形状，[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）
@@ -67,7 +67,9 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 - **done**：App 关票、摘 `agent:in-progress`；下一轮唤醒重算 Frontier，接着实现下一张
 - **blocked**：App 加 `agent:blocked` + `ready-for-human`、按 run result 的 `commentBody` 转写一条评论说明做了什么，**不关票**，然后停下（agent 不碰 GitHub，[ADR-0002](docs/adr/0002-app-is-sole-github-writer.md)）
 
-直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票只带 `ready-for-agent`（或 `ready-for-human`），但授权是沿 spec 继承来的，所以 `ready-for-agent` 的新票下一轮就进 Frontier 接着跑；`ready-for-human` 的留在门外等人。
+直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票只带 `ready-for-agent`（或 `ready-for-human`），但授权是沿 spec 继承来的，所以 **`ready-for-agent` 的新票下一轮就进 Frontier、就被 Claim**，不需要人在票上补 `agent:implement`；`ready-for-human` 的留在门外等人。票上的 label 走的是普通票那条链：`ready-for-agent`（App 建票时写）→ 继承授权 → `agent:in-progress`，`agent:implement` 全程不出现。
+
+**代价：轮数无上限。** 收尾 Job 每轮都可能再报 `newTickets`，没人踩刹车；一张 spec 到底要跑多少轮才收尾，不再有人类检查点兜着。并发仍然有界（每轮受 [`MAX_JOBS_GLOBAL` / `MAX_JOBS_PER_REPO`](#job并发) 约束，不会同时起一堆），无上限的只是轮数。逃生口两个，都在人手上：在 issue 上摘 `agent:implement`（整条 spec 立刻退出门），或 `kubectl delete job <名>`（只影响当前这一块）。
 
 spec 上**从不写 `agent:in-progress`**：它的「在跑」就是「在门内 + Frontier 空/非空」，收尾后把 `ready-for-agent` 换成 `ready-for-human` 就是退出门。完整状态表见 [architecture.md §4.5](docs/architecture.md#45-spec)。
 

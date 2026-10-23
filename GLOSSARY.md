@@ -154,6 +154,8 @@ _Avoid_: proxy, gateway, router, LLM API
 **agent:implement**:
 人手动加上，表示「开始按这个 spec/ticket 干活」。记的是「人授权过」，不是「此刻在跑」，所以 App 永不删它。
 
+**写在 spec 上时，它的范围是整条 spec 循环，不只是「这一轮开工」**：包括收尾 Job 自己发现的活——收尾 Job 报 `newTickets` 建出的 `ready-for-agent` 新票不用人再点火，下一轮就进 Frontier 并被 Claim（[ticket #48](https://github.com/2017fighting/remote-agent/issues/48)）。这是「逐票授权」→「整条 spec 授权到底」的语义变化，代价明写：**轮数无上限**，没人踩刹车，逃生口是人在 issue 上摘 `agent:implement`（或 `kubectl delete job`）。并发仍受 Slot 上限约束，无上限的只是轮数。
+
 **授权沿 spec → ticket 继承**：一张 ticket 在门内 ⟺ 它自己带 `agent:implement`，或它的父 spec 带 `agent:implement`（且父 spec 自己的门是开的）。所以人给 spec 加一次，它名下所有 `ready-for-agent` 的 sub-issue 都能被 Claim，不必逐票点火；票自己带 label 的用法保留，那是「只单独实现这一张」的手动入口。**继承只影响判定，不落到 label 上**：Claim 不在票上补写 `agent:implement`，票上的 label 永远只记人写过的东西。
 
 **agent:in-progress**:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANNOTATIONS, isWorkItemV1, jobName, secretName, specBranch, type WorkItemV1 } from "@remote-agent/shared";
+import { ANNOTATIONS, isWorkItemV1, jobName, secretName, specBranch, type NewTicket, type WorkItemV1 } from "@remote-agent/shared";
 import { runReconcilePass, type ReconcileDeps } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
@@ -25,9 +25,38 @@ function run(deps: Pick<ReconcileDeps, "github" | "k8s">) {
   return runReconcilePass({ ...deps, config, now: () => NOW }, "tick");
 }
 
-/** Labels as a set: `editLabels` preserves insertion order, the state table does not care. */
-async function specLabels(github: FakeGitHub): Promise<string[]> {
-  return [...((await github.getIssue(REPO, SPEC))?.labels ?? [])].sort();
+/** Same set semantics for any issue, for the S3N follow-ups (ticket #48). */
+async function labelsOf(github: FakeGitHub, issueNumber: number): Promise<string[]> {
+  return [...((await github.getIssue(REPO, issueNumber))?.labels ?? [])].sort();
+}
+
+/** `labelsOf`, pinned to the spec's own number. */
+function specLabels(github: FakeGitHub): Promise<string[]> {
+  return labelsOf(github, SPEC);
+}
+
+/**
+ * The world of a finished closeout run that reported `newTickets` (S3N): the
+ * spec in the gate, its sub-issues closed, the closeout Job terminal with a
+ * done annotation. What the follow-ups are is the one thing that varies.
+ */
+function newTicketsWorld(newTickets: NewTicket[]) {
+  const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34, 35] });
+  const k8s = new FakeK8s({
+    jobs: [
+      closeoutJob(REPO, SPEC, {
+        finished: true,
+        annotation: runResult({
+          v: 1,
+          outcome: "done",
+          summary: "s",
+          prBody: "## Summary\n\nnot yet",
+          newTickets,
+        }),
+      }),
+    ],
+  });
+  return { github, k8s };
 }
 
 const CLOSEOUT = jobName(REPO, SPEC);
@@ -406,25 +435,10 @@ describe("S2 → S3: closeout done without newTickets opens the PR", () => {
 
 describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens no PR", () => {
   function followUpWorld() {
-    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34, 35] });
-    const k8s = new FakeK8s({
-      jobs: [
-        closeoutJob(REPO, SPEC, {
-          finished: true,
-          annotation: runResult({
-            v: 1,
-            outcome: "done",
-            summary: "s",
-            prBody: "## Summary\n\nnot yet",
-            newTickets: [
-              { title: "follow-up a", body: "body a", readyForAgent: true },
-              { title: "follow-up b", body: "body b", readyForAgent: false },
-            ],
-          }),
-        }),
-      ],
-    });
-    return { github, k8s };
+    return newTicketsWorld([
+      { title: "follow-up a", body: "body a", readyForAgent: true },
+      { title: "follow-up b", body: "body b", readyForAgent: false },
+    ]);
   }
 
   it("creates both sub-issues, labelled by readyForAgent", async () => {
@@ -490,6 +504,86 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     expect(github.issues.filter((i) => i.title.startsWith("follow-up"))).toHaveLength(2);
     expect(github.writeLog.filter((write) => write.startsWith("createIssue"))).toHaveLength(2);
     expect(github.writeLog.some((write) => write.startsWith("createPullRequest"))).toBe(false);
+  });
+});
+
+describe("S3N → the next pass: a created follow-up runs with no human in the loop (ticket #48)", () => {
+  /**
+   * The S3N semantics closure. Before ticket #46 the closeout's follow-ups sat
+   * on the idle branch until a human wrote `agent:implement` on each one; the
+   * docs said so outright, and the `idle` counter was the shape of that wait.
+   * Authorization now inherits, so the loop runs to the PR on its own — and the
+   * tests below are what keeps that sentence from drifting back.
+   *
+   * Pinned at the App seam on purpose: the same chain is already proven end to
+   * end by the kind e2e (spec #33), so repeating it there would buy the wiring,
+   * not the rule.
+   */
+  function followUpWorld() {
+    return newTicketsWorld([{ title: "follow-up a", body: "body a", readyForAgent: true }]);
+  }
+
+  it("claims the new ticket on the next pass, with no agent:implement written anywhere", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s }); // S3N: create and link the follow-up.
+    const created = github.issues.find((i) => i.title === "follow-up a")!;
+    expect(created.labels).toEqual(["ready-for-agent"]);
+
+    const second = await run({ github, k8s }); // S1: the follow-up is the Frontier.
+
+    // Claimed: the same PVC → Secret → Job write order a human-authorized ticket
+    // gets, because the inherited path is the same path.
+    expect(k8s.writeLog.filter((write) => write.endsWith(String(created.number)))).toEqual([
+      `createPvc agent-2017fighting-remote-agent-${created.number}`,
+      `createJob agent-2017fighting-remote-agent-${created.number}`,
+    ]);
+    expect(k8s.jobs.map((job) => job.name)).toContain(jobName(REPO, created.number));
+    // The label chain is a plain ticket's: `ready-for-agent` (written by the App
+    // at creation) → inherited authorization → `agent:in-progress`. Inheritance
+    // is a judgement, never a write, so `agent:implement` never appears.
+    expect(await labelsOf(github, created.number)).toEqual(["agent:in-progress", "ready-for-agent"]);
+    for (const write of github.writeLog) expect(write).not.toContain("agent:implement");
+    // And it is not idle: the "open sub-issue but empty Frontier" branch that
+    // the old docs described is exactly what does not happen any more.
+    expect(second.idle).toBe(0);
+    expect(second.idleReasons).toEqual([]);
+  });
+
+  it("the settled world is write-free on a replay — the loop needs no human checkpoint to converge", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s }); // S3N: create and link.
+    await run({ github, k8s }); // S1: claim the follow-up.
+
+    // The world after the claim: the new ticket's Job is live, so the spec has a
+    // Frontier that is in-flight. A replay over it must write nothing at all.
+    k8s.writeLog.length = 0;
+    github.writeLog.length = 0;
+    const third = await run({ github, k8s });
+
+    expect(k8s.writeLog, "no k8s writes on replay").toEqual([]);
+    expect(github.writeLog, "no GitHub writes on replay").toEqual([]);
+    expect(github.comments, "no comments on replay").toEqual([]);
+    expect(github.issues.filter((i) => i.title === "follow-up a")).toHaveLength(1);
+    // The in-flight ticket is why the Frontier is empty this pass — a reason the
+    // log can name, and one no human has to act on.
+    expect(third.idleReasons).toEqual([{ spec: SPEC, openSubIssues: 1, reasons: { "in-flight": 1 } }]);
+  });
+
+  it("a ready-for-human follow-up stays out: triage is never inherited", async () => {
+    const { github, k8s } = newTicketsWorld([{ title: "needs a decision", body: "b", readyForAgent: false }]);
+    await run({ github, k8s });
+    const created = github.issues.find((i) => i.title === "needs a decision")!;
+    expect(created.labels).toEqual(["ready-for-human"]);
+
+    k8s.writeLog.length = 0;
+    github.writeLog.length = 0;
+    const second = await run({ github, k8s });
+
+    // Inherited authorization does not resurrect a ticket nobody triaged in: the
+    // loop stops here, and the `idle` line says the human is the next actor.
+    expect(k8s.writeLog).toEqual([]);
+    expect(github.writeLog).toEqual([]);
+    expect(second.idleReasons).toEqual([{ spec: SPEC, openSubIssues: 1, reasons: { "not-ready": 1 } }]);
   });
 });
 

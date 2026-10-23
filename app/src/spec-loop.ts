@@ -35,7 +35,10 @@ import { migrateLabels, postFailureComment, setExpiresAtIfAbsent } from "./outco
  *   sub-issues they keep the spec out of the closeout branch (an open sub-issue
  *   means S1, not S2), and no second pass repeats the creation. Their labels
  *   decide what happens next: `ready-for-agent` ones become the Frontier right
- *   away — the spec's authorization is inherited (ticket #46) — while
+ *   away — the spec's authorization is inherited (ticket #46) — and are claimed
+ *   on the next pass with no human checkpoint in between (ticket #48). That is
+ *   also the cost: the loop has no round limit, only the human escape hatch of
+ *   removing `agent:implement` from the spec (docs/architecture.md §3).
  *   `ready-for-human` ones wait for a human.
  * - **S2 → S4 / S5** the label migration takes the spec out of the gate and the
  *   comment dedupes on its marker — the same two carriers a ticket uses.
@@ -181,12 +184,17 @@ async function openCloseoutPullRequest(
  * labels alone — "there is still work left" must not look like "the spec is
  * complete".
  *
- * The created tickets are themselves what stops a second run of this branch:
- * linked and open, they take the spec back to S1 (an open sub-issue means the
- * closeout is not its turn), so no second pass repeats the creation. A
- * `ready-for-agent` follow-up is then the Frontier on the very next pass —
- * authorization is inherited from the spec (ticket #46) — and a
- * `ready-for-human` one waits for a human.
+ * The created tickets are what stops a second run of this branch: linked and
+ * open, they take the spec back to S1 (an open sub-issue means the closeout is
+ * not its turn), so no second pass repeats the creation. A `ready-for-agent`
+ * follow-up is then the Frontier on the very next pass — authorization is
+ * inherited from the spec (ticket #46) — and is claimed without a human in the
+ * loop (ticket #48); a `ready-for-human` one waits for a human.
+ *
+ * Known window (issue #49): once every follow-up is closed the spec is back on
+ * the "no open sub-issue" branch while this Job object is still inside its TTL
+ * retention window, so the same `newTickets` can be created a second time. The
+ * carrier above only covers the window where a follow-up is still open.
  */
 async function createFollowUpTickets(
   deps: SpecLoopDeps,

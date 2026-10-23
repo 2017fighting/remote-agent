@@ -42,7 +42,13 @@ export type HoldoutReason =
   | "not-ready"
   /** An open blocker: it has to close first; nothing to do but wait. */
   | "open-blocker"
-  /** No own `agent:implement`, and the parent spec does not authorize it either. */
+  /**
+   * No own `agent:implement`, and the parent spec lends nothing. The two
+   * shapes: an S0 spec nobody has authorized, or a spec that has left the Loop
+   * (S4 / S5 carry `ready-for-human`). While the spec is *in* the gate its
+   * `ready-for-agent` tickets always inherit (ticket #46), so this reason
+   * cannot appear for one (ticket #48).
+   */
   | "unauthorized"
   /** ADR-0013: the old Job object's `DELETED` event is the next step. */
   | "job-object-present";
