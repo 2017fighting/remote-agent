@@ -262,6 +262,9 @@ async function planSpec(
 
   const specBlockers = await deps.github.listBlockers(spec.ownerRepo, spec.number);
   const openSpecBlockerCount = specBlockers.filter((blocker) => blocker.state === "open").length;
+  // The parent spec is the one place a ticket's authorization can come from
+  // (ticket #46): it was read anyway, so inheritance costs no extra call.
+  const parentSpec = { issue: spec, openBlockerCount: openSpecBlockerCount };
   const openBlockerCounts = new Map<number, number>();
   for (const issue of subIssues) {
     const blockers = await deps.github.listBlockers(spec.ownerRepo, issue.number);
@@ -272,6 +275,7 @@ async function planSpec(
     const gateInput = {
       issue,
       openBlockerCount: openBlockerCounts.get(issue.number) ?? 0,
+      parentSpec,
     };
     return (
       claimGate({ ...gateInput, existingJob: jobsByName.get(jobName(spec.ownerRepo, issue.number)) ?? null })
@@ -279,6 +283,6 @@ async function planSpec(
     );
   }).length;
 
-  const frontier = planFrontier({ ownerRepo: spec.ownerRepo, subIssues, openBlockerCounts, jobsByName });
+  const frontier = planFrontier({ ownerRepo: spec.ownerRepo, subIssues, openBlockerCounts, jobsByName, parentSpec });
   return { frontier, openSpecBlockerCount, waiting };
 }

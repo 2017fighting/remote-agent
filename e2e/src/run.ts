@@ -711,6 +711,11 @@ async function assertFinalWorld(runner: Runner, context: string, options: RunOpt
     if (ticket.labels.includes("agent:in-progress")) {
       throw new Error(`ticket #${ticketNumber} still carries agent:in-progress after being closed`);
     }
+    // Ticket #46: the authorization was inherited from the spec, and inheritance
+    // is a judgement, not a write. The App must not have copied the label down.
+    if (ticket.labels.includes("agent:implement")) {
+      throw new Error(`ticket #${ticketNumber} carries agent:implement; the App never writes it (only a human does)`);
+    }
   }
 
   const spec = state.issues.find((issue) => issue.number === SPEC_NUMBER);

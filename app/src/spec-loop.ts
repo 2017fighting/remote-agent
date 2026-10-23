@@ -32,10 +32,11 @@ import { migrateLabels, postFailureComment, setExpiresAtIfAbsent } from "./outco
  *   PR first, labels second: the reverse crash window would leave the spec
  *   outside the gate with no PR, and nothing would ever retry it.
  * - **S2 → S3N** the created tickets *are* the marker: once linked as
- *   sub-issues they keep the spec out of the closeout branch (they carry
- *   `ready-for-agent` but not the human's `agent:implement`, so the Frontier is
- *   empty with open sub-issues = the idle branch), and no second pass repeats
- *   the creation.
+ *   sub-issues they keep the spec out of the closeout branch (an open sub-issue
+ *   means S1, not S2), and no second pass repeats the creation. Their labels
+ *   decide what happens next: `ready-for-agent` ones become the Frontier right
+ *   away — the spec's authorization is inherited (ticket #46) — while
+ *   `ready-for-human` ones wait for a human.
  * - **S2 → S4 / S5** the label migration takes the spec out of the gate and the
  *   comment dedupes on its marker — the same two carriers a ticket uses.
  *
@@ -181,9 +182,11 @@ async function openCloseoutPullRequest(
  * complete".
  *
  * The created tickets are themselves what stops a second run of this branch:
- * linked and open, they make the Frontier empty-with-open-sub-issues (they carry
- * `ready-for-agent` but not the human's `agent:implement`), so the next pass
- * lands on the idle branch and writes nothing.
+ * linked and open, they take the spec back to S1 (an open sub-issue means the
+ * closeout is not its turn), so no second pass repeats the creation. A
+ * `ready-for-agent` follow-up is then the Frontier on the very next pass —
+ * authorization is inherited from the spec (ticket #46) — and a
+ * `ready-for-human` one waits for a human.
  */
 async function createFollowUpTickets(
   deps: SpecLoopDeps,

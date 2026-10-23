@@ -7,7 +7,8 @@ import {
   LABEL_AGENT_ERROR,
   LABEL_READY_FOR_AGENT,
   LABEL_READY_FOR_HUMAN,
-  labelGate,
+  authorizationGate,
+  loopGate,
 } from "./gate.js";
 import type { FrontierOutcome } from "./frontier.js";
 import { judgeJob, type AppErrorReason } from "./outcome.js";
@@ -25,6 +26,16 @@ import { judgeJob, type AppErrorReason } from "./outcome.js";
  *     closeout blocked                         → S4  ready-for-human + agent:blocked
  *     closeout error                           → S5  ready-for-human + agent:error
  * ```
+ *
+ * The spec's own label gate is read **twice, for two different questions**
+ * (ticket #46):
+ *
+ * - Advancing a ticket needs only the **Loop** — the spec's own facts (open, no
+ *   open blocker, `ready-for-agent`, no `agent:*`). The spec's `agent:implement`
+ *   is not required here, because the ticket's own label may be the
+ *   authorization instead: that is the "implement just this one" entry point.
+ * - The closeout (S2–S5) is the **spec's own run**, so it needs the full Gate,
+ *   authorization included.
  *
  * Two things here are structural rather than conventional:
  *
@@ -92,13 +103,19 @@ export interface SpecStepInput {
 
 export function planSpecStep(input: SpecStepInput): SpecStep {
   const { spec, frontier, openSpecBlockerCount, jobsByName } = input;
-  if (!labelGate(spec, openSpecBlockerCount).passed) return { kind: "out-of-gate" };
+  // The spec's own facts decide whether it drives its sub-issues at all. Its
+  // `agent:implement` is deliberately not part of this: a ticket may carry the
+  // authorization itself (ticket #46), and the parent's label would then be
+  // required for no reason.
+  if (!loopGate({ issue: spec, openBlockerCount: openSpecBlockerCount }).passed) return { kind: "out-of-gate" };
 
   if (frontier.kind === "has-frontier") return { kind: "advance", ticket: frontier.ticket };
   if (frontier.kind === "no-frontier-open-sub-issues") return { kind: "idle" };
 
-  // Frontier empty and no open sub-issue: the closeout Job's turn (S2) — unless
-  // an object under its deterministic name exists (ADR-0013, k8s half).
+  // Frontier empty and no open sub-issue: the closeout Job's turn (S2). That run
+  // is the spec's own, so it needs the spec's own authorization.
+  if (!authorizationGate({ issue: spec, openBlockerCount: openSpecBlockerCount }).passed) return { kind: "out-of-gate" };
+  // …unless an object under its deterministic name exists (ADR-0013, k8s half).
   const job = jobsByName.get(closeoutJobName(spec.ownerRepo, spec.number)) ?? null;
   if (job === null) return { kind: "start-closeout" };
 

@@ -12,10 +12,11 @@ import { MODEL_SCRIPT, SCENARIO, SPEC_NUMBER, TARGET_REPO, TICKET_NUMBERS } from
  */
 
 describe("scenario: the world it starts from is a legal spec", () => {
-  it("has one spec with two sub-issues in order, both claimable", () => {
+  it("has one spec with two sub-issues in order, both claimable by inheritance", () => {
     expect(SCENARIO.repo).toBe(TARGET_REPO);
     const spec = SCENARIO.issues.find((issue) => issue.number === SPEC_NUMBER);
     expect(spec).toBeDefined();
+    // The spec is the only place the authorization is written (ticket #46).
     expect(spec!.labels).toContain("agent:implement");
     expect(spec!.labels).toContain("ready-for-agent");
 
@@ -27,10 +28,14 @@ describe("scenario: the world it starts from is a legal spec", () => {
       const ticket = SCENARIO.issues.find((issue) => issue.number === ticketNumber);
       expect(ticket, `ticket #${ticketNumber} is missing from the fixture`).toBeDefined();
       expect(ticket!.state).toBe("open");
-      // The Gate requires ready-for-agent + agent:implement and no other agent:*.
+      // The Gate needs ready-for-agent plus authorization, and no other agent:*.
+      // The authorization is the spec's: no ticket carries its own, which is
+      // exactly what this scenario is here to prove end to end.
       expect(ticket!.labels).toContain("ready-for-agent");
-      expect(ticket!.labels).toContain("agent:implement");
-      expect(ticket!.labels.filter((label) => label.startsWith("agent:") && label !== "agent:implement")).toEqual([]);
+      expect(ticket!.labels, `ticket #${ticketNumber} must inherit, not carry, agent:implement`).not.toContain(
+        "agent:implement",
+      );
+      expect(ticket!.labels.filter((label) => label.startsWith("agent:"))).toEqual([]);
     }
   });
 

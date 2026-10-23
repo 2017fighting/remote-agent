@@ -7,15 +7,21 @@ import type { ModelScript } from "../stub-model/script.js";
  *
  * Shape of the world the harness starts from:
  *
- *   #33 (spec)  ready-for-agent + agent:implement
- *    ├─ #34 (ticket) ready-for-agent + agent:implement   ← Frontier first
- *    └─ #35 (ticket) ready-for-agent + agent:implement   ← Frontier second
+ *   #33 (spec)  ready-for-agent + agent:implement        ← the one authorization
+ *    ├─ #34 (ticket) ready-for-agent                    ← Frontier first
+ *    └─ #35 (ticket) ready-for-agent                    ← Frontier second
  *
- * Both tickets carry `agent:implement` from the start on purpose: the App claims
- * them serially anyway (Frontier is "the first sub-issue that passes the
- * Claim-gate", and the second one is held by the *first one's Job object* until
- * that Job is gone — ADR-0013). So the scenario proves serial advancement by the
- * two claims arriving in order, not by the harness adding a label between them.
+ * The tickets deliberately carry **no** `agent:implement` (ticket #46): the
+ * spec's authorization is what makes them claimable, so this scenario proves the
+ * inheritance end to end — a human authorizes the spec once and never touches a
+ * ticket. It also pins the second half of the rule: Claim must not copy the
+ * label down, so `agent:implement` never appears on #34 / #35 in the final world
+ * unless a human wrote it there.
+ *
+ * Serial advancement is the spec loop's, not the harness's: each pass computes
+ * one Frontier per spec and claims it, and while a ticket is claimed
+ * (`agent:in-progress`) the next one is held back. So the two claims arrive in
+ * order without the harness adding a label between them.
  *
  * The end state the scenario asserts: both tickets closed, the spec
  * `ready-for-human`, a ready PR on `agent/spec-33` whose body carries
@@ -54,14 +60,15 @@ export const SCENARIO: Scenario = {
         "One seam, stated in the ticket so the agent does not have to infer it.",
       ].join("\n"),
       state: "open",
-      labels: ["ready-for-agent", "agent:implement"],
+      // No `agent:implement`: inherited from spec #33 (ticket #46).
+      labels: ["ready-for-agent"],
     },
     {
       number: 35,
       title: "Ticket two: the second half",
       body: ["## Acceptance criteria", "- [ ] the second half exists"].join("\n"),
       state: "open",
-      labels: ["ready-for-agent", "agent:implement"],
+      labels: ["ready-for-agent"],
     },
   ],
   subIssues: { [SPEC_NUMBER]: [34, 35] },

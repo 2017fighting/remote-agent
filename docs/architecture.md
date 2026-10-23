@@ -69,7 +69,7 @@ sequenceDiagram
     participant J as Agent Job
     participant R as OmniRoute
 
-    H->>GH: 给 ready-for-agent 的 ticket 加 agent:implement
+    H->>GH: 给 ready-for-agent 的 ticket 加 agent:implement<br/>（或只给它的父 spec 加一次——授权沿 spec → ticket 继承）
     GH->>App: webhook（只是唤醒信号）
     App->>GH: 读 issue 状态 / label / sub-issue / blocker，算 Frontier
     App->>App: 算 Slot：全局 3 · 每 target repo 2
@@ -99,7 +99,7 @@ Spec 不会一次性实现完。App 每收到一次运行完成，就重算 Fron
 
 ```mermaid
 flowchart TD
-    Start["spec 收到 agent:implement（在 Gate 内）"] --> F["算 Frontier：<br/>list then open children，<br/>只留通过 Claim-gate 的，<br/>first wins"]
+    Start["spec 在循环里（Loop：open ∧ 无 open blocker ∧ ready-for-agent ∧ 无 agent:*）"] --> F["算 Frontier：<br/>list then open children，<br/>只留通过 Claim-gate 的，<br/>first wins"]
     F --> Has{"有 Frontier 吗？"}
     Has -->|"有"| Job["起 Agent Job（implement-ticket）<br/>Claim 这张 ticket"]
     Job --> Read["Job 终态 → App 读 run result"]
@@ -116,7 +116,7 @@ flowchart TD
 - **它不跑 e2e**。收尾 role 的验证是全量测试 + typecheck（仓库 prompt 里点名 lint 就跑）；`/implement-spec` 原文里没有 e2e，v1 不自行加（[prompt 必写项清单第 5 条](agents/prompt-checklist.md)）。代价明写：目标仓自己的 `test:e2e` 这次运行没人跑，结果交到 PR 让人看。
 - **`Closes #<spec>` 不由 commit 带**，而是 App 开 PR 时追加进 PR body（幂等：已含就不重复加）。agent 不开 PR、不调 `gh`（[ADR-0002](adr/0002-app-is-sole-github-writer.md)）。
 
-收尾 Job 判断有真阻塞时走 `agent:blocked`；判断还有活没干完时在 run result 里带 `newTickets`，App 在 spec 下**新建 sub-issue**（AFK 可实现就带 `ready-for-agent`，否则带 `ready-for-human`）且**不开 PR**——开 PR 等于宣称 spec 完整。这些新票带 `ready-for-agent` 但不带人的 `agent:implement`，所以下一轮 spec 是「有 open sub-issue 但 Frontier 空」→ idle 分支、不写任何东西；等人授权后它们才进 Frontier。
+收尾 Job 判断有真阻塞时走 `agent:blocked`；判断还有活没干完时在 run result 里带 `newTickets`，App 在 spec 下**新建 sub-issue**（AFK 可实现就带 `ready-for-agent`，否则带 `ready-for-human`）且**不开 PR**——开 PR 等于宣称 spec 完整。新票只带 `ready-for-agent`、不带 `agent:implement`，但**它们仍进 Frontier**：授权沿 spec → ticket 继承（[§4.2](#42-frontier-与-gate)），而这个 spec 已经是人授权过的。所以 `ready-for-agent` 的新票在下一轮就被 Claim；`ready-for-human` 的新票留在门外等人——triage 从不继承。
 
 ## 4. 状态机
 
@@ -135,17 +135,33 @@ App 判 Job 终态只读 `Job.status.conditions`（`Complete` / `Failed` + `reas
 ### 4.2 Frontier 与 Gate
 
 ```
-Gate(issue) ⟺ open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ 无任何 agent:*
+Loop(issue) ⟺ open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 无任何 agent:*
+Gate(issue) ⟺ Loop ∧ 已授权
 Claim-gate(spec/ticket) ⟺ Gate ∧ 确定性名下无 Job 对象（终态与否）
 Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
+
+已授权(ticket) ⟺ 票自己带 agent:implement ∨ Gate(父 spec)
 ```
 
-四条各自挡一类错：
+`Loop` 与「已授权」分开，是因为它们回答两个不同的问题：`Loop` 是「这张 issue 自己的事实说这里可以干活」，授权是「人说过可以让 agent 干」。
+
+`Loop` 的三条各自挡一类错：
 
 - `open` + 无 open blocker：活还没干完、依赖还没清。
 - **`ready-for-agent`**：人声明过它可以 AFK。**spec 收尾后把它换成 `ready-for-human`，就是靠这一条退出门**——所以 spec 不需要 `agent:in-progress` 也能停住。
-- **`agent:implement`**：人授权过。「人授权过」不等于「此刻在跑」，所以 **App 永不删它**。
 - **无 `agent:*`**：`in-progress` 说此刻被占着，`error` / `blocked` 说该人接手。三个都是 exit 标记，不是 entry 标记。
+
+`Gate` 多出来的那一条：
+
+- **`agent:implement`**（授权）：人授权过。「人授权过」不等于「此刻在跑」，所以 **App 永不删它**。它是唯一能从父 spec 继承的一条（下一段）。
+
+**授权沿 spec → ticket 继承。** 一张 ticket 在门内 ⟺ 它自己带 `agent:implement`，或它的父 spec **在门内**（即父 spec 自己过得了 `Gate`，包括它自己带 `agent:implement`）。这是「给 spec 加一次 label，整个 spec 自己跑完」的实现：不必逐票点火。票自己带 label 的用法保留原样，那是「只单独实现这一张」的手动入口。
+
+**继承只影响判定，不落到 label 上。** Claim 不在票上补写 `agent:implement`，所以票上的 label 永远只记人写过的东西，T2–T8 / S0–S6 的 label 列因此一字不改。
+
+**只有授权能继承，`Loop` 的三条不能。** `ready-for-agent`、blocker、`open`/`closed`、exit 标记都仍是这张票自己的事实：父 spec 在门内不等于它的票都 `ready-for-agent`，也不等于它的票没有 `agent:blocked`。反过来，父 spec **自己出不了门**（缺 `ready-for-agent`、有 open blocker、带 `agent:error` / `agent:blocked`、已关）时继承不生效。
+
+**spec 推进 sub-issue 只看 `Loop`，不看自己的 `agent:implement`**（因为它名下那张票可能自带授权）；而 spec **自己的收尾运行（S2–S5）还要 `Gate` 的那一条**——那是 spec 自己的一次运行，得由 spec 自己的授权放行。
 
 **assignee 不在门里。** App 设不了自己当 assignee（GitHub 不保证 bot 账号可被 assign），而 Claim 本来就是「App 写 `agent:in-progress`」那一次 label edit，去重靠它 + 确定性 Job 名。assignee 留给人自己用，App 不读也不写。
 
@@ -172,6 +188,8 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 | **T6d** error · no-result | `Complete` · annotation **缺失或不可解析** | 同 T6a | App | Job 已终态却读不到 annotation（ADR-0007 兜底） | 人重入（T8） |
 | **T6e** error · no-job | Job **不存在** | 同 T6a | App | label 有 `agent:in-progress`，但确定性 Job 名在 k8s 里不存在（可用性兜底：App 宕机超过 Job 保留窗被 TTL 清掉、人手动删、灾难恢复） | 人重入（T8） |
 | **T8** 人重入 | — | `open` · `[ready-for-agent, agent:implement]` | 人（摘 `agent:blocked` 或 `agent:error`，`ready-for-human` → `ready-for-agent`） | T5 或 T6a–e | 回到 T2（下一次 reconcile 重新 Claim） |
+
+**表里的 `agent:implement` 一律读作「仅当人把它写在票上」。** 授权可以继承自父 spec（[§4.2](#42-frontier-与-gate)），而继承不落 label：一张只靠继承进门的票，每一行的 label 列里都没有 `agent:implement`，其余一字不差。这张表记的是 **App 写什么**，App 从不写、也不删 `agent:implement`。
 
 ```mermaid
 flowchart TD
@@ -214,14 +232,16 @@ Job: Running
 
 | 状态 | Job 终态 · annotation | label（issue 状态） | 谁写的 | 进入条件 | 离开条件 |
 |---|---|---|---|---|---|
-| **S0** 已声明 | — | `open` · `[ready-for-agent]` | 交互 agent | — | 人加 `agent:implement` |
-| **S1** 循环中 · 在门内 | 本 spec 下某张 ticket 的 Job（也可能此刻没有 Job） | `open` · `[ready-for-agent, agent:implement]`，**全程不变**——spec 上从不写 `agent:in-progress` | 人（只写过那一次 `agent:implement`） | S0，或人重入（S6） | 每轮 reconcile 三选一：frontier 非空 → Claim 一张 ticket（走 ticket 的 T2→T3）；frontier 空 **∧** 无 open sub-issue → 起收尾 Job（S2）；有 open sub-issue 但 frontier 空（票都 blocked / error）→ 什么都不做，只写日志。Slot 满 → Defer |
+| **S0** 已声明 | — | `open` · `[ready-for-agent]` | 交互 agent | — | 人加 `agent:implement`（正常路径；见下面关于「S0 也能推进一张自带授权的票」的注） |
+| **S1** 循环中 · 在门内 | 本 spec 下某张 ticket 的 Job（也可能此刻没有 Job） | `open` · `[ready-for-agent, agent:implement]`，**全程不变**——spec 上从不写 `agent:in-progress` | 人（只写过那一次 `agent:implement`） | S0，或人重入（S6） | 每轮 reconcile 三选一：frontier 非空 → Claim 一张 ticket（走 ticket 的 T2→T3）；frontier 空 **∧** 无 open sub-issue → 起收尾 Job（S2）；有 open sub-issue 但 frontier 空（票都 blocked / error）→ 什么都不做，只写日志。Slot 满 → Defer。推进 sub-issue 只看 spec 的 `Loop`（`open` ∧ 无 open blocker ∧ `ready-for-agent` ∧ 无 `agent:*`），不看它自己的 `agent:implement`；收尾才要完整的 Gate |
 | **S2** 收尾中 | 收尾 Job（`implement-spec`）非终态 | 同 S1 | App（create-if-absent，确定性 Job 名） | S1 的第二个分支 | Job 终态 → S3 / S3N / S4 / S5 |
 | **S3** 已开 PR | `Complete` · `{outcome:"done", newTickets:[]}` | `open` · `[ready-for-human, agent:implement]` + PR（**PR body** 末尾带 `Closes #<spec>` 与证据；commit 不带） | App（摘 `ready-for-agent`、加 `ready-for-human`、开 PR 并追加 `Closes`；PR 按分支 `agent/spec-<n>` 唯一，重复开是幂等跳过） | S2 ∧ done ∧ 无 newTickets | 人 merge → PR body 里的 `Closes` 自动关票（出局） |
-| **S3N** 回填新票 | `Complete` · `{outcome:"done", newTickets:[…]}` | `open` · `[ready-for-agent, agent:implement]`（不变） | App（建 sub-issue，**不开 PR**） | S2 ∧ done ∧ newTickets 非空 | 回到 S1；新票带 `ready-for-agent` 但没 `agent:implement`，所以走 idle 分支，等人授权后才进 Frontier |
+| **S3N** 回填新票 | `Complete` · `{outcome:"done", newTickets:[…]}` | `open` · `[ready-for-agent, agent:implement]`（不变） | App（建 sub-issue，**不开 PR**） | S2 ∧ done ∧ newTickets 非空 | 回到 S1；新票只带 `ready-for-agent`（`ready-for-human` 的那部分等人），但授权是继承来的，所以 `ready-for-agent` 的新票下一轮就进 Frontier |
 | **S4** 阻塞 | `Complete` · `{outcome:"blocked", commentBody}` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | App | S2 ∧ blocked | 人重入（S6） |
 | **S5** 出错 | `Failed(BackoffLimitExceeded)` / `Failed(DeadlineExceeded)` / `Complete` 无 annotation / Job 不存在（漂移） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | App | S2 ∧ 上述任一 | 人重入（S6） |
 | **S6** 人重入 | — | `open` · `[ready-for-agent, agent:implement]` | 人（摘 `agent:blocked` / `agent:error`，`ready-for-human` → `ready-for-agent`） | S4 / S5 | 回到 S1 |
+
+**S0 也能推进一张自带授权的票。** 推进 sub-issue 只看 spec 的 `Loop`（[§4.2](#42-frontier-与-gate)），所以一个还停在 `[ready-for-agent]` 的 spec，只要它名下某张票**自己**带 `agent:implement`，那张票照样进 Frontier、照样被 Claim——那是「只单独实现这一张」的入口。它因此起不了收尾 Job（收尾要 spec 自己的授权），所以 spec 会停在 S0，直到人给它加 label。
 
 ```mermaid
 flowchart TD

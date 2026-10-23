@@ -119,3 +119,52 @@ describe("frontier: determinism with several eligible tickets", () => {
     expect(outcome.kind).toBe("has-frontier");
   });
 });
+
+describe("frontier: the parent spec's authorization is inherited (ticket #46)", () => {
+  /** The spec as the pass read it: authorized, in the gate. */
+  const authorizedSpec = { issue: issue(33, GATE_LABELS), openBlockerCount: 0 };
+
+  it("a sub-issue with only ready-for-agent is the Frontier of an authorized spec", () => {
+    const outcome = planFrontier({
+      ownerRepo: REPO,
+      subIssues: [issue(35, ["ready-for-agent"]), issue(36, ["ready-for-agent"])],
+      openBlockerCounts: new Map(),
+      jobsByName: jobs(),
+      parentSpec: authorizedSpec,
+    });
+    expect(outcome.kind === "has-frontier" && outcome.ticket.number).toBe(35);
+  });
+
+  it("a ticket's own agent:implement is still enough when the spec has none", () => {
+    const outcome = planFrontier({
+      ownerRepo: REPO,
+      subIssues: [issue(35, GATE_LABELS)],
+      openBlockerCounts: new Map(),
+      jobsByName: jobs(),
+      parentSpec: { issue: issue(33, ["ready-for-agent"]), openBlockerCount: 0 },
+    });
+    expect(outcome.kind === "has-frontier" && outcome.ticket.number).toBe(35);
+  });
+
+  it("no authorization anywhere: the Frontier stays empty", () => {
+    const outcome = planFrontier({
+      ownerRepo: REPO,
+      subIssues: [issue(35, ["ready-for-agent"])],
+      openBlockerCounts: new Map(),
+      jobsByName: jobs(),
+      parentSpec: { issue: issue(33, ["ready-for-agent"]), openBlockerCount: 0 },
+    });
+    expect(outcome.kind).toBe("no-frontier-open-sub-issues");
+  });
+
+  it("an unauthorized spec skips only the unauthorized tickets, not the self-authorized one", () => {
+    const outcome = planFrontier({
+      ownerRepo: REPO,
+      subIssues: [issue(35, ["ready-for-agent"]), issue(36, GATE_LABELS)],
+      openBlockerCounts: new Map(),
+      jobsByName: jobs(),
+      parentSpec: { issue: issue(33, ["ready-for-human", "agent:blocked"]), openBlockerCount: 0 },
+    });
+    expect(outcome.kind === "has-frontier" && outcome.ticket.number).toBe(36);
+  });
+});

@@ -19,8 +19,14 @@ _Avoid_: task, subtask, child issue
 _Avoid_: next task, queue head, 待办
 
 **Gate**:
-一张 issue 可以被 App 动手的全部条件：`open` ∧ 无 open blocker ∧ 有 `ready-for-agent` ∧ 有 `agent:implement` ∧ 无任何 `agent:*` label。四条件缺一不动；不够条件不是错误，只是不做。
+一张 issue 可以被 App 动手的全部条件：`open` ∧ 无 open blocker ∧ 有 `ready-for-agent` ∧ **已授权** ∧ 无任何 `agent:*` label。四条件缺一不动；不够条件不是错误，只是不做。
+
+**已授权**对 ticket 有两个来源：它自己带 `agent:implement`，**或**它的父 spec 在门内（即父 spec 自己过得了 `Gate`，包括它自己带 `agent:implement`；继承；见 [`agent:implement`](#labels)）。只有授权这一条能继承——`ready-for-agent`、blocker、`open`/`closed`、exit 标记都仍是这张票自己的事实。spec 自己没有父，所以它的门只认自己的 label。
 _Avoid_: 门槛, 准入, ready check
+
+**Loop**（spec 的「在循环里」）:
+Gate 里除授权之外的三条：`open` ∧ 无 open blocker ∧ 有 `ready-for-agent` ∧ 无任何 `agent:*`。spec 靠它决定「能不能推进 sub-issue」——**不看自己的 `agent:implement`**，因为那张票可能自带授权（「只单独实现这一张」的入口）。spec 自己的收尾运行（S2–S5）不是推进 sub-issue，所以还要 `Gate` 的授权那一条。
+_Avoid_: 半门, 弱门
 
 **Claim**:
 App 给一张 ticket 加上 `agent:in-progress` 的那一次 label edit，表示此刻有一个 Job 占着它。门是双半边的：除了 label 门（无任何 `agent:*`），还要求该 ticket 确定性名下**无未删的旧 Job 对象**（终态与否）——名下 Job 还在就不 Claim、不读旧 annotation，等它的 `DELETED` 事件唤醒（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。去重靠这门 + 确定性 Job 名的 create-if-absent。assignee 不参与状态机。
@@ -143,6 +149,8 @@ _Avoid_: proxy, gateway, router, LLM API
 
 **agent:implement**:
 人手动加上，表示「开始按这个 spec/ticket 干活」。记的是「人授权过」，不是「此刻在跑」，所以 App 永不删它。
+
+**授权沿 spec → ticket 继承**：一张 ticket 在门内 ⟺ 它自己带 `agent:implement`，或它的父 spec 带 `agent:implement`（且父 spec 自己的门是开的）。所以人给 spec 加一次，它名下所有 `ready-for-agent` 的 sub-issue 都能被 Claim，不必逐票点火；票自己带 label 的用法保留，那是「只单独实现这一张」的手动入口。**继承只影响判定，不落到 label 上**：Claim 不在票上补写 `agent:implement`，票上的 label 永远只记人写过的东西。
 
 **agent:in-progress**:
 App 加上，表示这张 ticket 此刻被一个 Job 占着（Claim → Job 终态）。只出现在 ticket 上，spec 从不带它；pod 重启期间它一字不变。

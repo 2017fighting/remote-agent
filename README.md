@@ -26,14 +26,14 @@ Webhook URL: https://remote-agent.raenzo.com/webhook
 
 ## 我们需要用到的issue label
 
-- `agent:implement`: 标记这个 issue(spec or ticket) 需要由 remote agent 进行实现；**人写，App 永不删**（它记的是「人授权过」，不是「此刻在跑」）
+- `agent:implement`: 标记这个 issue(spec or ticket) 需要由 remote agent 进行实现；**人写，App 永不删**（它记的是「人授权过」，不是「此刻在跑」）。**一张 ticket 的授权可以继承自它的父 spec**：给 spec 加一次，它名下所有 `ready-for-agent` 的 sub-issue 都能被 Claim，不必逐票点火；票自己带 label 的用法保留，那是「只单独实现这一张」的手动入口。继承只影响判定、**不落到 label 上**——Claim 不在票上补写它，票上的 label 永远只记人写过的东西
 - `agent:in-progress`: App 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
 - `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 App 设置；**没有自动重试**，人改 label 是唯一重入方式
 - `agent:blocked`: agent 自述没做完、需要人做决定，由 App 按 run result 设置
 
 ## implement整体流程
 
-1. `人`：给 `ready-for-agent` 的 issue 加 `agent:implement` 的 label
+1. `人`：给 `ready-for-agent` 的 issue 加 `agent:implement` 的 label——**给 spec 加一次就够**，它的 sub-issue 继承这个授权（不必逐票点火）；只想单独跑某张票时，也可以把 label 加在那张票上
 2. `App`：收到 webhook（`issues` / `issue_comment` / `sub_issues` / `issue_dependencies` / `installation_repositories`），**只把它当「去跑一轮 pass」的信号**，不解析业务。唤醒源设计上共三个（webhook、Job watch、每 5 分钟的 resync tick），落点都是同一个 `reconcile()`（[ADR-0014](docs/adr/0014-wake-surface-periodic-resync.md)）；**目前 Job watch 尚未 arm，在跑的是 webhook + tick**（见 [architecture.md §1](docs/architecture.md#1-系统全景) 的实现状态注）
 3. `App`：一轮 pass 从 GitHub 与 k8s 读出全部相关状态。有 sub-issue 的 issue 是 spec（算它的 Frontier，只实现 Frontier 那一张 ticket），没有 sub-issue 的是 ticket（实现它自己）
 4. `App`：Claim 这张 ticket——按写序建 Ticket PVC（若缺）、mint 只覆盖目标 repo 的 installation token 写进 `agent-<repo-slug>-<issue#>-token`、create-if-absent 建 Job，**最后**才写 `agent:in-progress`（反过来会在两写之间留下假的 no-job 形状，[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）
@@ -46,7 +46,7 @@ Webhook URL: https://remote-agent.raenzo.com/webhook
 
 ## 如何找spec当前frontier ticket
 
-list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ no `agent:*` label），first wins。**门还有 k8s 半边**：该 ticket 确定性名下的 Job 对象还在（终态与否）就不 Claim、不建、不读旧 annotation，等它被删掉之后的下一轮唤醒（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。
+list then open children，keep only those passing the Gate（`open` ∧ no open blocker ∧ `ready-for-agent` ∧ **已授权** ∧ no `agent:*` label），first wins。**已授权**对一张 ticket 有两个来源：它自己带 `agent:implement`，或它的父 spec 带 `agent:implement`（且父 spec 自己的门是开的）——所以给人给 spec 加一次 label，整串票就自己跑下去。只有授权这一条能继承，其余四条仍是票自己的事实。**门还有 k8s 半边**：该 ticket 确定性名下的 Job 对象还在（终态与否）就不 Claim、不建、不读旧 annotation，等它被删掉之后的下一轮唤醒（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。
 
 ## job并发
 
@@ -67,7 +67,7 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 - **done**：App 关票、摘 `agent:in-progress`；下一轮唤醒重算 Frontier，接着实现下一张
 - **blocked**：App 加 `agent:blocked` + `ready-for-human`、按 run result 的 `commentBody` 转写一条评论说明做了什么，**不关票**，然后停下（agent 不碰 GitHub，[ADR-0002](docs/adr/0002-app-is-sole-github-writer.md)）
 
-直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票带 `ready-for-agent` 但不带人的 `agent:implement`，所以 spec 停在 idle 分支，等人授权后才进 Frontier。
+直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票只带 `ready-for-agent`（或 `ready-for-human`），但授权是沿 spec 继承来的，所以 `ready-for-agent` 的新票下一轮就进 Frontier 接着跑；`ready-for-human` 的留在门外等人。
 
 spec 上**从不写 `agent:in-progress`**：它的「在跑」就是「在门内 + Frontier 空/非空」，收尾后把 `ready-for-agent` 换成 `ready-for-human` 就是退出门。完整状态表见 [architecture.md §4.5](docs/architecture.md#45-spec)。
 
@@ -139,20 +139,26 @@ App 看到的东西（四种）：
 **入场门（Gate）**
 
 ```
-open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 有 agent:implement ∧ 无任何 agent:*
-        ∧ 确定性 Job 名下无未删的 Job 对象（k8s 半边，ADR-0013）
+Gate(issue)        ⟺ open ∧ 无 open blocker ∧ 有 ready-for-agent ∧ 已授权 ∧ 无任何 agent:*
+Claim-gate(issue)  ⟺ Gate ∧ 确定性 Job 名下无未删的 Job 对象（k8s 半边，ADR-0013）
+
+已授权(ticket)     ⟺ 票自己带 agent:implement ∨ Gate(父 spec)
 ```
 
-四条件缺一不动；k8s 半边不满足时同样不动，只是等 `DELETED` 事件唤醒，见 [ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)。`ready-for-agent` 是门的一部分而不是装饰：spec 收尾后把它换成 `ready-for-human`，就是靠这一条退出门。额度满时 **Defer**（本轮不建 Job、不改 label、不评论，只写一条日志，见 #13）。
+`Gate` 的 label 条件缺一不动；Claim-gate 的 k8s 半边不满足时同样不动，只是等 `DELETED` 事件唤醒，见 [ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)。`ready-for-agent` 是门的一部分而不是装饰：spec 收尾后把它换成 `ready-for-human`，就是靠这一条退出门。额度满时 **Defer**（本轮不建 Job、不改 label、不评论，只写一条日志，见 #13）。
+
+**授权是唯一能沿 spec → ticket 继承的一条**（[architecture.md §4.2](docs/architecture.md#42-frontier-与-gate)）：父 spec **在门内**（它自己过得了 `Gate`），它的 `ready-for-agent` 子票就不用自己带 `agent:implement`；但 `ready-for-agent`、blocker、`open`/`closed` 与 exit 标记永远是票自己的事实。父 spec 自己出不了门时继承不生效。
 
 | 场景（Job 终态 · annotation） | ticket 的 label | spec 的 label |
 |---|---|---|
 | —（Claim：Job 非终态，含 pod 重启自环） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | `[ready-for-agent, agent:implement]`（不变，spec 不写 `agent:in-progress`） |
 | `Complete` · `done` | `closed` · `[ready-for-agent, agent:implement]` | `[ready-for-human, agent:implement]` + 已开 PR |
-| `Complete` · `done` + `newTickets` | 同 `done`（但 ticket 的 `finish_ticket` 没有 `newTickets` 参数，所以这个形状只有 spec 收尾能产出） | `[ready-for-agent, agent:implement]`（**不开 PR**，新 sub-issue 已建；新票带 `ready-for-agent` 但没 `agent:implement`，等人授权） |
+| `Complete` · `done` + `newTickets` | 同 `done`（但 ticket 的 `finish_ticket` 没有 `newTickets` 参数，所以这个形状只有 spec 收尾能产出） | `[ready-for-agent, agent:implement]`（**不开 PR**，新 sub-issue 已建；新票只带 `ready-for-agent`，但授权继承自 spec，所以下一轮就进 Frontier） |
 | `Complete` · `blocked` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | 同左 |
 | 任何 `error`（自述 / backoffLimit / DeadlineExceeded / no-result / no-job） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | 同左 |
 | 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent` | 同左 |
 | 额度满 · Defer | 一字不变 | 一字不变 |
+
+表里 ticket 侧的 `agent:implement` 一律读作「**仅当人把它写在票上**」：靠继承进门的票没有这个 label，其余一字不差——App 从不写、也不删它。
 
 每个 `error` / `blocked` 终态 App 都会发一条评论（reason + Job/pod 名 + pod 终态证据 + 那块 Ticket PVC 的名字与它的 `remote-agent/expires-at` + `kubectl logs` 指引）——因为那几条路上根本没有 annotation。

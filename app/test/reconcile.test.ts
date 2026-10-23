@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { jobName } from "@remote-agent/shared";
 import { JOB_ENV_KEYS, isWorkItemV1, type WorkItemV1 } from "@remote-agent/shared";
 import { runReconcilePass, type WorldSnapshot } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
@@ -63,7 +64,6 @@ describe("reconcile pass: counters", () => {
     const cases: Record<string, string[]> = {
       blocked: ["ready-for-human", "agent:blocked", "agent:implement"],
       errored: ["ready-for-human", "agent:error", "agent:implement"],
-      "not authorized yet": ["ready-for-agent"],
     };
     for (const [name, labels] of Object.entries(cases)) {
       const github = specWorld({ specNumber: 33, subIssueNumbers: [34], subIssueLabels: { 34: labels } });
@@ -72,6 +72,18 @@ describe("reconcile pass: counters", () => {
       expect(result.deferred, name).toBe(0);
       expect(github.writeLog, name).toEqual([]);
     }
+  });
+
+  it("a ticket nobody authorized is not waiting — it is simply not claimable", async () => {
+    // Ticket #46: `ready-for-agent` alone is not authorization, and here the
+    // spec carries none either, so the ticket never enters the gate.
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34], subIssueLabels: { 34: ["ready-for-agent"] } });
+    github.issues[0] = issue(33, ["ready-for-agent"]);
+    const result = await runReconcilePass({ github, k8s: new FakeK8s(), config }, "tick");
+    expect(result.waiting).toBe(0);
+    expect(result.deferred).toBe(0);
+    expect(result.slotsUsed).toBe(0);
+    expect(github.writeLog).toEqual([]);
   });
 
   it("an already-claimed ticket with no Job is judged T6e, not counted as waiting", async () => {
@@ -209,19 +221,35 @@ describe("reconcile pass: statelessness and replayability", () => {
     expect(k8s.writeLog).toEqual([]);
   });
 
-  it("a spec that is closed or out of the gate never yields a claim", async () => {
+  it("a spec that is closed or whose own facts are out of the gate never yields a claim", async () => {
+    // Ticket #46: the spec's own `agent:implement` is not on this list — a ticket
+    // that carries it itself is claimed anyway (gate-pass.test.ts). What still
+    // stops the loop is the spec's own state: closed, blocked, errored, no
+    // `ready-for-agent`, an open blocker.
     for (const spec of [
       issue(33, GATE_LABELS, { state: "closed" }),
-      issue(33, ["ready-for-agent"]),
+      issue(33, ["agent:implement"]),
       issue(33, [...GATE_LABELS, "agent:blocked"]),
+      issue(33, [...GATE_LABELS, "agent:error"]),
     ]) {
       const github = specWorld({ specNumber: 33, subIssueNumbers: [34], extraIssues: [] });
       github.issues[0] = spec;
       const k8s = new FakeK8s();
       const result = await runReconcilePass({ github, k8s, config }, "tick");
-      expect(github.writeLog).toEqual([]);
+      expect(github.writeLog, `${JSON.stringify(spec.labels)} ${spec.state}`).toEqual([]);
       expect(k8s.writeLog).toEqual([]);
       expect(result.slotsUsed).toBe(0);
     }
+  });
+
+  it("a spec that only lacks its own agent:implement still advances a self-authorized ticket", async () => {
+    // The other half of ticket #46: authorization is not part of "the spec may
+    // drive its sub-issues", because the ticket may carry it.
+    const github = specWorld({ specNumber: 33, subIssueNumbers: [34] });
+    github.issues[0] = issue(33, ["ready-for-agent"]);
+    const k8s = new FakeK8s();
+    const result = await runReconcilePass({ github, k8s, config }, "tick");
+    expect(k8s.jobs.map((job) => job.name)).toEqual([jobName(REPO, 34)]);
+    expect(result.slotsUsed).toBe(1);
   });
 });

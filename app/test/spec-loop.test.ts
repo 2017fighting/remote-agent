@@ -427,18 +427,20 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     expect(subIssues.map((i) => i.title)).toEqual(["Issue 34", "Issue 35", "follow-up a", "follow-up b"]);
   });
 
-  it("the new tickets become the Frontier as soon as a human authorizes them", async () => {
+  it("a ready-for-agent follow-up is the Frontier on the next pass — the spec's authorization is inherited", async () => {
     const { github, k8s } = followUpWorld();
     await run({ github, k8s });
 
-    // S3N hands the spec back to S1: `ready-for-agent` is the App's label, but
-    // `agent:implement` is the human's authorization (the App never writes it).
-    const created = github.issues.find((i) => i.title === "follow-up a")!;
-    created.labels = [...GATE_LABELS];
-
+    // Ticket #46: the spec was authorized by a human once, so its
+    // `ready-for-agent` follow-up is claimable without a second authorization.
+    // The `ready-for-human` one stays out — triage is never inherited.
     await run({ github, k8s });
 
-    expect(k8s.jobs.map((job) => job.name)).toContain(jobName(REPO, created.number));
+    const followUps = github.issues.filter((i) => i.title.startsWith("follow-up"));
+    const readyForAgent = followUps.find((i) => i.title === "follow-up a")!;
+    const readyForHuman = followUps.find((i) => i.title === "follow-up b")!;
+    expect(k8s.jobs.map((job) => job.name)).toContain(jobName(REPO, readyForAgent.number));
+    expect(k8s.jobs.map((job) => job.name)).not.toContain(jobName(REPO, readyForHuman.number));
     expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
   });
 
@@ -446,16 +448,18 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     const { github, k8s } = followUpWorld();
 
     await run({ github, k8s });
-    const githubWrites = github.writeLog.length;
-    const k8sWrites = k8s.writeLog.length;
+    const createWrites = github.writeLog.filter((write) => write.startsWith("createIssue"));
+    expect(createWrites).toHaveLength(2);
 
+    // The world as a crash after the linking write: the next pass must not
+    // create the follow-ups a second time. It claims the ready-for-agent one
+    // instead (ticket #46), which is a different write than a creation.
     await run({ github, k8s });
 
     expect(github.issues.filter((i) => i.title.startsWith("follow-up"))).toHaveLength(2);
-    expect(github.writeLog.length).toBe(githubWrites);
-    expect(k8s.writeLog.length).toBe(k8sWrites);
+    expect(github.writeLog.filter((write) => write.startsWith("createIssue"))).toHaveLength(2);
+    expect(github.writeLog.some((write) => write.startsWith("createPullRequest"))).toBe(false);
   });
-
 });
 
 describe("S2 → S4 / S5: a failed closeout migrates the spec's labels and comments once", () => {

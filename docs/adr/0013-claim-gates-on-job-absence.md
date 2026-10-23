@@ -6,7 +6,7 @@
 
 ## 决定
 
-- **门 = GitHub 半边 + k8s 半边**：`open` ∧ 无 open blocker ∧ `ready-for-agent` ∧ `agent:implement` ∧ 无任何 `agent:*` ∧ **确定性名下无 Job 对象**（终态与否）。k8s 半边不满足 → 本轮等待：不改 label、不建 Job、不评论，与 Defer 同形。
+- **门 = GitHub 半边 + k8s 半边**：`open` ∧ 无 open blocker ∧ `ready-for-agent` ∧ **已授权** ∧ 无任何 `agent:*` ∧ **确定性名下无 Job 对象**（终态与否）。k8s 半边不满足 → 本轮等待：不改 label、不建 Job、不评论，与 Defer 同形。「已授权」在本 ADR 写下时只有「票自己带 `agent:implement`」一个来源；后来加了第二个——**父 spec 带 `agent:implement` 时子票继承**（[ticket #46](https://github.com/2017fighting/remote-agent/issues/46)，见 [`docs/architecture.md` §4.2](../architecture.md#42-frontier-与-gate)）。它只影响这扇门的判定，不改本 ADR 的 k8s 半边：继承来的授权同样要过「名下无 Job 对象」。
 - **唤醒**：Job watch 的 `DELETED` 事件（TTL 自清、人 `kubectl delete` 都走它）。等待不吃 Slot——终态 Job 名下没有未到终态的 pod（[#13](https://github.com/2017fighting/remote-agent/issues/13) 的口径）；非终态旧 Job 占着自己的 Slot 属于正确记账。
 - **Claim 的写序：先 create-if-absent Job，后写 `agent:in-progress`**。App 在两写之间崩掉留下「Job 在跑 + 票在门内」，被 k8s 半边天然收掉：Job 终态 → TTL → `DELETED` → 重新 Claim，同卷按 [ADR-0011](0011-ticket-pvc-recycling.md) 接续，不产生假 `error`。GitHub 持久失败时的代价是白跑一轮（工作在卷上不丢），比假 error 安静且诚实。反序的崩窗是「`in-progress` + 无 Job」→ 假 T6e，会把 T6e 的成因混进高频崩窗、信号变脏。
 - **非终态旧 Job 同规则**：人在 Job 跑动中手滑摘了 `agent:*`，或上一次 Claim 的崩窗残留，都走等待——它最迟 `activeDeadlineSeconds`（3h）进终态，再 30 分钟被删，上界 ~3.5h、罕见、自动恢复，不新增状态机路径。annotation 无人消费是正确行为：工作已在 Ticket PVC 上，新一轮同卷接续。

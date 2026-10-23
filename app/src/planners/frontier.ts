@@ -1,7 +1,7 @@
 import { jobName } from "@remote-agent/shared";
 import type { GitHubIssue } from "../ports/GitHubPort.js";
 import type { K8sJob } from "../ports/K8sPort.js";
-import { claimGate } from "./gate.js";
+import { claimGate, type ParentSpec } from "./gate.js";
 
 /**
  * Frontier (docs/architecture.md §4.2): the spec's first sub-issue that passes
@@ -31,6 +31,11 @@ export interface FrontierInput {
   openBlockerCounts: ReadonlyMap<number, number>;
   /** Every Job object currently in the namespace, by name. */
   jobsByName: ReadonlyMap<string, K8sJob>;
+  /**
+   * The spec these are sub-issues of. Its `agent:implement` authorizes every
+   * one of them (ticket #46); without it each ticket needs its own.
+   */
+  parentSpec?: ParentSpec;
 }
 
 export function planFrontier(input: FrontierInput): FrontierOutcome {
@@ -42,6 +47,7 @@ export function planFrontier(input: FrontierInput): FrontierOutcome {
       issue,
       openBlockerCount: input.openBlockerCounts.get(issue.number) ?? 0,
       existingJob,
+      parentSpec: input.parentSpec,
     });
     if (gate.passed) return { kind: "has-frontier", ticket: issue };
   }
