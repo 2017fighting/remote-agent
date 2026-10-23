@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# One workflow releases both images (docs/deployment.md §6). The order is the
+# gate: typecheck + unit → build both images → kind e2e → push to GHCR. The Job
+# image tag is computed once and baked into the App image as a compile constant,
+# so the two images can never disagree about which runner the App starts.
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  APP_IMAGE: ghcr.io/2017fighting/remote-agent
+  JOB_IMAGE: ghcr.io/2017fighting/remote-agent-job
+
+jobs:
+  typecheck-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19
+          cache: npm
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+
+  build-images:
+    needs: typecheck-and-unit
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # One tag decision for both images: the App image bakes this exact value.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.JOB_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build Job image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: job/Dockerfile
+          push: false
+          tags: ${{ env.JOB_IMAGE }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=job
+          cache-to: type=gha,mode=max,scope=job
+
+      - name: Build App image with the Job tag baked in
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: app/Dockerfile
+          push: false
+          build-args: |
+            JOB_IMAGE_TAG=${{ steps.meta.outputs.version }}
+          tags: ${{ env.APP_IMAGE }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+  # The kind e2e (ticket #41): real webhook → real App Deployment → real
+  # Job/PVC/Secret → real annotation → label closure, with a stub GitHub (whose
+  # git half is real `git http-backend`) and a stub OpenAI-compatible model
+  # service in kind. It is the spec's delivery gate.
+  #
+  # REQUIRED: this is the spec's delivery gate. `push-images` lists it in `needs`,
+  # so nothing is published to GHCR unless the closed loop held on kind.
+  #
+  # It was deliberately non-required while the App still lacked production port
+  # implementations (#43); once those landed the loop closed and the gate became
+  # binding. A red run here means the App and the Job disagree about a contract —
+  # the exact class of bug that unit tests cannot see, because each side is green
+  # on its own.
+  kind-e2e:
+    needs: build-images
+    runs-on: ubuntu-latest
+    # Long enough for a cold kind cluster plus four image builds; the assertions
+    # themselves poll with their own bounded timeouts.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19
+          cache: npm
+      - run: npm install
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.32.0
+
+      - name: Build and load images
+        run: node e2e/build.mjs
+
+      # The harness builds and loads the four images itself, brings up the
+      # cluster, applies the namespace contract, drives the scenario and asserts
+      # the final world. Its log is sectioned (cluster / images / stubs / app /
+      # job / assert) so a failure names the side that broke.
+      - name: Run the kind e2e
+        run: node e2e/run.mjs --timeout 300 --verbose
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-ra-e2e -n remote-agent get all,pvc,secrets,cm -o wide || true
+          kubectl --context kind-ra-e2e -n remote-agent describe jobs || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/remote-agent --tail 200 || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-github --tail 100 || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-model --tail 100 || true
+
+  push-images:
+    # Nothing is published before the closed loop is green on kind (spec #33 §9).
+    needs: [build-images, kind-e2e]
+    # PRs build but never publish; main and release tags publish (spec #33 §9).
+    if: >-
+      ${{
+        github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same tag the build job computed and baked into the App image.
+      - name: Push Job image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: job/Dockerfile
+          push: true
+          tags: ${{ env.JOB_IMAGE }}:${{ needs.build-images.outputs.version }}
+          cache-from: type=gha,scope=job
+
+      - name: Push App image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: app/Dockerfile
+          push: true
+          build-args: |
+            JOB_IMAGE_TAG=${{ needs.build-images.outputs.version }}
+          tags: ${{ env.APP_IMAGE }}:${{ needs.build-images.outputs.version }}
+          cache-from: type=gha,scope=app

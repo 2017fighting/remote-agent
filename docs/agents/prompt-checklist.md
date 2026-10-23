@@ -56,7 +56,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 - **为什么必不写**：`/implement-spec`、`/implement`、`code-review`、`tdd`、`pr` 全文 grep `e2e|end-to-end` **零命中**——它不是 skill 能力，是上游没有的东西。`/implement-spec` 的收尾只有：全分支一次 `code-review` → 在一个 implementer 里修完 → PR ready 或关票 → 清 worktree；`/implement` 的验证是「常跑 typecheck 与单文件测试，收尾跑一次全量测试」。
 - **写了会怎样**：单 ticket 循环成本翻倍，ticket 阶段的 e2e 失败又归因不到本张票上。
 - **决定**：v1 收尾 role 的验证 = 全量测试 + typecheck（仓库 prompt 里点名 lint 就跑），**撤销** [#4](https://github.com/2017fighting/remote-agent/issues/4) 的「收尾 Job 跑 e2e」。代价明写：pi-web 的 `test:e2e` 这次运行没人跑，结果交到 PR 让人看。
-- **落点**：无（这是「不写」条目）；欠账记在 #4 的决策行与 `docs/architecture.md` §3 的过期提示里。
+- **落点**：无（这是「不写」条目）；#4 的决策行记着这次撤销，`docs/architecture.md` §3 已按「收尾不跑 e2e」重画。
 
 ### 6. PR body 与 `Closes #<spec>` → 工具 + App
 
@@ -128,7 +128,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 - [ADR-0007](../adr/0007-run-result-contract.md) 就地改：outcome 由工具身份决定、新增 `prBody`、删 `reason`、error 不由 agent 自述。
 - [ADR-0004](../adr/0004-prompts-live-in-configmap.md) 就地改：ConfigMap 的键从「同名一份模板」扩到「`_common` + 两份角色 + 两份 review」。
-- [#4](https://github.com/2017fighting/remote-agent/issues/4) 的「收尾 Job 跑 e2e」撤销；`docs/architecture.md` §3 的 Spec 循环图里 e2e 与「commit 带 Closes」两处一并过期（图仍归 spec 阶段重画）。
+- [#4](https://github.com/2017fighting/remote-agent/issues/4) 的「收尾 Job 跑 e2e」撤销；`docs/architecture.md` §3 的 Spec 循环图已按新执行面重画（收尾不跑 e2e，`Closes` 由 App 写进 PR body 而不是 commit）。
 
 ## 本清单不覆盖
 

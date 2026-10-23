@@ -1,0 +1,7 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "stub-github/**/*.ts", "stub-model/**/*.ts", "test/**/*.ts"]
+}

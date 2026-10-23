@@ -1,0 +1,20 @@
+{
+  "name": "@remote-agent/app",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^2.0.1",
+    "@remote-agent/shared": "*",
+    "octokit": "^5.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

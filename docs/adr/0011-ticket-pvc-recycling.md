@@ -20,8 +20,13 @@ v1 每 ticket 一块 PVC、不随 Job 删（[ADR-0008](0008-durable-runtime-base
 | --- | --- | --- |
 | **T4** `done` | `expires-at = 判定时刻 + 7d` | App：到点删 |
 | **T5** `blocked` / **T6a–e** `error` | `expires-at = 判定时刻 + 30d` | App：到点删 |
+| **S3** 收尾 `done`（已开 PR） | `expires-at = 判定时刻 + 7d` | App：到点删 |
+| **S4** 收尾 `blocked` / **S5** 收尾 `error` | `expires-at = 判定时刻 + 30d` | App：到点删 |
 | **T3** 被占 / **T3L** 自环 | 无 `expires-at`（Claim 时清） | 不删 |
+| **S2** 收尾在跑 | 无 `expires-at` | 不删 |
 | 无 outcome 的孤儿 | 无 `expires-at` | App：无活 Job ∧ 年龄 > 30d |
+
+`implement-spec` 的收尾 Job 也有自己的一块 Ticket PVC（同一个确定性命名规则作用在 spec 号上），回收规则与 ticket 完全一致：**判它 outcome 的那一次 reconcile 写 `expires-at`**（`done` 7d、`blocked` / `error` 30d，set-if-absent）。不把它归给孤儿兜底：孤儿是给「从未走到 outcome」的卷的，一块已经判过的卷按年龄被删，是删对了但理由和时钟都不对。
 
 一个 pass 内的顺序：**先**处理 Claim / 终态（改 label、清或打 `expires-at`），**再**跑回收（删已过期的）。`expires-at` 不存在 = 不可删。
 
@@ -39,9 +44,9 @@ v1 每 ticket 一块 PVC、不随 Job 删（[ADR-0008](0008-durable-runtime-base
 - **[ADR-0008](0008-durable-runtime-base.md) / [ADR-0010](0010-job-resource-budget.md) 就地改**：SC 名与「厚置备」那句；ADR-0010 里「谁删、留多久归 #19」的指向改成本文。
 - **home-ops 多一个 manifest**：`infrastructure/storage/storageclass-truenas-iscsi-delete.yaml`。名字按既有惯例（`-<policy>` 后缀，与 `truenas-iscsi-retain` / `truenas-nfs-retain` 同形），改名只是改字符串。
 - **App Role 多两类权限**：`persistentvolumeclaims: create,get,list,delete`（+ `patch`，写 `expires-at`）。#12 当初明确「不给 PVC」的理由是 v1 没有卷路径，现在路径来了，那条要就地改。建卷也是 App（create-if-absent、确定性名字，与 Job 名同源）。
-- **卷的 provenance 由 App 打标签**：`app.kubernetes.io/managed-by: remote-agent` + `remote-agent/ticket=<repo>#<n>` + `remote-agent/spec=<n>`。home-ops 的 `pvc-audit`（#85）只认 Flux inventory 标签 / `ownerReferences` / StatefulSet 的 `volumeClaimTemplates` / KEEP 名单，App 用 k8s API 动态建的卷一个都不符合 → 它会常驻 exit 1；给脚本加一条「带 `remote-agent/ticket` 标签即视为有声明来源」的规则。**不用 `ownerReferences`**：指向 App 的 Deployment/ReplicaSet 意味着部署换代（新 ReplicaSet）时 GC 连卷一起删——正是 home-ops ADR-0016 那条「ownership 而不是 deletion policy 决定东西活不活得下来」的教训；指向 Job 则卷随 Job 死，直接废掉整个设计。
+- **卷的 provenance 由 App 打标签 + 注解**（**本条取代 spec #33 §4 的标签拼法**：§4 写的是 `remote-agent/ticket=<repo>#<n>` 与 `remote-agent/repo=<repo>` 作为**标签**，而这两个值含 `/` 与 `#`，k8s 一律 422——spec 那行在真集群上不成立，以本条为准）：标签只能是 k8s 合法的值，注解可以是任意文本，所以身份拆成两半——标签 `app.kubernetes.io/managed-by: remote-agent` + `remote-agent/spec=<n>`（Job 上还有 `remote-agent/role=<role>`）；注解 `remote-agent/ticket=<repo>#<n>` + `remote-agent/repo=<repo>`。**`owner/name` 与 `owner/name#<n>` 不能做标签值**（含 `/` 与 `#`，API server 直接 422；这是 kind e2e 抓到的真 bug：App 原本把两者都写成标签，于是在真集群里一张 Job 都建不出来），而把 repo 换成 slug 会让 token 续期拿不回 `owner/name`，所以机器可读的身份进注解、标签只留合法值。home-ops 的 `pvc-audit`（#85）只认 Flux inventory 标签 / `ownerReferences` / StatefulSet 的 `volumeClaimTemplates` / KEEP 名单，App 用 k8s API 动态建的卷一个都不符合 → 它会常驻 exit 1；规则因此定为「**带 `app.kubernetes.io/managed-by: remote-agent` 标签即视为有声明来源**」（这个标签本来就存在，也是 App 自己认领对象的那一个），`remote-agent/ticket` 注解只给人看细节。**不用 `ownerReferences`**：指向 App 的 Deployment/ReplicaSet 意味着部署换代（新 ReplicaSet）时 GC 连卷一起删——正是 home-ops ADR-0016 那条「ownership 而不是 deletion policy 决定东西活不活得下来」的教训；指向 Job 则卷随 Job 死，直接废掉整个设计。
 - **`expires-at` 同时是运维界面**：`error` / `blocked` 那条评论里带上「这块卷保留到 <date>」（[#10](https://github.com/2017fighting/remote-agent/issues/10) §4.6 的模板），人不用去 `kubectl get pvc` 就知道还有多久。
 - **薄置备把「盘满」的形态改了**：`df` 预检（ADR-0010，每次 pod 启动、marker 之前）只能看见文件系统，看不见池；池满时写失败发生在预检之后，走普通 `error(no-result)` 路径。恢复手段不变（删卷重播），但**预检不再是池满的防线**。
-- **回收的单位是「这张票的三件套」**：Ticket PVC + 它的 per-Job Secret（`agent-<repo-slug>-<issue#>-token`，[ADR-0009](0009-ticket-volume-seeding.md)）一起删（App 本来就有 `secrets` 的 `delete`）。Job 本身归 [#23](https://github.com/2017fighting/remote-agent/issues/23)。
+- **回收的对象是两个**：Ticket PVC + 它的 per-Job Secret（`agent-<repo-slug>-<issue#>-token`，[ADR-0009](0009-ticket-volume-seeding.md)）一起删（App 本来就有 `secrets` 的 `delete`）——凭证跟卷一起死。Job 本身**不在这里删**：`ttlSecondsAfterFinished` 是唯一的 Job 删除者，App 的 Role 里没有 `jobs delete/patch`（[ADR-0012](0012-job-deletion-ttl.md)）。
 - **重开一张 `done` 票时，模型带着「我刚说过做完了」的历史**：需要 App 把「人重开了这张票 + 新评论」写进工作项正文（归 [#14](https://github.com/2017fighting/remote-agent/issues/14) / [#24](https://github.com/2017fighting/remote-agent/issues/24) 的 prompt 票），否则 agent 可能直接再报一次 `done`。
 - **重跑撞旧 Job**：Claim 是 create-if-absent 的确定性 Job 名，而重入 / 重开时旧 Job 可能还在自己的保留窗里（[ADR-0012](0012-job-deletion-ttl.md)）→ 新一轮可能起不来，或 App 把上一轮的 annotation 当成新结果。派生 [#27](https://github.com/2017fighting/remote-agent/issues/27)（blocked by #23）。
