@@ -62,13 +62,13 @@ export async function postOnce(
  * carries the App-derived reason (and a summary only on the self-reported
  * defensive branch), because the four App reasons have no payload behind them.
  */
-export type FailureReport =
+export type FailureOutcome =
   | { outcome: "blocked"; result: RunResultV1 }
   | { outcome: "error"; reason: AppErrorReason; summary: string | null };
 
 /**
  * The `blocked` / `error` comment for a judged run. `error` has two templates:
- * a self-reported payload (`app-judged`) is its own report, while the four
+ * a self-reported payload (`app-judged`) carries its own outcome, while the four
  * App-derived reasons have no annotation behind them and need evidence.
  */
 export async function postFailureComment(
@@ -76,7 +76,7 @@ export async function postFailureComment(
   issue: GitHubIssue,
   job: K8sJob | null,
   pods: K8sPod[],
-  failure: FailureReport,
+  failure: FailureOutcome,
   judgedAt: Date,
 ): Promise<void> {
   const name = jobName(issue.ownerRepo, issue.number);
@@ -87,7 +87,7 @@ export async function postFailureComment(
 
   if (failure.reason === "app-judged") {
     // T6a / S5a: a payload exists, so the App has nothing to gather — the
-    // agent's own summary is the whole report.
+    // agent's own summary is the whole outcome.
     await postOnce(
       deps.github,
       issue,

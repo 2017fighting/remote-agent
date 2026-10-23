@@ -9,7 +9,7 @@ import {
   postFailureComment,
   postOnce,
   setExpiresAtIfAbsent,
-  type FailureReport,
+  type FailureOutcome,
 } from "./outcome-effects.js";
 
 /**
@@ -94,7 +94,7 @@ async function execute(
     await github.closeIssue(issue.ownerRepo, issue.number);
   } else {
     await migrateLabels(github, issue, { add: transition.addLabels, remove: transition.removeLabels });
-    await postFailureComment(deps, issue, job, pods, asFailureReport(transition), judgedAt);
+    await postFailureComment(deps, issue, job, pods, asFailureOutcome(transition), judgedAt);
   }
 
   // `expires-at` is written in the same pass that judged the outcome, and only
@@ -102,7 +102,7 @@ async function execute(
   await setExpiresAtIfAbsent(deps, issue, transition.kind, judgedAt);
 }
 
-function asFailureReport(transition: Exclude<OutcomeTransition, { kind: "none" | "done" }>): FailureReport {
+function asFailureOutcome(transition: Exclude<OutcomeTransition, { kind: "none" | "done" }>): FailureOutcome {
   if (transition.kind === "blocked") return { outcome: "blocked", result: transition.result };
   return { outcome: "error", reason: transition.reason, summary: transition.summary };
 }
