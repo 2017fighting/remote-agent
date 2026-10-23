@@ -40,7 +40,7 @@ sops 一份 `remote-agent-secret`，三键：
 
 非密配置进 `remote-agent-env` ConfigMap：App ID `5390512`、Client ID、installation 归属。
 
-> **未完成的动作项**：`README.md` 里那枚 webhook secret 已进 git 历史，按**已泄漏**处理——在 GitHub App 后台重设、新值进 sops、README 那行删掉（本仓库当前只在那一行旁标了「已泄漏，待轮换」）。App private key 与它同一个 secret。
+> **2026-10-23 已完成轮换**：`README.md` 里那枚 webhook secret 明文进过 git 历史，已按**已泄漏**处理——GitHub App 后台重设完毕，现役值只住在 `home-ops` 的 `apps/remote-agent/remote-agent-secret.sops.yaml`（`GITHUB_WEBHOOK_SECRET`，56 位 hex），本仓库的 `README.md` 不再出现任何 secret 值（[#45](https://github.com/2017fighting/remote-agent/issues/45)）。三者同一个 Secret：`GITHUB_APP_PRIVATE_KEY` 与 `GITHUB_WEBHOOK_SECRET` 只 App 读，`OMNIROUTE_API_KEY` 只 Job 读（见上表）；轮换只动了 webhook secret 一个键。历史不重写——值已作废，重写买不到东西。
 
 per-Job 凭证是另一回事：`contents: write`、只覆盖目标 repo 的 installation token 写进 `agent-<repo-slug>-<issue#>-token` Secret，挂成文件、由 App 按 `remote-agent/token-expires-at` 续期（[ADR-0009](adr/0009-ticket-volume-seeding.md)）。
 

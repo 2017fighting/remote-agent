@@ -13,7 +13,6 @@ App ID: 5390512
 Client ID: Iv23lipjSurEcAJNUaNW
 Homepage URL: https://remote-agent.raenzo.com/
 Webhook URL: https://remote-agent.raenzo.com/webhook
-WebhookSecret: f789e284ca3f2babf324c92a174f4ef26f4dfac296101f030f6016b3  # ⚠️ 已泄漏（明文进过 git 历史）——按 #12 的动作项在 GitHub App 后台重设、新值进 home-ops 的 sops，这里只留作对照，别当现役值用
 
 ## mattpocock-skills 生成的issue label
 
