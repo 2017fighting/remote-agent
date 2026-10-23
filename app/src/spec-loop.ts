@@ -4,7 +4,7 @@ import type { GitHubIssue, GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sJob, K8sPod, K8sPort } from "./ports/K8sPort.js";
 import type { AppConfig } from "./config.js";
 import { startCloseoutJob } from "./claim.js";
-import { renderWorkItem, serializeWorkItem } from "./renders/work-item.js";
+import { renderWorkItem, serializeWorkItem, type WorkItemTicketInput } from "./renders/work-item.js";
 import { CLOSEOUT_PR_BASE_BRANCH, renderCloseoutPrBody, renderCloseoutPrTitle } from "./renders/pull-request.js";
 import {
   SPEC_BLOCKED_LABELS,
@@ -61,6 +61,10 @@ export interface SpecLoopDeps {
  * rule (on the spec's own number), same Ticket PVC and Secret, same
  * create-if-absent. Only the label write is missing — a spec has no
  * `agent:in-progress` to set.
+ *
+ * Its work item carries the **ticket map** (user story 26): the spec role reads
+ * every sub-issue's title, body and comments without calling GitHub, which is
+ * what `prompts/implement-spec` renders as "the ticket map … above".
  */
 export async function startSpecCloseout(deps: SpecLoopDeps, spec: GitHubIssue): Promise<void> {
   const workItemJson = serializeWorkItem(
@@ -68,6 +72,7 @@ export async function startSpecCloseout(deps: SpecLoopDeps, spec: GitHubIssue): 
       issue: spec,
       specNumber: spec.number,
       comments: await deps.github.listComments(spec.ownerRepo, spec.number),
+      tickets: await readTicketMap(deps.github, spec),
     }),
   );
   const result = await startCloseoutJob({
@@ -81,6 +86,20 @@ export async function startSpecCloseout(deps: SpecLoopDeps, spec: GitHubIssue): 
   // `quota-exceeded` and `already-claimed` are both "nothing more this pass";
   // only a real failure stops the pass, exactly as it does for a ticket.
   if (result.kind === "failed") throw result.error;
+}
+
+/**
+ * The spec's sub-issues in listed order, each with its own comments oldest
+ * first. Two reads per ticket; a spec with no sub-issues yields an empty map.
+ */
+async function readTicketMap(github: GitHubPort, spec: GitHubIssue): Promise<WorkItemTicketInput[]> {
+  const subIssues = await github.listSubIssues(spec.ownerRepo, spec.number);
+  return Promise.all(
+    subIssues.map(async (subIssue) => ({
+      issue: subIssue,
+      comments: await github.listComments(subIssue.ownerRepo, subIssue.number),
+    })),
+  );
 }
 
 /**
