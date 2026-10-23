@@ -77,6 +77,28 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
   const handle: HarnessHandle[] = [];
   const harness = await openHarness(deps, storage, handle);
   handle.push(harness);
+
+  // SIGTERM (k8s eviction, activeDeadlineSeconds, node drain) is NOT a terminal
+  // state: the run must close the harness so sqlite is left consistent, exit
+  // non-zero, and write NO annotation — the next pod resumes from the last
+  // checkpoint (ADR-0007 / ADR-0008). Without this handler `harness.close()` only
+  // ran on the normal return path, so a signal abandoned the storage mid-flight.
+  const onSignal = async (signal: NodeJS.Signals): Promise<void> => {
+    deps.log(`runner-signal signal=${signal} closing=true annotation=false`);
+    try {
+      await harness.close(context);
+    } finally {
+      process.exit(1);
+    }
+  };
+  const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  for (const signal of signals) {
+    const handler = (): void => void onSignal(signal);
+    handlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+
   try {
     const root = await harness.root(context, { agent: implementerAgent(deps) });
     if (await isComplete(harness, root)) {
@@ -104,6 +126,7 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
     await markComplete(harness, root);
     return { exitCode: 0, result, resumed, alreadyComplete: false };
   } finally {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
     await harness.close(context);
   }
 }
