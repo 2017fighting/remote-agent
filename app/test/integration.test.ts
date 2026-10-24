@@ -10,7 +10,7 @@ import { readAppConfig } from "../src/config.js";
 /**
  * Whole-surface wiring on the App seam: a signed webhook delivery →
  * scheduler wake → exactly one reconcile pass → one structured log line with
- * the trigger and five counters, over HTTP 200. Everything runs against the
+ * the trigger and seven counters, over HTTP 200. Everything runs against the
  * in-memory fake world (spec #33 Testing Decisions 1).
  */
 
@@ -94,8 +94,9 @@ describe("signed webhook → scheduler → one reconcile pass", () => {
     expect(Object.hasOwn(line, "deferred")).toBe(true);
     expect(Object.hasOwn(line, "renewed")).toBe(true);
     expect(Object.hasOwn(line, "waiting")).toBe(true);
+    expect(Object.hasOwn(line, "closeoutConsumed")).toBe(true);
     expect(Object.hasOwn(line, "idle")).toBe(true);
-    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
+    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 closeout-consumed=0 idle=0");
     expect(errors).toEqual([]);
   });
 

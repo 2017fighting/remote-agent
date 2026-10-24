@@ -42,7 +42,7 @@ describe("startApp wiring", () => {
     });
     try {
       // One structured line for the startup pass, plus its volume stats line.
-      expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
+      expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0 closeout-consumed=0 idle=0");
       expect(logLines).toContain("volumes live=0 oldest-expiry=none per-spec=none");
 
       const payload = JSON.stringify({ action: "labeled" });
@@ -61,7 +61,7 @@ describe("startApp wiring", () => {
       await new Promise((r) => setImmediate(r));
       const passLines = logLines.filter((l) => l.startsWith("pass "));
       expect(passLines).toHaveLength(2);
-      expect(passLines[1]).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
+      expect(passLines[1]).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 closeout-consumed=0 idle=0");
       // Every pass also emits the volume stats line (ADR-0011).
       expect(logLines.filter((l) => l.startsWith("volumes "))).toHaveLength(2);
     } finally {
@@ -90,7 +90,7 @@ describe("startApp wiring", () => {
       webhookSecret: SECRET,
     });
     try {
-      expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0 idle=1");
+      expect(logLines).toContain("pass trigger=startup slots=0/3 deferred=0 renewed=0 waiting=0 closeout-consumed=0 idle=1");
       expect(logLines).toContain("idle-spec spec=33 open-sub-issues=2 reasons=exit-marker:2");
       // No external write: the pass only counted (and so did every later pass).
       expect(github.writeLog).toEqual([]);
@@ -143,7 +143,7 @@ describe("startApp wiring", () => {
       await new Promise((r) => setImmediate(r));
 
       const passLines = logLines.filter((line) => line.startsWith("pass "));
-      expect(passLines.at(-1)).toBe("pass trigger=job-watch slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
+      expect(passLines.at(-1)).toBe("pass trigger=job-watch slots=0/3 deferred=0 renewed=0 waiting=0 closeout-consumed=0 idle=0");
     } finally {
       await app.stop();
     }

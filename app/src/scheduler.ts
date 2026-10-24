@@ -17,6 +17,12 @@ export interface PassCounters {
   waiting: number;
   /** Specs inside the gate with open sub-issues and an empty Frontier (ticket #47). */
   idle: number;
+  /**
+   * Specs whose closeout outcome is already consumed (they carry
+   * `closeout-consumed`), waiting for the Job
+   * object's `DELETED` event before a fresh closeout can start (ticket #49).
+   */
+  closeoutConsumed: number;
 }
 
 /**
@@ -42,17 +48,20 @@ export interface PassLog extends PassCounters {
 
 /**
  * One structured line per pass (ADR-0014):
- * `pass trigger=<t> slots=<used>/<max> deferred=<n> renewed=<n> waiting=<n> idle=<n>`.
+ * `pass trigger=<t> slots=<used>/<max> deferred=<n> renewed=<n> waiting=<n>
+ * closeout-consumed=<n> idle=<n>`.
  *
- * The three no-action counters are peers, and each names a different reason the
+ * The four no-action counters are peers, and each names a different reason the
  * pass did nothing: `deferred` = out of Slots, `waiting` = a lingering Job
- * object, `idle` = in the gate with an empty Frontier. `idle`'s reason needs the
- * per-spec line below, because it is not one thing.
+ * object holding a ticket, `closeout-consumed` = a lingering Job object whose
+ * outcome was already acted on, `idle` = in the gate with an empty Frontier.
+ * `idle`'s reason needs the per-spec line below, because it is not one thing.
  */
 export function formatPassLog(line: PassLog): string {
   return (
     `pass trigger=${line.trigger} slots=${line.slotsUsed}/${line.slotsMax}` +
-    ` deferred=${line.deferred} renewed=${line.renewed} waiting=${line.waiting} idle=${line.idle}`
+    ` deferred=${line.deferred} renewed=${line.renewed} waiting=${line.waiting}` +
+    ` closeout-consumed=${line.closeoutConsumed} idle=${line.idle}`
   );
 }
 

@@ -7,9 +7,11 @@ import { startCloseoutJob } from "./claim.js";
 import { renderWorkItem, serializeWorkItem, type WorkItemTicketInput } from "./renders/work-item.js";
 import { CLOSEOUT_PR_BASE_BRANCH, renderCloseoutPrBody, renderCloseoutPrTitle } from "./renders/pull-request.js";
 import {
+  LABEL_CLOSEOUT_CONSUMED,
   SPEC_BLOCKED_LABELS,
   SPEC_DONE_LABELS,
   SPEC_ERROR_LABELS,
+  isCloseoutConsumed,
   type SpecStep,
 } from "./planners/spec-loop.js";
 import { createFollowUp } from "./outcome.js";
@@ -31,23 +33,40 @@ import { migrateLabels, postFailureComment, setExpiresAtIfAbsent } from "./outco
  *   what takes the spec out of the gate, so the next pass has nothing to do.
  *   PR first, labels second: the reverse crash window would leave the spec
  *   outside the gate with no PR, and nothing would ever retry it.
- * - **S2 → S3N** the created tickets *are* the marker: once linked as
- *   sub-issues they keep the spec out of the closeout branch (an open sub-issue
- *   means S1, not S2), and no second pass repeats the creation. Their labels
- *   decide what happens next: `ready-for-agent` ones become the Frontier right
- *   away — the spec's authorization is inherited (ticket #46) — and are claimed
- *   on the next pass with no human checkpoint in between (ticket #48). That is
- *   also the cost: the loop has no round limit, only the human escape hatch of
- *   removing `agent:implement` from the spec (docs/architecture.md §3).
+ * - **S2 → S3N** two carriers, because one of them dies. The created tickets are
+ *   linked as sub-issues, and while any of them is open the spec is on the
+ *   "open sub-issue" branch (S1), so no second pass repeats the creation. Their
+ *   labels decide what happens next: `ready-for-agent` ones become the Frontier
+ *   right away — the spec's authorization is inherited (ticket #46) — and are
+ *   claimed on the next pass with no human checkpoint in between (ticket #48).
+ *   That is also the cost: the loop has no round limit, only the human escape
+ *   hatch of removing `agent:implement` from the spec (docs/architecture.md §3).
  *   `ready-for-human` ones wait for a human.
+ *
+ *   Once they have *all* closed the spec is back on "no open sub-issue" while the
+ *   closeout Job object is still inside its retention window, so the outcome
+ *   needs a carrier that does not die with the tickets: `closeout-consumed` on
+ *   the spec (ticket #49). It is written here, before the first create, and
+ *   cleared when the next closeout Job starts; the k8s half of the Claim-gate
+ *   keeps the old object from being re-judged in the meantime.
  * - **S2 → S4 / S5** the label migration takes the spec out of the gate and the
  *   comment dedupes on its marker — the same two carriers a ticket uses.
  *
- * The one window without a carrier is a crash *between* creating a follow-up and
- * linking it: the issue exists, the spec does not know it yet, and the next pass
- * would create it again. Closing that needs an idempotency key the run result
- * does not carry (title matching is a guess, and a wrong one silently drops a
- * real follow-up), so it stays a known window rather than a silent rule.
+ * Two windows have no carrier, and the marker changes what they cost rather than
+ * closing them:
+ *
+ * - **Between creating a follow-up and linking it.** The issue exists, the spec
+ *   does not list it yet. With the marker already written, the next pass will
+ *   not repeat the batch — so the loss is the rest of the batch plus one orphan
+ *   issue nobody links (it shows up in the repo, just not as this spec's
+ *   sub-issue). Before the marker existed the same crash repeated the batch
+ *   instead, which is strictly worse.
+ * - **Between the marker and the first create.** The whole batch is lost; the
+ *   TTL brings a fresh closeout that re-reports it.
+ *
+ * Closing either properly needs an idempotency key the run result does not carry
+ * (title matching is a guess, and a wrong one silently drops a real follow-up),
+ * so they stay known windows rather than silent rules.
  *
  * A spec never gets `agent:in-progress` on any of these paths (§4.5).
  */
@@ -69,8 +88,24 @@ export interface SpecLoopDeps {
  * Its work item carries the **ticket map** (user story 26): the spec role reads
  * every sub-issue's title, body and comments without calling GitHub, which is
  * what `prompts/implement-spec` renders as "the ticket map … above".
+ *
+ * Starting the Job is also where the previous run's `closeout-consumed` marker
+ * goes (ticket #49). The marker can only be stale here — this branch is the one
+ * that requires *no* object under the deterministic name — so it is cleared
+ * first, and then the Job is created:
+ *
+ * - crash after the clear, before the create → next pass sees no marker and no
+ *   object, so it clears nothing and starts the closeout. Nothing is lost.
+ * - the reverse order would leave a fresh, unjudged run carrying the old
+ *   marker, so its outcome would read as "already consumed" until the TTL
+ *   deleted the object and a whole closeout run was wasted.
  */
 export async function startSpecCloseout(deps: SpecLoopDeps, spec: GitHubIssue): Promise<void> {
+  // A new closeout Job means a new run: the previous outcome's marker would
+  // otherwise make this run's result look consumed before it is judged.
+  if (isCloseoutConsumed(spec)) {
+    await migrateLabels(deps.github, spec, { add: [], remove: [LABEL_CLOSEOUT_CONSUMED] });
+  }
   const workItemJson = serializeWorkItem(
     renderWorkItem({
       issue: spec,
@@ -149,8 +184,10 @@ export async function applySpecStep(
     case "idle":
     case "start-closeout":
     case "closeout-running":
+    case "closeout-consumed":
     case "out-of-gate":
-      // S1 branches and the still-running closeout write nothing here.
+      // S1 branches, the still-running closeout, and a consumed outcome waiting
+      // for its Job object's `DELETED` all write nothing here.
       return;
   }
 }
@@ -181,26 +218,27 @@ async function openCloseoutPullRequest(
 
 /**
  * S3N: create the follow-ups and link them, open no PR, and leave the spec's
- * labels alone — "there is still work left" must not look like "the spec is
+ * gate labels alone — "there is still work left" must not look like "the spec is
  * complete".
  *
- * The created tickets are what stops a second run of this branch: linked and
- * open, they take the spec back to S1 (an open sub-issue means the closeout is
- * not its turn), so no second pass repeats the creation. A `ready-for-agent`
- * follow-up is then the Frontier on the very next pass — authorization is
- * inherited from the spec (ticket #46) — and is claimed without a human in the
- * loop (ticket #48); a `ready-for-human` one waits for a human.
- *
- * Known window (issue #49): once every follow-up is closed the spec is back on
- * the "no open sub-issue" branch while this Job object is still inside its TTL
- * retention window, so the same `newTickets` can be created a second time. The
- * carrier above only covers the window where a follow-up is still open.
+ * The created tickets are what stops a second run of this branch *while any of
+ * them is open*: linked and open, they take the spec back to S1 (an open
+ * sub-issue means the closeout is not its turn). That carrier dies when they all
+ * close, so the outcome is marked consumed first (ticket #49) — before the first
+ * create, because the marker is what has to survive a crash in the middle of the
+ * batch, not the tickets. A `ready-for-agent` follow-up is then the Frontier on
+ * the very next pass — authorization is inherited from the spec (ticket #46) —
+ * and is claimed without a human in the loop (ticket #48); a `ready-for-human`
+ * one waits for a human.
  */
 async function createFollowUpTickets(
   deps: SpecLoopDeps,
   spec: GitHubIssue,
   newTickets: NewTicket[],
 ): Promise<void> {
+  // Mark first: a crash after this point parks the spec on "consumed" until the
+  // Job object is gone, instead of repeating the batch (ticket #49).
+  await migrateLabels(deps.github, spec, { add: [LABEL_CLOSEOUT_CONSUMED], remove: [] });
   for (const ticket of newTickets) {
     const created = await createFollowUp(deps.github, spec, ticket);
     await deps.github.addSubIssue(spec.ownerRepo, spec.number, created.number);

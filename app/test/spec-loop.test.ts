@@ -5,6 +5,7 @@ import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import { testConfig } from "./helpers.js";
 import { GATE_LABELS, REPO, closeoutJob, closedOutSpecWorld, issue, managedJob, specWorld } from "./world.js";
+import { LABEL_CLOSEOUT_CONSUMED } from "../src/planners/spec-loop.js";
 
 /**
  * The spec loop on the App seam (spec #33 §2 steps 4–5, docs/architecture.md
@@ -93,6 +94,32 @@ describe("S1 → S2: frontier empty and no open sub-issue starts the closeout Jo
     expect(ticketNames).not.toContain(closeout);
     // Same rule, same prefix, different (globally unique) issue number.
     expect(closeout).toBe(`agent-2017fighting-remote-agent-${SPEC}`);
+  });
+
+  it("clears a stale consumed marker when the fresh closeout Job starts", async () => {
+    // The marker says "the last closeout's outcome is consumed". A new closeout
+    // Job under the same name starts a new run, so the marker has to go — one
+    // label write, and it is the only one on this path.
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    (await github.getIssue(REPO, SPEC))!.labels = [...GATE_LABELS, LABEL_CLOSEOUT_CONSUMED];
+    const k8s = new FakeK8s();
+
+    await run({ github, k8s });
+
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+    expect(await specLabels(github)).toEqual([...GATE_LABELS].sort());
+    expect(github.writeLog.filter((write) => write.startsWith("editLabels"))).toEqual([
+      `editLabels ${REPO}#${SPEC} +[] -[${LABEL_CLOSEOUT_CONSUMED}]`,
+    ]);
+  });
+
+  it("a spec that never consumed a closeout gets no label write when one starts", async () => {
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s();
+
+    await run({ github, k8s });
+
+    expect(github.writeLog.filter((write) => write.startsWith("editLabels"))).toEqual([]);
   });
 
   it("starts no second closeout Job while the old one is still there (ADR-0013, k8s half)", async () => {
@@ -452,18 +479,39 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     expect(created[1]!.labels).toEqual(["ready-for-human"]);
   });
 
-  it("opens no PR and leaves the spec's labels exactly as they were", async () => {
+  it("opens no PR and leaves the spec in the gate — plus the consumed marker", async () => {
     const { github, k8s } = followUpWorld();
 
     await run({ github, k8s });
 
     expect(github.pullRequests).toEqual([]);
-    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
+    // "There is still work left" must not look like "the spec is complete": the
+    // gate labels stay. The one addition is the consumed marker (ticket #49).
+    expect(await specLabels(github)).toEqual(["agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-agent"]);
     expect(github.writeLog.some((write) => write.startsWith("createPullRequest"))).toBe(false);
-    expect(github.writeLog.some((write) => write.startsWith("editLabels"))).toBe(false);
+    // The only label write is the consumed marker; no gate label moves (ticket #49).
+    expect(github.writeLog.filter((write) => write.startsWith("editLabels"))).toEqual([
+      `editLabels ${REPO}#${SPEC} +[${LABEL_CLOSEOUT_CONSUMED}] -[]`,
+    ]);
   });
 
-  it("links them to the spec, so the next pass sees them as its sub-issues", async () => {
+  it("writes the consumed marker before the first createIssue", async () => {
+    // The order is the crash-window choice (ticket #49): mark first, create
+    // second. A crash in between loses this batch once (the TTL brings a fresh
+    // closeout that reports what is still missing); the reverse order would
+    // create the batch twice, which is the bug.
+    const { github, k8s } = followUpWorld();
+
+    await run({ github, k8s });
+
+    const writes = github.writeLog;
+    const marker = writes.findIndex((write) => write.includes(LABEL_CLOSEOUT_CONSUMED));
+    const firstCreate = writes.findIndex((write) => write.startsWith("createIssue"));
+    expect(marker).toBeGreaterThanOrEqual(0);
+    expect(firstCreate).toBeGreaterThan(marker);
+  });
+
+  it("links them to the spec, so the next pass sees them as their sub-issues", async () => {
     const { github, k8s } = followUpWorld();
 
     await run({ github, k8s });
@@ -486,7 +534,7 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     const readyForHuman = followUps.find((i) => i.title === "follow-up b")!;
     expect(k8s.jobs.map((job) => job.name)).toContain(jobName(REPO, readyForAgent.number));
     expect(k8s.jobs.map((job) => job.name)).not.toContain(jobName(REPO, readyForHuman.number));
-    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
+    expect(await specLabels(github)).toEqual(["agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-agent"]);
   });
 
   it("a replayed pass creates nothing twice", async () => {
@@ -504,6 +552,96 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     expect(github.issues.filter((i) => i.title.startsWith("follow-up"))).toHaveLength(2);
     expect(github.writeLog.filter((write) => write.startsWith("createIssue"))).toHaveLength(2);
     expect(github.writeLog.some((write) => write.startsWith("createPullRequest"))).toBe(false);
+  });
+
+  /**
+   * Issue #49: the created tickets were the only carrier of "this outcome was
+   * consumed", and that carrier dies the moment every one of them closes. The
+   * closeout Job object outlives them (its TTL window is 30 minutes, theirs is
+   * as long as a human takes), so the same `newTickets` came back a second time.
+   * These are the tests that keep the outcome consumed exactly once.
+   */
+  function closeEveryFollowUp(github: FakeGitHub) {
+    for (const created of github.issues.filter((i) => i.title.startsWith("follow-up"))) created.state = "closed";
+  }
+
+  it("creates nothing a second time once every follow-up has closed and the Job object is still there", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s }); // S3N: create, link, mark consumed.
+    closeEveryFollowUp(github);
+    const before = github.writeLog.filter((write) => write.startsWith("createIssue")).length;
+    expect(before).toBe(2);
+
+    const second = await run({ github, k8s }); // S1: no open sub-issue, Job still in its TTL window.
+
+    expect(github.writeLog.filter((write) => write.startsWith("createIssue"))).toHaveLength(2);
+    expect(github.issues.filter((i) => i.title.startsWith("follow-up"))).toHaveLength(2);
+    // And no second closeout Job either: the object is the S2 state (ADR-0013).
+    expect(k8s.writeLog).toEqual([]);
+    expect(second.closeoutConsumed).toBe(1);
+  });
+
+  it("counts the wait as closeoutConsumed, so a consumed closeout is never silent", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s });
+    closeEveryFollowUp(github);
+
+    const second = await run({ github, k8s });
+    expect(second.closeoutConsumed).toBe(1);
+    expect(second.idle).toBe(0);
+    expect(second.deferred).toBe(0);
+
+    // The wait ends by itself: the Job's TTL deletes the object, and the very
+    // next pass starts a fresh closeout (S2) that re-reports whatever is left.
+    k8s.deleteJob(CLOSEOUT);
+    github.writeLog.length = 0;
+    await run({ github, k8s });
+
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+    expect(github.writeLog.filter((write) => write.startsWith("createIssue"))).toHaveLength(0);
+    // The fresh closeout starts unmarked: the marker belonged to the consumed run.
+    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
+    expect(github.writeLog.filter((write) => write.startsWith(`editLabels ${REPO}#${SPEC}`))).toEqual([
+      `editLabels ${REPO}#${SPEC} +[] -[${LABEL_CLOSEOUT_CONSUMED}]`,
+    ]);
+  });
+
+  it("a crash right after the marker leaves the spec parked, not repeating the batch", async () => {
+    // The chosen crash window (ticket #49): mark, then create. Simulate the pass
+    // dying after the marker write — no follow-up exists yet, but the marker is
+    // on the spec, so the next pass treats the outcome as consumed instead of
+    // creating the batch from scratch a second time.
+    const { github, k8s } = followUpWorld();
+    await github.editLabels(REPO, SPEC, [LABEL_CLOSEOUT_CONSUMED], []);
+    github.writeLog.length = 0;
+
+    const second = await run({ github, k8s });
+
+    expect(github.writeLog.filter((write) => write.startsWith("createIssue"))).toEqual([]);
+    expect(second.closeoutConsumed).toBe(1);
+    // Recovery is the TTL, not a retry: the object goes, a fresh closeout starts,
+    // and the spec role re-reports whatever is still missing.
+    k8s.deleteJob(CLOSEOUT);
+    await run({ github, k8s });
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+  });
+
+  it("a spec whose closeout never reported newTickets carries no marker, so a replay stays write-free", async () => {
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({
+      jobs: [
+        closeoutJob(REPO, SPEC, {
+          finished: true,
+          annotation: runResult({ v: 1, outcome: "done", summary: "s", prBody: "p" }),
+        }),
+      ],
+    });
+    await run({ github, k8s });
+
+    expect(github.writeLog.filter((write) => write.includes(LABEL_CLOSEOUT_CONSUMED))).toEqual([]);
+    github.writeLog.length = 0;
+    await run({ github, k8s });
+    expect(github.writeLog).toEqual([]);
   });
 });
 

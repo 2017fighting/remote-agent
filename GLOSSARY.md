@@ -166,3 +166,9 @@ App 加上，表示这次运行没有可用结论：Job 非正常退出（backof
 
 **agent:blocked**:
 Agent 自述没做完、需要人做决定，由 App 按 run result 加上（同时摘 `ready-for-agent`、加 `ready-for-human`、转写评论）。
+
+**closeout-consumed**:
+App 加在 **spec** 上的记号，表示「这块收尾 Job 的 outcome 已经落地」；S3N（收尾 Job 报 `newTickets`）判完那一次写一次，起下一块收尾 Job 那一次清一次（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）。**不是 exit 标记**：它不进 `Loop`，也不挡授权继承，只挡「同一块收尾 Job 被重判一次」。S3N 是唯一判完还留在门内的 spec 分支，而它建出来的新票会全部关闭——那个载体一死，没有这个 label 就会把同一批 `newTickets` 再建一遍。
+
+带标记的 spec 这一轮什么都不做（不建 Job、不改 label、不评论），等那块 Job 对象被 `DELETED`；它在 pass 日志里计进 `closeout-consumed=<n>`，与 `Defer` / `Idle` / 等待 `DELETED` 的 Claim 同形。
+_Avoid_: 已收尾, consumed flag, 幂等键

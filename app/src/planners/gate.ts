@@ -44,6 +44,10 @@ export const LABEL_AGENT_IMPLEMENT = "agent:implement";
 export const LABEL_AGENT_IN_PROGRESS = "agent:in-progress";
 export const LABEL_AGENT_BLOCKED = "agent:blocked";
 export const LABEL_AGENT_ERROR = "agent:error";
+// The seventh label the App writes, `closeout-consumed`, deliberately does not
+// live here: no gate condition reads it (it marks a consumed spec-loop outcome,
+// not a claimable state), so it belongs to the planner that owns its life cycle
+// — `LABEL_CLOSEOUT_CONSUMED` in planners/spec-loop.ts (ticket #49).
 
 /**
  * Every `agent:*` label other than `agent:implement` is an exit marker

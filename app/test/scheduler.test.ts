@@ -86,6 +86,7 @@ function zeroCounters(): PassCounters & { idleReasons: IdleSpec[]; volumeStats: 
     deferred: 0,
     renewed: 0,
     waiting: 0,
+    closeoutConsumed: 0,
     idle: 0,
     idleReasons: [],
     volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
@@ -285,9 +286,9 @@ describe("pass log line", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("formats one structured line per pass with trigger and six counters", () => {
+  it("formats one structured line per pass with trigger and seven counters", () => {
     const line: PassLog = { trigger: "webhook", ...zeroCounters() };
-    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 idle=0");
+    expect(formatPassLog(line)).toBe("pass trigger=webhook slots=0/3 deferred=0 renewed=0 waiting=0 closeout-consumed=0 idle=0");
   });
 
   it("formats one idle-spec line per idle spec, with the reason counts that decide the next action", () => {
@@ -336,7 +337,7 @@ describe("pass log line", () => {
     );
   });
 
-  it("carries all six counters from the reconcile result", async () => {
+  it("carries all seven counters from the reconcile result", async () => {
     const lines: PassLog[] = [];
     const scheduler = createScheduler(config, {
       reconcile: async () => ({
@@ -345,6 +346,7 @@ describe("pass log line", () => {
         deferred: 1,
         renewed: 4,
         waiting: 5,
+        closeoutConsumed: 7,
         idle: 6,
         idleReasons: [{ spec: 33, openSubIssues: 2, reasons: { "exit-marker": 2 } }],
         volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
@@ -355,7 +357,7 @@ describe("pass log line", () => {
     });
     await scheduler.start();
     expect(formatPassLog(lines[0]!)).toBe(
-      "pass trigger=startup slots=2/3 deferred=1 renewed=4 waiting=5 idle=6",
+      "pass trigger=startup slots=2/3 deferred=1 renewed=4 waiting=5 closeout-consumed=7 idle=6",
     );
     expect(lines[0]!.idleReasons).toEqual([
       { spec: 33, openSubIssues: 2, reasons: { "exit-marker": 2 } },

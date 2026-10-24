@@ -5,7 +5,8 @@ import { runReconcilePass, type WorldSnapshot } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import { existingPvc, testConfig } from "./helpers.js";
-import { GATE_LABELS, REPO, issue, managedJob, specWorld } from "./world.js";
+import { GATE_LABELS, REPO, closeoutJob, closedOutSpecWorld, issue, managedJob, specWorld } from "./world.js";
+import { LABEL_CLOSEOUT_CONSUMED } from "../src/planners/spec-loop.js";
 
 /**
  * Pass-level behaviour of reconcile (spec #33 §2): read world → plan → execute
@@ -19,6 +20,15 @@ import { GATE_LABELS, REPO, issue, managedJob, specWorld } from "./world.js";
 
 const config = testConfig();
 
+/** A finished closeout run that reported one follow-up: the shape S3N consumes. */
+const FOLLOW_UP_ANNOTATION = JSON.stringify({
+  v: 1,
+  outcome: "done",
+  summary: "s",
+  prBody: "p",
+  newTickets: [{ title: "t", body: "b", readyForAgent: true }],
+});
+
 /** A world with no spec in it: nothing to claim, so the pass writes nothing. */
 function idleWorld() {
   return {
@@ -28,7 +38,7 @@ function idleWorld() {
 }
 
 describe("reconcile pass: counters", () => {
-  it("returns the five counters and the global Slot cap", async () => {
+  it("returns the seven counters and the global Slot cap", async () => {
     const { github, k8s } = idleWorld();
     const result = await runReconcilePass({ github, k8s, config }, "startup");
     expect(result).toEqual({
@@ -37,6 +47,7 @@ describe("reconcile pass: counters", () => {
       deferred: 0,
       renewed: 0,
       waiting: 0,
+      closeoutConsumed: 0,
       idle: 0,
       idleReasons: [],
       volumeStats: { live: 0, oldestExpiry: null, perSpec: [] },
@@ -332,6 +343,25 @@ describe("reconcile pass: idle counter (ticket #47)", () => {
     expect(result.idle).toBe(0);
     expect(result.idleReasons).toEqual([]);
     expect(k8s.jobs.map((job) => job.name)).toEqual([jobName(REPO, 33)]);
+  });
+
+  it("does not count a spec whose closeout outcome is consumed as idle", async () => {
+    // Ticket #49's branch is neither `idle` nor `waiting`: it is a spec with no
+    // open sub-issue whose closeout outcome was already acted on, waiting only
+    // for the Job object's `DELETED` event. Its own counter, so the log says so.
+    const github = closedOutSpecWorld({ specNumber: 33, subIssueNumbers: [34] });
+    github.issues[0] = issue(33, [...GATE_LABELS, LABEL_CLOSEOUT_CONSUMED]);
+    const k8s = new FakeK8s({ jobs: [closeoutJob(REPO, 33, { finished: true, annotation: FOLLOW_UP_ANNOTATION })] });
+
+    const result = await runReconcilePass({ github, k8s, config }, "tick");
+
+    expect(result.closeoutConsumed).toBe(1);
+    expect(result.idle).toBe(0);
+    expect(result.waiting).toBe(0);
+    expect(result.deferred).toBe(0);
+    expect(github.writeLog).toEqual([]);
+    expect(k8s.writeLog).toEqual([]);
+    expect(github.issues.filter((i) => i.title === "t")).toEqual([]);
   });
 
   it("does not count a spec that is itself out of the gate", async () => {

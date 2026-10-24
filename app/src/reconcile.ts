@@ -99,6 +99,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
   let usage = countSlotUsage(jobs, pods);
   let deferred = 0;
   let waiting = 0;
+  let closeoutConsumed = 0;
   const idleReasons: IdleSpec[] = [];
 
   // Plan: every spec is read once. Its Frontier decides the S1 branch, and the
@@ -143,7 +144,13 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
         openSubIssues: holdouts.length,
         reasons: countReasons(holdouts),
       });
-    } else if (step.kind !== "closeout-running" && step.kind !== "out-of-gate") {
+    } else if (step.kind === "closeout-consumed") {
+      // The closeout outcome was already acted on and its Job object is still in
+      // the retention window (ticket #49). Same shape as Defer and the ADR-0013
+      // wait — no Job, no label, no comment — but the next step is the object's
+      // `DELETED` event, after which a fresh closeout Job starts.
+      closeoutConsumed += 1;
+    } else if (isOutcomeStep(step)) {
       // S3 / S3N / S4 / S5: an outcome to act on. Executed after Claim, so the
       // documented pass order (3 claim → 4 advance → 5 closeout) holds.
       specSteps.push({ spec, step });
@@ -234,6 +241,7 @@ export async function runReconcilePass(deps: ReconcileDeps, _trigger: Trigger): 
     deferred,
     renewed,
     waiting,
+    closeoutConsumed,
     idle: idleReasons.length,
     idleReasons,
     volumeStats: stats,
@@ -249,6 +257,31 @@ function countReasons(holdouts: readonly FrontierHoldout[]): IdleSpec["reasons"]
 
 function specLoopDeps(deps: ReconcileDeps, now: () => Date): SpecLoopDeps {
   return { github: deps.github, k8s: deps.k8s, config: deps.config, now };
+}
+
+/**
+ * The four steps that are an outcome to act on, listed positively so a new
+ * `SpecStep` kind cannot silently become one: the switch below is the other
+ * half of the same decision, and both are exhaustive over the union.
+ */
+function isOutcomeStep(step: SpecStep): step is Extract<
+  SpecStep,
+  { kind: "open-pull-request" | "create-sub-issues" | "closeout-blocked" | "closeout-error" }
+> {
+  switch (step.kind) {
+    case "open-pull-request":
+    case "create-sub-issues":
+    case "closeout-blocked":
+    case "closeout-error":
+      return true;
+    case "advance":
+    case "idle":
+    case "start-closeout":
+    case "closeout-running":
+    case "closeout-consumed":
+    case "out-of-gate":
+      return false;
+  }
 }
 
 /** Candidate order is spec number ascending (determinism, spec #33 §2). */

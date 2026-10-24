@@ -30,6 +30,7 @@ Webhook URL: https://remote-agent.raenzo.com/webhook
 - `agent:in-progress`: App 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
 - `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 App 设置；**没有自动重试**，人改 label 是唯一重入方式
 - `agent:blocked`: agent 自述没做完、需要人做决定，由 App 按 run result 设置
+- `closeout-consumed`: **只在 spec 上**，App 加/摘。表示「这块收尾 Job 的 outcome 已经落地」，挡住同一批 `newTickets` 被再建一遍；不是 exit 标记，不进 `Loop`（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）
 
 ## implement整体流程
 
@@ -68,6 +69,10 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 - **blocked**：App 加 `agent:blocked` + `ready-for-human`、按 run result 的 `commentBody` 转写一条评论说明做了什么，**不关票**，然后停下（agent 不碰 GitHub，[ADR-0002](docs/adr/0002-app-is-sole-github-writer.md)）
 
 直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票只带 `ready-for-agent`（或 `ready-for-human`），但授权是沿 spec 继承来的，所以 **`ready-for-agent` 的新票下一轮就进 Frontier、就被 Claim**，不需要人在票上补 `agent:implement`；`ready-for-human` 的留在门外等人。票上的 label 走的是普通票那条链：`ready-for-agent`（App 建票时写）→ 继承授权 → `agent:in-progress`，`agent:implement` 全程不出现。
+
+S3N 的 outcome **只消费一次**：这块分支判完还留在门内，而它唯一的「已消费」载体原本是它建出来的票——票全部关闭之后载体就没了，旧收尾 Job 却还在 30 分钟保留窗里，同一批 `newTickets` 会被再建一遍。所以 S3N 在 spec 上加一个 `closeout-consumed` label（判定那一次写、起下一块收尾 Job 那一次清）：新票全关之后 spec 停在这儿等旧 Job 的 `DELETED`，然后起一块**新的**收尾 Job 重新判断还剩什么（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）。
+
+这条修法明写两个代价：**每轮之间多一个 ≤30 分钟的等删除间隙**（等不及就 `kubectl delete job <名>`，删除事件即唤醒）；以及**两个崩溃窗口仍然没有载体**——「标记写完、票还没建」丢整批，「票建好、还没链接」丢剩下的票外加一张孤儿票，都靠 TTL 后的新收尾 Job 补回。反过来的写序（先建票后标记）会把重复建票的洞留着。
 
 **代价：轮数无上限。** 收尾 Job 每轮都可能再报 `newTickets`，没人踩刹车；一张 spec 到底要跑多少轮才收尾，不再有人类检查点兜着。并发仍然有界（每轮受 [`MAX_JOBS_GLOBAL` / `MAX_JOBS_PER_REPO`](#job并发) 约束，不会同时起一堆），无上限的只是轮数。逃生口两个，都在人手上：在 issue 上摘 `agent:implement`（整条 spec 立刻退出门），或 `kubectl delete job <名>`（只影响当前这一块）。
 
@@ -155,7 +160,7 @@ Claim-gate(issue)  ⟺ Gate ∧ 确定性 Job 名下无未删的 Job 对象（k8
 |---|---|---|
 | —（Claim：Job 非终态，含 pod 重启自环） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | `[ready-for-agent, agent:implement]`（不变，spec 不写 `agent:in-progress`） |
 | `Complete` · `done` | `closed` · `[ready-for-agent, agent:implement]` | `[ready-for-human, agent:implement]` + 已开 PR |
-| `Complete` · `done` + `newTickets` | 同 `done`（但 ticket 的 `finish_ticket` 没有 `newTickets` 参数，所以这个形状只有 spec 收尾能产出） | `[ready-for-agent, agent:implement]`（**不开 PR**，新 sub-issue 已建；新票只带 `ready-for-agent`，但授权继承自 spec，所以下一轮就进 Frontier） |
+| `Complete` · `done` + `newTickets` | 同 `done`（但 ticket 的 `finish_ticket` 没有 `newTickets` 参数，所以这个形状只有 spec 收尾能产出） | `[ready-for-agent, agent:implement, closeout-consumed]`（**不开 PR**，新 sub-issue 已建；新票只带 `ready-for-agent`，但授权继承自 spec，所以下一轮就进 Frontier。第三个 label 是「这块 outcome 已消费」的记号，见 [ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)） |
 | `Complete` · `blocked` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | 同左 |
 | 任何 `error`（自述 / backoffLimit / DeadlineExceeded / no-result / no-job） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | 同左 |
 | 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent` | 同左 |
