@@ -395,6 +395,38 @@ describe("OctokitGitHub: configuration", () => {
   });
 });
 
+describe("OctokitGitHub: API version pinning (#50)", () => {
+  it("sends X-GitHub-Api-Version on every request, whichever client issued it", async () => {
+    const github = await adapter();
+
+    // The four request paths the adapter has: App-JWT (`app.octokit`), the
+    // token mint, the installation-scoped client, and `eachRepository`.
+    await github.listIssues();
+    await github.getIssue(REPO, 1);
+    await github.mintInstallationToken(REPO);
+
+    // Unversioned requests fall back to 2022-11-28, which GitHub marks as
+    // closing down (sunset 2028-03-10) and answers with a `Deprecation` header
+    // that @octokit/request turns into a warning on every single response.
+    expect(stub.requests.length).toBeGreaterThan(4);
+    for (const request of stub.requests) {
+      expect(`${request.method} ${request.path} ${request.headers["x-github-api-version"]}`).toBe(
+        `${request.method} ${request.path} 2026-03-10`,
+      );
+    }
+  });
+
+  it("keeps the header off the body and off the URL", async () => {
+    const github = await adapter();
+
+    await github.closeIssue(REPO, 1);
+
+    const write = stub.requests.at(-1);
+    expect(write?.json()).toEqual({ state: "closed" });
+    expect(write?.query.get("x-github-api-version")).toBeNull();
+  });
+});
+
 describe("OctokitGitHub: installation token mint", () => {
   it("requests contents: write scoped to the one target repo", async () => {
     const github = await adapter();
