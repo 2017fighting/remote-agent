@@ -29,6 +29,30 @@ import { mergeBase, revParseHead, runGit } from "./git.js";
 
 const context = BACKGROUND_CONTEXT;
 const THINKING_LEVEL = "high";
+/** Page size for storage scans; the same 256 pi-durable uses for its own. */
+const SCAN_PAGE_SIZE = 256;
+
+/**
+ * Generation retries, sized to outlast a gateway restart rather than a blip.
+ *
+ * pi-durable's default is 3 retries with a 2 s base delay — 2+4+8 = 14 s of
+ * backoff total. On 2026-10-24 and again 10-25 the one dependency every run needs
+ * (`omniroute`) was restarted by its own liveness probe and stayed down ~50 s;
+ * every retry landed inside the outage, the run settled `unanswered/model_error`,
+ * and ~20 minutes of agent work was thrown away on two tickets. Both error texts
+ * (`terminated`, `connection error`) are on pi-ai's retryable allowlist, so the
+ * classification was right — the budget was simply too small.
+ *
+ * 6 retries with a 5 s base delay gives 5+10+20+40+60+60 = 195 s, and
+ * `maxAgentDelayMs` caps a single wait at 60 s so a long outage does not turn
+ * into a silent 20-minute stall. A restart of the gateway now costs one attempt's
+ * latency instead of the run.
+ */
+export const GENERATION_RETRY_POLICY = {
+  maxRetries: 6,
+  baseDelayMs: 5_000,
+  maxAgentDelayMs: 60_000,
+} as const;
 
 /** Everything the run touches that a test wants to replace. */
 export interface RunDeps {
@@ -156,6 +180,10 @@ async function openHarness(
     {
       models: deps.models,
       registry: buildRegistry(deps, handle),
+      // Retries are a run-policy decision, not a per-request one (see
+      // GENERATION_RETRY_POLICY): the default budget cannot outlast the gateway
+      // restart that made this run necessary in the first place.
+      settings: { retry: GENERATION_RETRY_POLICY },
       env: () => new NodeExecutionEnv({ cwd: deps.paths.repo }),
       now: () => (deps.now?.() ?? new Date()).getTime(),
       onReport: (error) => deps.log(`runner-report error=${String(error)}`),
@@ -281,63 +309,69 @@ async function submitRun(deps: RunDeps, storage: Storage, root: Conversation, fi
       content: prompt,
       // Deduplication key: a process that reaches this line again after a crash finds
       // the same submission instead of starting a second run (ADR-0008).
-      requestId: await requestIdFor(deps, storage, root),
+      requestId: await submissionKeyFor(deps, storage, root),
     },
     context,
   );
 }
 
+/** A submission that can no longer change: the run it admitted has ended. */
+function isSettled(submission: SubmissionRecord): boolean {
+  return submission.status === "done" || submission.status === "unanswered";
+}
+
 /**
- * The dedup key for this attempt: the ticket's base key, or a numbered retry of
- * it once an earlier run has already settled `unanswered`.
+ * The Submission key for this attempt: the ticket's base key, or a numbered
+ * retry of it once an earlier run of this ticket has already settled.
  *
- * `admitSubmission()` returns any existing submission for a `requestId`
- * regardless of its status, and `resumeUnfinished()` only sees `queued`/`placed`
- * ones — so a run that died of a model error left a terminal submission that a
- * later pod could neither resume nor replace. Dedup handed that dead record back
- * and `waitForResult()` read its terminal outcome immediately: `run-failed` in
- * 1–2 ms, on every pod, for the life of the volume (#52).
+ * `admitSubmission()` returns any existing submission for a key regardless of its
+ * status, and `resumeUnfinished()` only sees `queued`/`placed` ones — so a run
+ * that died of a model error left a settled submission that a later pod could
+ * neither resume nor replace. Dedup handed that dead record back and
+ * `waitForResult()` read its terminal outcome immediately: `run-failed` in 1–2 ms,
+ * on every pod, for the life of the volume (#52).
  *
  * The base key stays in place for the crash-resume it was built for: a process
  * that dies before its run settles finds the same `queued`/`placed` submission
- * and resumes it, never starting a second. Only a *settled* failure moves the
- * key on, so a transient provider error costs one attempt instead of the ticket.
+ * and resumes it, never starting a second. Only a *settled* attempt moves the key
+ * on, so a transient provider error costs one attempt instead of the ticket.
  *
- * The attempt number counts this conversation's settled failures rather than
- * naming a single dead id: a retry can fail too, and keying off "the base key's
+ * The number counts this conversation's settled input submissions rather than
+ * naming one dead id: a retry can fail too, and keying off "the base key's
  * record" would then compute the same replacement twice and land back on a
- * settled submission. Counting makes each attempt's key fresh while staying
- * deterministic — two pods racing on the same volume count the same total and
- * dedup onto each other instead of submitting twice.
+ * settled submission. Counting stays deterministic, and the volume is
+ * `ReadWriteOncePod` with `parallelism: 1` (ADR-0008), so exactly one process
+ * reads it and the count cannot race.
  */
-async function requestIdFor(deps: RunDeps, storage: Storage, root: Conversation): Promise<string> {
+async function submissionKeyFor(deps: RunDeps, storage: Storage, root: Conversation): Promise<string> {
   const base = runRequestId(deps);
-  const prior = await storage.submissionByRequest(root.id, base, context);
-  // No run of this ticket ever settled a failure: either the first attempt, or a
-  // crash-resume that must find the submission it left behind.
-  if (prior !== undefined && prior.status !== "done" && prior.status !== "unanswered") return base;
-
-  const settled = await settledSubmissions(storage, root);
+  const settled = await settledInputSubmissions(storage, root);
   if (settled.length === 0) return base;
 
-  // `done` never reaches submitRun (the run is complete, or its result is already
-  // committed), so every record here is an `unanswered` failure of this ticket.
-  const latest = settled[settled.length - 1]!;
+  const attempt = settled.length + 1;
+  const latest = settled.at(-1)!;
   const next = `${base}#retry-${settled.length}`;
   deps.log(
-    `runner-retry attempt=${settled.length + 1} previous-submission=${latest.id} status=${latest.status} reason=${latest.reason}`,
+    `runner-retry attempt=${attempt} previous-submission=${latest.id} status=${latest.status} reason=${latest.reason ?? "none"}`,
   );
   return next;
 }
 
-/** This conversation's terminal submissions, oldest first. */
-async function settledSubmissions(storage: Storage, root: Conversation): Promise<readonly SubmissionRecord[]> {
+/**
+ * This conversation's settled **input** submissions, oldest first.
+ *
+ * Input-only on purpose: pi-durable admits compaction summaries as `type:
+ * "write"` on the same conversation and settles them `done`, so counting every
+ * settled record would inflate the attempt number and point the retry log at a
+ * compaction rather than at the failed run it is retrying.
+ */
+async function settledInputSubmissions(storage: Storage, root: Conversation): Promise<readonly SubmissionRecord[]> {
   const settled: SubmissionRecord[] = [];
   let cursor: Cursor | undefined;
   do {
-    const page = await storage.scanSubmissions({ conversationId: root.id, order: "ascending" }, 100, cursor, context);
+    const page = await storage.scanSubmissions({ conversationId: root.id, order: "ascending" }, SCAN_PAGE_SIZE, cursor, context);
     for (const submission of page.items) {
-      if (submission.status === "done" || submission.status === "unanswered") settled.push(submission);
+      if (submission.type === "input" && isSettled(submission)) settled.push(submission);
     }
     cursor = page.next ?? undefined;
   } while (cursor !== undefined);

@@ -6,8 +6,10 @@ import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { K8sJobManifest } from "../src/ports/K8sPort.js";
 import { JOB_IMAGE } from "../src/job-image.js";
 import {
+  AGENT_CONTAINER_NAME,
   JOB_ONLY_ENV_KEYS,
   PROMPTS_CONFIGMAP_NAME,
+  SEED_CONTAINER_NAME,
   SEED_ENTRYPOINT,
   TOKEN_SECRET_KEY,
   renderJobManifest,
@@ -262,13 +264,22 @@ describe("job template: volumes and mounts", () => {
     expect(tokenMount!.readOnly).toBe(true);
   });
 
-  /** The seed container reads the same file at git time, so it needs the same shape. */
+  /**
+   * Every container that reads the token needs the updatable mount — the seed
+   * reads it at clone time and the runner at push time, and the seed lives in
+   * `initContainers`, so iterating `containers` alone would check the runner
+   * twice and the seed never.
+   */
   it("gives the seed container the same updatable token mount", () => {
     const job = manifest();
-    for (const container of job.podTemplate.containers) {
+    const all = [...(job.podTemplate.initContainers ?? []), ...job.podTemplate.containers];
+    const names = all.map((container) => container.name);
+    expect(names).toEqual(expect.arrayContaining([SEED_CONTAINER_NAME, AGENT_CONTAINER_NAME]));
+    for (const container of all) {
       const tokenMount = container.volumeMounts?.find((mount) => mount.name === "token");
       expect(tokenMount, `${container.name} has no token mount`).toBeDefined();
       expect(tokenMount!.subPath, `${container.name} pins the token with subPath`).toBeUndefined();
+      expect(tokenMount!.mountPath, `${container.name} mounts the token elsewhere`).toBe(dirname(JOB_MOUNT_PATHS.token));
     }
   });
 

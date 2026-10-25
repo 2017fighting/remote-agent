@@ -128,10 +128,10 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
       initContainers: [renderSeedContainer(input)],
       containers: [renderAgentContainer(input)],
       // These three volumes are exactly the three surfaces the Job image reads:
-      // the Ticket PVC at /mnt/agent (repo/state/home), the token Secret at its
-      // file path, and the prompt ConfigMap at JOB_MOUNT_PATHS.prompts. Adding a
-      // volume here without a matching reader in the image (or the reverse) is
-      // the drift the kind e2e exists to catch.
+      // the Ticket PVC at /mnt/agent (repo/state/home), the token Secret mounted
+      // as the directory holding its one file, and the prompt ConfigMap at
+      // JOB_MOUNT_PATHS.prompts. Adding a volume here without a matching reader in
+      // the image (or the reverse) is the drift the kind e2e exists to catch.
       volumes: [
         { name: "ticket", persistentVolumeClaim: { claimName: name } },
         { name: "token", secret: { secretName: secretName(targetRepo, issueNumber) } },
@@ -188,9 +188,9 @@ function ticketVolumeMounts(): K8sVolumeMount[] {
 }
 
 /**
- * The per-Job token as a single file both containers read at git time — never as
- * env (ADR-0009: env is immutable across pod restarts and readable from
- * `kubectl get job -o yaml`).
+ * The per-Job token, as a directory holding the one file both containers read at
+ * git time — never as env (ADR-0009: env is immutable across pod restarts and
+ * readable from `kubectl get job -o yaml`).
  *
  * The whole Secret is mounted as a directory rather than the one key through
  * `subPath`. That is load-bearing, not stylistic: kubelet propagates a Secret

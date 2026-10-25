@@ -81,7 +81,7 @@ _Avoid_: worker, pod, task
 _Avoid_: wrapper, entrypoint, pi 命令
 
 **Submission key**:
-runner 提交这次 run 时用的去重键，形如 `remote-agent:<repo>#<n>:<role>`；崩溃后新 pod 靠它找回同一条未结算的 submission 续跑（ADR-0008）。一次 run 以 `unanswered` 结算之后（模型报错、被 abort），这个键会带一个递增的 `#retry-<n>` 后缀——**已结算的 submission 不可续跑**，同一个键再提交只会立刻拿回那个旧终态，所以一次瞬时故障就足以让这张 ticket 的卷永远跑不起来（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。
+runner 提交这次 run 时用的去重键，形如 `remote-agent:<repo>#<n>:<role>`；崩溃后新 pod 靠它找回同一条未结算的 submission 续跑（ADR-0008）。**已结算的 submission 不可续跑**——同一个键再提交只会立刻拿回那个旧终态——所以这张 conversation 已有结算过的输入 submission 时（模型报错、被 abort），新一次尝试的键会带一个递增的 `#retry-<n>` 后缀，真正开一次新 run。计数只算 `type: "input"` 的结算记录，compaction 那种 `write` 不算一次尝试（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。
 _Avoid_: requestId（那是 durable 的字段名）, 幂等键
 
 **Ticket PVC**:

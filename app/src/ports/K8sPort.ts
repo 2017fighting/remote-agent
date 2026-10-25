@@ -119,7 +119,14 @@ export interface K8sResourceRequirements {
 export interface K8sVolumeMount {
   name: string;
   mountPath: string;
-  /** Mount a single key of a Secret/ConfigMap as one file (used for the token, ADR-0009). */
+  /**
+   * Mount a single key of a Secret/ConfigMap as one file. **Currently unused, and
+   * it must not come back for the token**: a `subPath` mount never sees a Secret
+   * update (kubelet swaps the volume symlink, which `subPath` already resolved
+   * past), so it would freeze the App's in-place token renewal (#53). Kept on the
+   * port because it is a plain Kubernetes field and a future mount may need it;
+   * any use for a renewed credential is a bug.
+   */
   subPath?: string;
   readOnly?: boolean;
 }
