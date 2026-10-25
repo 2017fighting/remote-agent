@@ -4,6 +4,8 @@ import {
   JOB_ENV_KEYS,
   JOB_MOUNT_PATHS,
   LABELS,
+  RUNNER_EXIT,
+  SEED_EXIT,
   VOLUME_PATHS,
   jobName,
   secretName,
@@ -67,7 +69,16 @@ export const SEED_ENTRYPOINT = "/opt/remote-agent/seed.mjs";
 
 export const AGENT_CONTAINER_NAME = "runner";
 export const SEED_CONTAINER_NAME = "seed";
-export const SEED_FAILURE_EXIT_CODE = 78;
+/**
+ * The two fatal exit codes this template's `podFailurePolicy` keys on. Both come
+ * from `@remote-agent/shared` (`shared/src/exit-codes.ts`), which is the single
+ * place the Job image and this template can agree on a number neither workspace
+ * could otherwise import from the other. `FATAL_RUNNER_EXIT_CODE` is its own
+ * alias rather than `SEED_FAILURE_EXIT_CODE` again, so a future divergence is a
+ * one-line change here and not a silent one.
+ */
+export const SEED_FAILURE_EXIT_CODE: number = SEED_EXIT.fatal;
+export const FATAL_RUNNER_EXIT_CODE: number = RUNNER_EXIT.fatal;
 export const TERMINATION_GRACE_PERIOD_SECONDS = 120;
 export const POD_FS_GROUP = 1000;
 
@@ -116,6 +127,14 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
         {
           action: "FailJob",
           onExitCodes: { containerName: SEED_CONTAINER_NAME, operator: "In", values: [SEED_FAILURE_EXIT_CODE] },
+        },
+        // The runner's fatal class is the same shape: a rebase that conflicts with
+        // another ticket's work on the shared `agent/spec-<n>` branch. The next pod
+        // would replay the identical push, so one attempt is all it gets (#55).
+        // Every other runner failure keeps exit 1 and the normal backoff.
+        {
+          action: "FailJob",
+          onExitCodes: { containerName: AGENT_CONTAINER_NAME, operator: "In", values: [FATAL_RUNNER_EXIT_CODE] },
         },
       ],
     },

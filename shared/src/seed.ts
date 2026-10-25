@@ -1,6 +1,7 @@
 /**
- * Seed contract: the idempotence marker `state/seeded.json`, the five failure
- * classes, and the two exit codes that `podFailurePolicy` keys on (ADR-0009).
+ * Seed contract: the idempotence marker `state/seeded.json` and the five failure
+ * classes. The exit codes those classes map onto live in `exit-codes.ts`, beside
+ * the runner's, because the App spells both into the Job manifest.
  */
 export interface SeedMarkerV1 {
   v: 1;
@@ -36,15 +37,6 @@ export const SEED_FAILURE_KINDS: readonly SeedFailureKind[] = [
   "disk",
   "unknown",
 ];
-
-/**
- * Seed exit codes. Retryable failures take `backoffLimit`; fatal ones FailJob
- * immediately through the Job's `podFailurePolicy` and leave `state/seed-error.json`.
- */
-export const SEED_EXIT = {
-  retryable: 75,
-  fatal: 78,
-} as const;
 
 export interface SeedErrorV1 {
   v: 1;

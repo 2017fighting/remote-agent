@@ -143,8 +143,9 @@ flowchart TD
 
 | 规矩 | 含义 | 出处 |
 |---|---|---|
-| **Job 终态只有三种** | `Complete`（runner 自述 done/blocked 后已写 annotation）、`Failed(reason=BackoffLimitExceeded)`、`Failed(reason=DeadlineExceeded)`。三者之外没有「运行结束」。 | [ADR-0008](adr/0008-durable-runtime-base.md) |
+| **Job 终态只有四种** | `Complete`（runner 自述 done/blocked 后已写 annotation）、`Failed(reason=BackoffLimitExceeded)`、`Failed(reason=DeadlineExceeded)`、`Failed(reason=PodFailurePolicy)`。四者之外没有「运行结束」。 | [ADR-0008](adr/0008-durable-runtime-base.md) |
 | **pod 层失败不留痕** | `OOMKilled` / 驱逐 / `SIGTERM` / `CrashLoopBackOff` / init container 播种失败 → k8s 重启 pod → 同卷 `resume()`。GitHub 上**一个字都不变**。 | [ADR-0007](adr/0007-run-result-contract.md) / ADR-0008 |
+| **「重试不可能改变结果」一次就停** | seed 的 `auth` / `ref_missing` / `disk`（exit 78）与 runner 的 `FatalPushError`（rebase 冲突，或凭证/仓库读不到）走 `podFailurePolicy` → `FailJob`，**不消耗** `backoffLimit`；App 判 `error(unrecoverable)`，不是 `backoff-exhausted`。 | [ADR-0009](adr/0009-ticket-volume-seeding.md) / [#55](https://github.com/2017fighting/remote-agent/issues/55) |
 | **`error` 是人的入口** | App 从不重建 Job、从不自动重试；重试的粒度是「k8s 重启 pod」，不是「App 起新 Job」。 | ADR-0008 |
 
 App 判 Job 终态只读 `Job.status.conditions`（`Complete` / `Failed` + `reason`），**不读 pod 状态**——pod 的终态不说明任何事。「在跑」按[第 5 节](#5-并发slot-与-defer)的 Slot 口径判：Job 名下还有未到终态的 pod（`Terminating` 也算），它因此继续占着 Slot。
@@ -341,7 +342,8 @@ spec 的收尾 Job 同一套：自己的 Ticket PVC、同一个确定性命名�
 ```mermaid
 flowchart TD
     Agent["agent 调 Result tool<br/>finish_ticket / finish_spec / blocked"] --> Push["runner：先 push HEAD 到 agent/spec-N"]
-    Push -->|"push 失败"| Retry["非零退出 · 不写 annotation<br/>k8s 起新 pod，同卷 resume() 到这一点再 push"]
+    Push -->|"push 失败（可重试）"| Retry["exit 1 · 不写 annotation<br/>k8s 起新 pod，同卷 resume() 到这一点再 push"]
+    Push -->|"push 失败（重试不可能改变结果）"| Fatal["exit 78 · 不写 annotation<br/>podFailurePolicy FailJob，一次就停"]
     Push -->|"push 成功"| Ann["PATCH 自己 Job 的 annotation<br/>remote-agent/run-result"]
     Ann --> Job["Job 终态"]
     Job --> Readable{"App 读到可解析的 annotation 吗？"}
