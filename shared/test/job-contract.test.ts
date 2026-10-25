@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isSeedMarkerV1, SEED_EXIT, SEED_FAILURE_KINDS } from "../src/seed.js";
+import { isSeedMarkerV1, SEED_FAILURE_KINDS } from "../src/seed.js";
+import { RUNNER_EXIT, SEED_EXIT } from "../src/exit-codes.js";
 import { isWorkItemV1, parseWorkItem } from "../src/work-item.js";
 import { JOB_ENV_KEYS } from "../src/env-keys.js";
 import { JOB_MOUNT_PATHS, VOLUME_PATHS } from "../src/paths.js";
@@ -8,6 +9,19 @@ describe("seed contract", () => {
   it("pins the two exit codes podFailurePolicy keys on", () => {
     expect(SEED_EXIT.retryable).toBe(75);
     expect(SEED_EXIT.fatal).toBe(78);
+  });
+
+  /**
+   * The runner's fatal code is the seed's: `podFailurePolicy` matches per
+   * container, so one number for "a later pod cannot fix this" is easier to keep
+   * straight than two. Both are asserted against literals here, because these
+   * numbers are a contract with k8s, not an implementation detail.
+   */
+  it("pins the runner's exit codes, with the fatal one shared with the seed", () => {
+    expect(RUNNER_EXIT.retryable).toBe(1);
+    expect(RUNNER_EXIT.fatal).toBe(78);
+    expect(RUNNER_EXIT.fatal).toBe(SEED_EXIT.fatal);
+    expect(RUNNER_EXIT.retryable).not.toBe(RUNNER_EXIT.fatal);
   });
 
   it("pins the five failure classes", () => {

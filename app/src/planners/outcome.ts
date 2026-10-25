@@ -50,6 +50,7 @@ export type AppErrorReason =
   | "app-judged"
   | "backoff-exhausted"
   | "deadline-exceeded"
+  | "unrecoverable"
   | "no-result"
   | "no-job";
 
@@ -145,8 +146,7 @@ export function judgeJob(job: K8sJob | null): JobVerdict {
 
   if (!isComplete(job)) {
     // T6b / T6c: a Failed Job never wrote an annotation, so none is read here.
-    const reason = failedReason(job);
-    return errorVerdict(reason === "DeadlineExceeded" ? "deadline-exceeded" : "backoff-exhausted", null);
+    return errorVerdict(errorReasonFor(failedReason(job)), null);
   }
 
   // The one and only read of `remote-agent/run-result`.
@@ -167,9 +167,28 @@ function isComplete(job: K8sJob): boolean {
   return job.conditions.some((condition) => condition.type === "Complete" && condition.status === "True");
 }
 
-/** `Failed` condition reason (`BackoffLimitExceeded` / `DeadlineExceeded`), if any. */
+/** `Failed` condition reason, if any: `BackoffLimitExceeded` / `DeadlineExceeded` / `PodFailurePolicy`. */
 export function failedReason(job: K8sJob): string | undefined {
   return job.conditions.find((condition) => condition.type === "Failed" && condition.status === "True")?.reason;
+}
+
+/**
+ * What a `Failed` Job's reason means to the human reading the comment.
+ *
+ * `PodFailurePolicy` is k8s' reason for a pod that tripped a `podFailurePolicy`
+ * `FailJob` rule (`JobReasonPodFailurePolicy`, batch/v1). Those rules are exactly
+ * the failures no later pod can fix — the seed's fatal exit 78, and the runner's
+ * unreconcilable push (#55) — so they fail on the **first** pod. Reporting them as
+ * `backoff-exhausted` told the human a retry budget had run out on a Job that
+ * never retried, which is the opposite of what happened.
+ *
+ * An unknown reason stays `backoff-exhausted`: it is the ordinary k8s failure and
+ * the safer thing to say about one this code does not recognise.
+ */
+function errorReasonFor(reason: string | undefined): AppErrorReason {
+  if (reason === "DeadlineExceeded") return "deadline-exceeded";
+  if (reason === "PodFailurePolicy") return "unrecoverable";
+  return "backoff-exhausted";
 }
 
 export type ParsedRunResult =

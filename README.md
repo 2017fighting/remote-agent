@@ -59,7 +59,7 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 
 ## branch
 
-每个spec一个branch`agent/spec-<spec-issue-number>`，这个spec下的sub issue，都在这个branch下工作，每次工作前都从最新commit开始（新卷靠播种拿到分支的最新提交；同一张票重入时卷上还留着上一轮的工作副本与历史，播种 marker 匹配就跳过，见下面 `## k8s job的pvc哪来`）。**v1 每 spec 串行、单写者**（#4 / #13），所以「多个 job 并发、后 push 的解决冲突」不成立：远端已前进（非 FF）即按异常处理，runner 不自动 rebase / pull（[ADR-0009](docs/adr/0009-ticket-volume-seeding.md)）；并发共享同一分支的 rebase-and-retry 在地图的 Out of scope 里。
+每个spec一个branch`agent/spec-<spec-issue-number>`，这个spec下的sub issue，都在这个branch下工作，每次工作前都从最新commit开始（新卷靠播种拿到分支的最新提交；同一张票重入时卷上还留着上一轮的工作副本与历史，播种 marker 匹配就跳过，见下面 `## k8s job的pvc哪来`）。**v1 每 spec 串行、单写者**（#4 / #13）曾是「远端已前进（非 FF）即按异常处理、runner 不自动 rebase」的依据（[ADR-0009](docs/adr/0009-ticket-volume-seeding.md)）。**2026-10-25 修正**：分支是按 **spec** 命名的，所以同一 spec 的两张票确实会先后写同一个 ref，「串行」并不等于「只有一个写者」——`pi-web#3` 与 `#4` 就撞上了，后者被非快进拒绝后把同一个 push 重放到 `backoffLimit` 耗尽（[#55](https://github.com/2017fighting/remote-agent/issues/55)）。现在 push 前会 fetch 该分支并把本次提交 rebase 到它的 tip 上；rebase 冲突（或凭证/仓库读不到）是 `FatalPushError` → runner exit 78 → `podFailurePolicy` `FailJob`，**一次就停等人工**，不再重放。
 
 ## Spec implement循环
 

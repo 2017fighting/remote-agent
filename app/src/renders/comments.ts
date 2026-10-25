@@ -144,6 +144,12 @@ export function renderEvidenceComment(input: EvidenceCommentInput): string {
     reentryLine(input.jobName),
   );
 
+  // A failure that is a condition of the volume needs the volume discarded, or the
+  // next run resumes to the same state and fails the same way. `unrecoverable` is
+  // exactly that class: a push the runner could not reconcile, or a credential it
+  // could not read.
+  if (input.reason === "unrecoverable") lines.push("", volumeResetLine(input.pvcName));
+
   return lines.join("\n");
 }
 
@@ -153,6 +159,28 @@ function reentryLine(jobName: string): string {
     "Re-entry: remove the `agent:*` exit label and switch `ready-for-human` back to `ready-for-agent`.",
     "If the old Job is still inside its retention window, the new run starts within ~30 minutes at the latest;",
     `to skip the wait, \`kubectl delete job ${jobName}\` — the delete event wakes Claim immediately.`,
+  ].join(" ");
+}
+
+/**
+ * The extra step a re-entry needs when the failure was a condition of the
+ * **volume** rather than of one run.
+ *
+ * The App reuses the Ticket PVC on re-entry (ADR-0011), so a run that ended on
+ * something recorded in its durable storage — an unreconcilable push (#55), or a
+ * settled `unanswered` submission (#52) — resumes to the same state and fails
+ * identically. Re-labelling alone would burn another `backoffLimit` for nothing,
+ * so the human has to discard the volume and its credential as well.
+ *
+ * `blocked` is the agent's own verdict and never needs this: it is a report, not a
+ * stuck state.
+ */
+function volumeResetLine(pvcName: string): string {
+  return [
+    "**This failure lives on the volume, so re-labelling alone will fail the same way.**",
+    `Discard it first: \`kubectl delete pvc ${pvcName}\` and`,
+    `\`kubectl delete secret ${pvcName}-token\` (Claim mints a new credential only when the Secret is absent).`,
+    "The volume is the only copy of any commits that were never pushed, so check that before deleting.",
   ].join(" ");
 }
 

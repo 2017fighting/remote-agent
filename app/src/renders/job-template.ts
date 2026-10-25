@@ -4,6 +4,8 @@ import {
   JOB_ENV_KEYS,
   JOB_MOUNT_PATHS,
   LABELS,
+  RUNNER_EXIT,
+  SEED_EXIT,
   VOLUME_PATHS,
   jobName,
   secretName,
@@ -67,19 +69,16 @@ export const SEED_ENTRYPOINT = "/opt/remote-agent/seed.mjs";
 
 export const AGENT_CONTAINER_NAME = "runner";
 export const SEED_CONTAINER_NAME = "seed";
-export const SEED_FAILURE_EXIT_CODE = 78;
 /**
- * The runner's fatal exit code, the twin of `SEED_FAILURE_EXIT_CODE` above.
- *
- * It has to be spelled here as well as in the runner (`RUNNER_EXIT.fatal`,
- * `job/src/internal/runner.ts`) because the two live in different workspaces and
- * neither may import the other. The pairing is pinned by
- * `app/test/job-template.test.ts`, which asserts this rule exists for the runner
- * container, and by `job/test/push.test.ts`, which asserts the runner uses 78 for
- * a `FatalPushError` — a drift between the two would silently turn a one-attempt
- * failure back into a `backoffLimit` loop.
+ * The two fatal exit codes this template's `podFailurePolicy` keys on. Both come
+ * from `@remote-agent/shared` (`shared/src/exit-codes.ts`), which is the single
+ * place the Job image and this template can agree on a number neither workspace
+ * could otherwise import from the other. `FATAL_RUNNER_EXIT_CODE` is its own
+ * alias rather than `SEED_FAILURE_EXIT_CODE` again, so a future divergence is a
+ * one-line change here and not a silent one.
  */
-export const FATAL_RUNNER_EXIT_CODE = 78;
+export const SEED_FAILURE_EXIT_CODE: number = SEED_EXIT.fatal;
+export const FATAL_RUNNER_EXIT_CODE: number = RUNNER_EXIT.fatal;
 export const TERMINATION_GRACE_PERIOD_SECONDS = 120;
 export const POD_FS_GROUP = 1000;
 

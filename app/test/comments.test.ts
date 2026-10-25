@@ -144,6 +144,34 @@ describe("evidence template (T6b–e)", () => {
     expect(body).toContain("never pushed");
   });
 
+  /**
+   * An `unrecoverable` failure is a condition of the **volume**, not of one run:
+   * the App reuses the Ticket PVC on re-entry (ADR-0011), so the next run resumes
+   * to the same state and fails identically. Telling the human only to re-label
+   * would burn another `backoffLimit` for nothing (#55).
+   */
+  it("tells the human to discard the volume when the failure lives on it", () => {
+    const body = renderEvidenceComment({ ...evidence, reason: "unrecoverable" });
+    expect(body).toContain("unrecoverable");
+    expect(body).toContain(`kubectl delete pvc ${JOB}`);
+    expect(body).toContain(`kubectl delete secret ${JOB}-token`);
+    // The volume may be the only copy of unpushed commits, so the note must say so
+    // before the human deletes it.
+    expect(body).toContain("only copy");
+  });
+
+  /**
+   * The other reasons must NOT carry it: `backoff-exhausted` also covers genuinely
+   * transient failures, where deleting the volume would destroy work for nothing.
+   */
+  it("does not tell a merely-retried run to discard its volume", () => {
+    for (const reason of ["backoff-exhausted", "deadline-exceeded", "no-result"] as const) {
+      const body = renderEvidenceComment({ ...evidence, reason });
+      expect(body).not.toContain("kubectl delete pvc");
+      expect(body).not.toContain("kubectl delete secret");
+    }
+  });
+
   it("is English throughout", () => {
     const body = renderEvidenceComment(evidence);
     expect(body).not.toMatch(/[一-龥]/);

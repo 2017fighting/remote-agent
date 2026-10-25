@@ -1,8 +1,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SEED_EXIT } from "@remote-agent/shared";
-import { FatalPushError, RUNNER_EXIT, pushExitCodeFor, pushToSpecBranch } from "../src/internal/runner.js";
+import { RUNNER_EXIT, SEED_EXIT } from "@remote-agent/shared";
+import {
+  FatalPushError,
+  classifyPushFailure,
+  pushExitCodeFor,
+  pushToSpecBranch,
+} from "../src/internal/runner.js";
 import { cleanup, git, runnerFixture, type RunnerFixture } from "./support/runner-fixture.js";
 
 /**
@@ -125,5 +130,56 @@ describe("push: a conflict no later pod can fix", () => {
     expect(await git(["rev-parse", "HEAD"], fixture.worktree)).toBe(ours);
     // …and no conflict markers were left in the file the model wrote.
     expect(await readFile(join(fixture.worktree, "contested.txt"), "utf8")).toBe("ours\n");
+  });
+
+  /**
+   * `git rebase` fails before it begins when the worktree has unstaged changes —
+   * the common one is work the agent never committed. That is not a conflict
+   * between two tickets, so it must not borrow the fatal class or the message: a
+   * one-attempt FailJob on a dirty volume would be a new failure mode, not a fix.
+   */
+  it("treats a rebase that never started as retryable, not as a conflict", async () => {
+    fixture = await runnerFixture();
+    const other = await otherTicket(fixture);
+    await commit(other, "theirs.txt", "theirs\n");
+    await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], other);
+    await commit(fixture.worktree, "ours.txt", "ours\n");
+    // An unstaged change to a *tracked* file: what `git rebase` refuses to start
+    // over. (An untracked file would not stop it — rebase does not care about those.)
+    await writeFile(join(fixture.worktree, "ours.txt"), "edited after the commit\n");
+
+    const error = await pushToSpecBranch({ env: fixture.env, paths: fixture.paths, log: () => {} }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(FatalPushError);
+    expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.retryable);
+    // The message says what happened, not "conflicted".
+    expect((error as Error).message).toMatch(/did not start/);
+  });
+
+  /**
+   * A fetch failure is classified the way the seed classifies its own git calls:
+   * a credential or repo the runner cannot read is fatal and human-fixable
+   * (ADR-0009: GitHub answers 404 to a repo the credential cannot see), while a
+   * network failure is worth another pod. The `couldn't find remote ref` path is
+   * the only one that means "no branch yet".
+   */
+  it("classifies an unreadable remote as fatal and a network failure as retryable", () => {
+    const auth = classifyPushFailure(
+      "remote: Repository not found.\nfatal: repository 'https://github.com/other/private.git/' not found",
+      128,
+      ["fetch", "origin", "agent/spec-33"],
+    );
+    expect(auth).toBeInstanceOf(FatalPushError);
+    expect(pushExitCodeFor(auth)).toBe(RUNNER_EXIT.fatal);
+
+    for (const stderr of [
+      "fatal: unable to access 'https://github.com/2017fighting/pi-web.git/': Could not resolve host: github.com",
+      "fatal: unable to access '…': The requested URL returned error: 503",
+      "fatal: unable to access '…': Operation timed out",
+    ]) {
+      const transient = classifyPushFailure(stderr, 128, ["fetch", "origin", "agent/spec-33"]);
+      expect(transient).not.toBeInstanceOf(FatalPushError);
+      expect(pushExitCodeFor(transient)).toBe(RUNNER_EXIT.retryable);
+    }
   });
 });

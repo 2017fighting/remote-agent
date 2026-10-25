@@ -16,7 +16,7 @@ import {
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
-import { SEED_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
+import { RUNNER_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
 import type { JobPaths, RunnerEnv } from "./env.js";
 import { renderPrompt } from "./prompt.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
@@ -505,23 +505,32 @@ export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "lo
  * Fetch the spec branch and replay our commits on its tip, when it exists and is
  * not already an ancestor of `HEAD`. A no-op for the first ticket to push, for a
  * branch that does not exist yet, and for the ordinary "nothing moved" push.
+ *
+ * Failure classification mirrors the seed's (`classifyGitFailure`): a credential
+ * or repo the runner cannot see is `auth`, and a network failure is
+ * `repo_unreachable`. Only the second is worth another pod.
  */
 async function reconcileWithBranch(
   deps: Pick<RunDeps, "env" | "paths" | "log">,
   branch: string,
   options: GitOptions,
 ): Promise<void> {
-  // `--force` because a previous run may have left a rewritten local ref behind;
-  // the remote is the only authority for where the branch is.
+  // `+` because a fetch of an explicit refspec refuses to move the
+  // remote-tracking ref backwards, and a previous run may have left a rewritten
+  // one behind. The remote is the only authority for where the branch is; the
+  // local branch, which holds this run's commits, is a separate ref and is not
+  // touched by the fetch.
   const fetched = await runGit(["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], options);
   if (fetched.exitCode !== 0) {
-    // No such branch yet: the first ticket to push creates it. Anything else is a
-    // real fetch failure and must not be mistaken for "nothing to reconcile".
-    if (/couldn't find remote ref|not found/i.test(fetched.stderr)) {
+    // The one failure that means "nothing to reconcile": the branch does not exist
+    // yet, so this ticket creates it. The pattern is deliberately narrow — GitHub
+    // answers 404 to a repo the credential cannot see, and a loose `not found` test
+    // would read that as "first ticket" and push with a dead credential.
+    if (/couldn't find remote ref/i.test(fetched.stderr)) {
       deps.log(`push-branch-new branch=${branch}`);
       return;
     }
-    throw new Error(`git fetch of ${branch} failed (${fetched.exitCode}): ${fetched.stderr.trim()}`);
+    throw classifyPushFailure(fetched.stderr, fetched.exitCode, ["fetch", "origin", branch]);
   }
 
   const remoteRef = `refs/remotes/origin/${branch}`;
@@ -535,35 +544,65 @@ async function reconcileWithBranch(
 
   deps.log(`push-rebase onto=origin/${branch}`);
   const rebased = await runGit(["rebase", remoteRef], options);
-  if (rebased.exitCode !== 0) {
-    // Leave the worktree as the run left it: a half-applied rebase would make the
-    // next pod's work ambiguous. The commits survive on the branch either way.
-    await runGit(["rebase", "--abort"], options);
-    throw new FatalPushError(
-      `git rebase of ${branch} conflicted: ${rebased.stderr.trim() || rebased.stdout.trim()}`,
+  if (rebased.exitCode === 0) return;
+
+  // Only a rebase that actually started and stopped on a conflict is the case no
+  // later pod can fix. `git rebase` also fails before it begins — a worktree with
+  // unstaged changes is the common one — and that is not a conflict between two
+  // tickets, so it must not borrow the fatal class (or the message).
+  const inProgress = await rebaseInProgress(deps.paths.repo, options);
+  if (!inProgress) {
+    throw new Error(
+      `git rebase onto origin/${branch} did not start (${rebased.exitCode}): ${rebased.stderr.trim() || rebased.stdout.trim()}`,
     );
   }
+  // Leave the worktree as the run left it: a half-applied rebase would make the
+  // next pod's work ambiguous. The commits survive on the branch either way.
+  const aborted = await runGit(["rebase", "--abort"], options);
+  const abortNote = aborted.exitCode === 0 ? "" : ` (and \`rebase --abort\` failed: ${aborted.stderr.trim()})`;
+  throw new FatalPushError(
+    `git rebase onto origin/${branch} conflicted: ${rebased.stderr.trim() || rebased.stdout.trim()}${abortNote}`,
+  );
+}
+
+/** Whether git left a rebase half-applied: the only signal that separates a conflict from a rebase that never began. */
+async function rebaseInProgress(repo: string, options: GitOptions): Promise<boolean> {
+  const result = await runGit(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], options);
+  // REBASE_HEAD is written only once a rebase has a commit to stop on.
+  return result.exitCode === 0;
 }
 
 /**
- * A push failure no later pod can fix: the work is committed and the branch is
- * reachable, but the two tickets changed the same lines. One attempt, then a
- * human — never the whole `backoffLimit` (#55).
+ * A push that no later pod can fix, so it gets one attempt and then a human
+ * (`podFailurePolicy` → `FailJob`, #55). Two shapes qualify: the rebase stopped on
+ * a conflict between two tickets' work, and the credential or repository cannot be
+ * read at all — ADR-0009's "GitHub answers 404 to a repo the credential cannot
+ * see", which the seed treats as equally fatal.
  */
 export class FatalPushError extends Error {}
 
 /**
- * The runner's exit codes. `retryable` is the ordinary "k8s starts another pod
- * and it resumes" failure; `fatal` is the class a later pod cannot fix, which the
- * Job's `podFailurePolicy` turns into FailJob on the first attempt. The value
- * matches `SEED_EXIT.fatal` deliberately: the policy matches per container, and
- * one number for "this phase cannot retry its way out" is easier to keep straight
- * than two.
+ * Classify a failed git operation during the push. `repo_unreachable` is the one
+ * kind another pod may survive; everything else is a condition of the volume or
+ * the credential, which the next pod would meet identically.
  */
-export const RUNNER_EXIT = {
-  retryable: 1,
-  fatal: SEED_EXIT.fatal,
-} as const;
+export function classifyPushFailure(stderr: string, exitCode: number, args: readonly string[]): Error {
+  const text = stderr.toLowerCase();
+  const detail = `git ${args.join(" ")} exited ${exitCode}: ${stderr.trim()}`;
+  if (
+    text.includes("authentication failed") ||
+    text.includes("could not read username") ||
+    text.includes("terminal prompts disabled") ||
+    text.includes("permission denied") ||
+    text.includes("invalid username or password") ||
+    text.includes("invalid username or token") ||
+    text.includes("repository not found") ||
+    text.includes("does not appear to be a git repository")
+  ) {
+    return new FatalPushError(detail);
+  }
+  return new Error(detail);
+}
 
 /**
  * Which exit code a failed run ends the pod with. Only a `FatalPushError` is

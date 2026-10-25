@@ -28,13 +28,24 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Run git without a shell; never prompt on a terminal, never persist credentials. */
+/**
+ * Run git without a shell; never prompt on a terminal, never persist credentials.
+ *
+ * The config surface is closed on purpose: no system config, no global config, and
+ * only the `-c` flags this call passes. Everything the runner needs it states
+ * itself, so a `~/.gitconfig` in the image can never change what the runner does —
+ * `rebase.autoStash` is the one that bit us: with it on, a dirty worktree makes
+ * `git rebase` autostash and succeed, with it off the same rebase refuses to start
+ * (`error: cannot rebase: You have unstaged changes`). A run whose behaviour
+ * depends on the image's global config is not reproducible.
+ */
 export async function runGit(args: readonly string[], options: GitOptions): Promise<GitResult> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
     GIT_ASKPASS: "",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
   };
   if (options.identity) {
     env["GIT_AUTHOR_NAME"] = options.identity.name;

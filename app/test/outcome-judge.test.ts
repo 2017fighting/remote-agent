@@ -82,6 +82,23 @@ const cases: Case[] = [
     },
   },
   {
+    /**
+     * T6b2: a `podFailurePolicy` `FailJob` rule fired. k8s names this reason
+     * `PodFailurePolicy` (`JobReasonPodFailurePolicy`, batch/v1), and it means the
+     * pod failed on a class no later pod can fix — the seed's fatal exit 78, or the
+     * runner's unreconcilable push (#55). Reporting it as `backoff-exhausted` would
+     * tell the human a retry budget ran out on a Job that never retried.
+     */
+    name: "T6b2 unrecoverable: Failed reason=PodFailurePolicy, no annotation",
+    job: failed("PodFailurePolicy"),
+    expected: {
+      kind: "error",
+      reason: "unrecoverable",
+      addLabels: ["ready-for-human", "agent:error"],
+      removeLabels: ["ready-for-agent", "agent:in-progress"],
+    },
+  },
+  {
     name: "T6c deadline exceeded: Failed reason=DeadlineExceeded, no annotation",
     job: failed("DeadlineExceeded"),
     expected: {
@@ -139,12 +156,12 @@ describe("outcome judge: T4 / T5 / T6a–e", () => {
     });
   }
 
-  it("covers all four App-derived error reasons", () => {
+  it("covers every App-derived error reason", () => {
     const reasons = cases
       .map((c) => c.expected.reason)
       .filter((reason): reason is string => reason !== undefined);
     expect(new Set(reasons)).toEqual(
-      new Set(["app-judged", "backoff-exhausted", "deadline-exceeded", "no-result", "no-job"]),
+      new Set(["app-judged", "backoff-exhausted", "deadline-exceeded", "unrecoverable", "no-result", "no-job"]),
     );
   });
 });
