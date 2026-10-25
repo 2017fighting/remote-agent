@@ -68,6 +68,18 @@ export const SEED_ENTRYPOINT = "/opt/remote-agent/seed.mjs";
 export const AGENT_CONTAINER_NAME = "runner";
 export const SEED_CONTAINER_NAME = "seed";
 export const SEED_FAILURE_EXIT_CODE = 78;
+/**
+ * The runner's fatal exit code, the twin of `SEED_FAILURE_EXIT_CODE` above.
+ *
+ * It has to be spelled here as well as in the runner (`RUNNER_EXIT.fatal`,
+ * `job/src/internal/runner.ts`) because the two live in different workspaces and
+ * neither may import the other. The pairing is pinned by
+ * `app/test/job-template.test.ts`, which asserts this rule exists for the runner
+ * container, and by `job/test/push.test.ts`, which asserts the runner uses 78 for
+ * a `FatalPushError` — a drift between the two would silently turn a one-attempt
+ * failure back into a `backoffLimit` loop.
+ */
+export const FATAL_RUNNER_EXIT_CODE = 78;
 export const TERMINATION_GRACE_PERIOD_SECONDS = 120;
 export const POD_FS_GROUP = 1000;
 
@@ -116,6 +128,14 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
         {
           action: "FailJob",
           onExitCodes: { containerName: SEED_CONTAINER_NAME, operator: "In", values: [SEED_FAILURE_EXIT_CODE] },
+        },
+        // The runner's fatal class is the same shape: a rebase that conflicts with
+        // another ticket's work on the shared `agent/spec-<n>` branch. The next pod
+        // would replay the identical push, so one attempt is all it gets (#55).
+        // Every other runner failure keeps exit 1 and the normal backoff.
+        {
+          action: "FailJob",
+          onExitCodes: { containerName: AGENT_CONTAINER_NAME, operator: "In", values: [FATAL_RUNNER_EXIT_CODE] },
         },
       ],
     },

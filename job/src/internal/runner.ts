@@ -16,7 +16,7 @@ import {
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
-import { isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
+import { SEED_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
 import type { JobPaths, RunnerEnv } from "./env.js";
 import { renderPrompt } from "./prompt.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
@@ -25,7 +25,7 @@ import { resultExtension, resultToolsForRole, commitRunResult } from "./result-t
 import { codeReviewTool, type ReviewReports } from "./code-review.js";
 import { runReview } from "./reviewer.js";
 import { reviewerExtension } from "./reviewer-tools.js";
-import { mergeBase, revParseHead, runGit } from "./git.js";
+import { mergeBase, revParseHead, runGit, type GitOptions } from "./git.js";
 
 const context = BACKGROUND_CONTEXT;
 const THINKING_LEVEL = "high";
@@ -461,16 +461,115 @@ async function computeFixedPoint(deps: RunDeps, source: ReviewFixedPoint["source
   return revParseHead(deps.paths.repo);
 }
 
-/** Push `HEAD` to `agent/spec-<n>`, reading the token from the mounted file at push time (ADR-0009). */
+/**
+ * Push `HEAD` to `agent/spec-<n>`, reading the token from the mounted file at push
+ * time (ADR-0009).
+ *
+ * The branch is named per **spec**, not per ticket (`specBranch()`), so two
+ * tickets of one spec write the same ref. The runner has no lock between them and
+ * both run in the same namespace, so whoever commits second meets a branch that
+ * already moved — and a plain `git push` is rejected non-fast-forward. Nothing in
+ * the runner could reconcile that: the push was replayed identically by every
+ * following pod until `backoffLimit` was exhausted, on a volume only a human
+ * could repair (#55, and `pi-web#4` lost its run to exactly this).
+ *
+ * So the push fetches the branch and rebases our work onto its tip first. That is
+ * what a human would do, and it makes the shared branch safe to write from two
+ * places in sequence. A rebase that **conflicts** is the one case the runner
+ * cannot resolve — the two tickets changed the same lines with different intent —
+ * so it aborts the rebase (leaving the worktree exactly as the run left it) and
+ * throws a fatal error, which the entry turns into an exit code `podFailurePolicy`
+ * maps to FailJob. Deterministic means one attempt, not five.
+ */
 export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "log">): Promise<void> {
   const branch = specBranch(deps.env.specNumber);
-  const result = await runGit(["push", "origin", `HEAD:refs/heads/${branch}`], {
+  const options = {
     cwd: deps.paths.repo,
     tokenPath: deps.paths.token,
     identity: { name: "remote-agent[bot]", email: deps.env.commitEmail },
-  });
+  };
+  await reconcileWithBranch(deps, branch, options);
+
+  const result = await runGit(["push", "origin", `HEAD:refs/heads/${branch}`], options);
   if (result.exitCode !== 0) {
+    // A non-fast-forward here means the branch moved again between the fetch and
+    // the push. It is not retryable in this process, but it is also not the
+    // deterministic conflict `reconcileWithBranch` classifies — the next pod
+    // fetches the newer tip and reconciles, so this stays a retryable failure.
     throw new Error(`git push to ${branch} failed (${result.exitCode}): ${result.stderr.trim()}`);
   }
   deps.log(`pushed branch=${branch}`);
+}
+
+/**
+ * Fetch the spec branch and replay our commits on its tip, when it exists and is
+ * not already an ancestor of `HEAD`. A no-op for the first ticket to push, for a
+ * branch that does not exist yet, and for the ordinary "nothing moved" push.
+ */
+async function reconcileWithBranch(
+  deps: Pick<RunDeps, "env" | "paths" | "log">,
+  branch: string,
+  options: GitOptions,
+): Promise<void> {
+  // `--force` because a previous run may have left a rewritten local ref behind;
+  // the remote is the only authority for where the branch is.
+  const fetched = await runGit(["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], options);
+  if (fetched.exitCode !== 0) {
+    // No such branch yet: the first ticket to push creates it. Anything else is a
+    // real fetch failure and must not be mistaken for "nothing to reconcile".
+    if (/couldn't find remote ref|not found/i.test(fetched.stderr)) {
+      deps.log(`push-branch-new branch=${branch}`);
+      return;
+    }
+    throw new Error(`git fetch of ${branch} failed (${fetched.exitCode}): ${fetched.stderr.trim()}`);
+  }
+
+  const remoteRef = `refs/remotes/origin/${branch}`;
+  const ancestor = await runGit(["merge-base", "--is-ancestor", remoteRef, "HEAD"], options);
+  // 0 = already an ancestor, 1 = it is not (a rebase is needed), anything else = the
+  // ref is unreadable, which is not a decision this function may guess at.
+  if (ancestor.exitCode === 0) return;
+  if (ancestor.exitCode !== 1) {
+    throw new Error(`git merge-base against ${remoteRef} failed (${ancestor.exitCode}): ${ancestor.stderr.trim()}`);
+  }
+
+  deps.log(`push-rebase onto=origin/${branch}`);
+  const rebased = await runGit(["rebase", remoteRef], options);
+  if (rebased.exitCode !== 0) {
+    // Leave the worktree as the run left it: a half-applied rebase would make the
+    // next pod's work ambiguous. The commits survive on the branch either way.
+    await runGit(["rebase", "--abort"], options);
+    throw new FatalPushError(
+      `git rebase of ${branch} conflicted: ${rebased.stderr.trim() || rebased.stdout.trim()}`,
+    );
+  }
+}
+
+/**
+ * A push failure no later pod can fix: the work is committed and the branch is
+ * reachable, but the two tickets changed the same lines. One attempt, then a
+ * human — never the whole `backoffLimit` (#55).
+ */
+export class FatalPushError extends Error {}
+
+/**
+ * The runner's exit codes. `retryable` is the ordinary "k8s starts another pod
+ * and it resumes" failure; `fatal` is the class a later pod cannot fix, which the
+ * Job's `podFailurePolicy` turns into FailJob on the first attempt. The value
+ * matches `SEED_EXIT.fatal` deliberately: the policy matches per container, and
+ * one number for "this phase cannot retry its way out" is easier to keep straight
+ * than two.
+ */
+export const RUNNER_EXIT = {
+  retryable: 1,
+  fatal: SEED_EXIT.fatal,
+} as const;
+
+/**
+ * Which exit code a failed run ends the pod with. Only a `FatalPushError` is
+ * terminal; everything else (a fetch that timed out, a push that raced another
+ * pod, a model error) is what `backoffLimit` is for.
+ */
+export function pushExitCodeFor(error: unknown): typeof RUNNER_EXIT.retryable | typeof RUNNER_EXIT.fatal {
+  return error instanceof FatalPushError ? RUNNER_EXIT.fatal : RUNNER_EXIT.retryable;
 }

@@ -11,7 +11,7 @@ import {
 } from "./internal/env.js";
 import { createOmniRouteModels } from "./internal/provider.js";
 import { inClusterAnnotationWriter } from "./internal/annotation.js";
-import { pushToSpecBranch, run, type RunOutcome } from "./internal/runner.js";
+import { pushExitCodeFor, pushToSpecBranch, run, type RunOutcome } from "./internal/runner.js";
 
 export interface RunnerEntryOptions {
   env?: Record<string, string | undefined>;
@@ -55,10 +55,12 @@ if (invokedDirectly) {
     (outcome) => process.exit(outcome.exitCode),
     (error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
-      console.error(`run-failed${error instanceof StartupError ? " startup=true" : ""} detail=${detail}`);
+      const fatal = pushExitCodeFor(error) !== 1;
+      console.error(`run-failed${error instanceof StartupError ? " startup=true" : ""}${fatal ? " fatal=true" : ""} detail=${detail}`);
       // Nonzero and no annotation: k8s starts a new pod, which resumes to the end
-      // and pushes again (ADR-0009).
-      process.exit(1);
+      // and pushes again (ADR-0009). Exit 78 is the exception — a failure no later
+      // pod can fix, which `podFailurePolicy` turns into FailJob at once (#55).
+      process.exit(pushExitCodeFor(error));
     },
   );
 }

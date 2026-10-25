@@ -362,8 +362,30 @@ describe("job template: podFailurePolicy, restart policy, scheduling", () => {
           action: "FailJob",
           onExitCodes: { containerName: "seed", operator: "In", values: [78] },
         },
+        {
+          action: "FailJob",
+          onExitCodes: { containerName: "runner", operator: "In", values: [78] },
+        },
       ],
     });
+  });
+
+  /**
+   * The runner's fatal class is the conflicting rebase in `pushToSpecBranch()`:
+   * two tickets of one spec write the same branch, and when they change the same
+   * lines no later pod can fix it. Without this rule the runner would replay the
+   * identical push until `backoffLimit` ran out, which is what `pi-web#4` did —
+   * five pods, five rejections, one wasted run (#55).
+   */
+  it("fails the Job immediately when the runner reports a failure no later pod can fix", () => {
+    const rules = manifest().podFailurePolicy?.rules ?? [];
+    const runnerRule = rules.find((rule) => rule.onExitCodes?.containerName === AGENT_CONTAINER_NAME);
+    expect(runnerRule).toBeDefined();
+    expect(runnerRule!.action).toBe("FailJob");
+    expect(runnerRule!.onExitCodes?.values).toEqual([78]);
+    // Every rule matches one container's exit code, so the seed's rule can never
+    // swallow the runner's and the other way round.
+    for (const rule of rules) expect(rule.onExitCodes?.operator).toBe("In");
   });
 
   it("uses restartPolicy Never (required by podFailurePolicy) and parallelism 1", () => {
