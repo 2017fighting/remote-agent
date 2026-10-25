@@ -121,17 +121,20 @@ init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOT
 | 卷 | 类型 | 挂载 | 谁挂 |
 | --- | --- | --- | --- |
 | `ticket` | PVC，名字 = Job 名 | `/mnt/agent`（`repo/` · `state/` · `home/`） | seed + runner |
-| `token` | Secret，`agent-<repo-slug>-<issue#>-token` 的 `token` 键 | `/mnt/credentials/token`（`subPath`，只读） | seed + runner |
+| `token` | Secret，`agent-<repo-slug>-<issue#>-token`（整个 Secret） | `/mnt/credentials`（只读；`token` 键落在 `/mnt/credentials/token`） | seed + runner |
 | `prompts` | ConfigMap `remote-agent-prompts` | `/mnt/prompts`（只读） | **只 runner** |
 
 这三块就是镜像会读的全部输入面：少一个 volume，Job 会在第一个模型调用之前就死（seed 拿不到 token 或 runner 读不到 prompt 文件）。**任何一边加路径而不加另一边的断言，都会静默变成「Job 永远起不来」**——这正是 kind e2e 存在的理由（[e2e/README.md](../e2e/README.md)）。
 
-一个已知的重复拼写：token 的挂载路径在 `app/src/renders/job-template.ts` 里是 `TOKEN_MOUNT_PATH`，在 `shared/src/paths.ts` 里是 `JOB_MOUNT_PATHS.token`（Job 镜像读后者）。两者今天都是 `/mnt/credentials/token`，但**没有任何测试把它们绑在一起**（prompts 那条路径是 import 同一个常量、有测试钉住的）。改任一处时两处都要改。
+`token` 那条挂的是**整个 Secret 目录**，不是用 `subPath` 挑出 `token` 键——两者最终路径一样，行为却不同。kubelet 传播 Secret 更新靠原子切换卷的符号链接，`subPath` 在容器启动时就把链接解析掉了，之后永远读启动那一刻的文件。App 的续期是原地 patch Secret（`token-renewal.ts`），所以 `subPath` 会把 token 冻在 pod 出生那一刻：任何跑过 60 分钟（installation token 寿命）的 run 都会拿一枚死凭证去 push（[#53](https://github.com/2017fighting/remote-agent/issues/53)）。挂目录则让 ADR-0009 / ADR-0014 那句「挂载晚 1–1.5 分钟生效」重新成立，30 分钟续期阈值也才有意义。
 
-### 两个「不要改回去」的细节
+一个已知的重复拼写：token 的挂载路径在 `app/src/renders/job-template.ts` 里是 `TOKEN_MOUNT_PATH`，在 `shared/src/paths.ts` 里是 `JOB_MOUNT_PATHS.token`（Job 镜像读后者）。`app/test/job-template.test.ts` 用 `mountPath === dirname(JOB_MOUNT_PATHS.token)` 把两者钉在一起，但那只盖住「目录 + 键名 = 路径」这层关系；改任一处仍要两处一起看。
+
+### 三个「不要改回去」的细节
 
 1. **`JOB_NAME` 必须是字面值，不能写成 `fieldRef: metadata.name`。** 容器里的 downward API 把 `metadata.name` 解成 **pod 名**，而 Job 的 pod 是 `<job-name>-<random5>`；runner 的 `deriveJobName()` 优先读 `JOB_NAME`，于是每次 run-result PATCH 都会打向一个不存在的 Job（404），App 随即判 `error(no-result)`——**每一个结果都丢**。`JOB_NAMESPACE` 用 `fieldRef` 是安全的。
 2. **init 容器必须显式写 `command`。** 两个容器共用一个镜像，镜像的 `CMD` 是 runner；不写 `command` 时 seed 会去跑 runner，在 runner-only 的 env 上启动失败，pod 一路 loop 到 `BackoffLimitExceeded`。
+3. **token 卷必须整目录挂，不能加回 `subPath`。** `subPath` 挂载收不到 Secret 更新，而 token 是 App 原地 patch 续期的：加回 `subPath` 等于把 token 冻在 pod 出生那一刻，所有超过 60 分钟的 run 都会在 push 时认证失败（[#53](https://github.com/2017fighting/remote-agent/issues/53)）。失败形态是 `git push` 报 `Invalid username or token`，看起来像凭证问题而不像挂载问题。
 
 ### 其余代码常量（不走 env）
 

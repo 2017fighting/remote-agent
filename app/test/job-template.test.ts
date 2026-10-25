@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
 import { JOB_ENV_KEYS, JOB_MOUNT_PATHS, jobName, secretName, VOLUME_PATHS } from "@remote-agent/shared";
 import { runReconcilePass } from "../src/reconcile.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import type { K8sJobManifest } from "../src/ports/K8sPort.js";
 import { JOB_IMAGE } from "../src/job-image.js";
 import {
+  AGENT_CONTAINER_NAME,
   JOB_ONLY_ENV_KEYS,
   PROMPTS_CONFIGMAP_NAME,
-  TOKEN_MOUNT_PATH,
+  SEED_CONTAINER_NAME,
   SEED_ENTRYPOINT,
   TOKEN_SECRET_KEY,
   renderJobManifest,
@@ -239,14 +241,46 @@ describe("job template: volumes and mounts", () => {
     expect(VOLUME_PATHS.home.startsWith(`${VOLUME_PATHS.mountRoot}/`)).toBe(true);
   });
 
-  it("mounts the token Secret as a read-only file path, never as env", () => {
-    const mounts = manifest().podTemplate.containers[0]!.volumeMounts!;
-    expect(mounts).toContainEqual({
-      name: "token",
-      mountPath: TOKEN_MOUNT_PATH,
-      subPath: TOKEN_SECRET_KEY,
-      readOnly: true,
-    });
+  /**
+   * A `subPath` mount pins the file the Secret held at container start: kubelet
+   * propagates a Secret update by swapping the *volume* symlink, which `subPath`
+   * has already resolved past. The App renews by patching the Secret in place
+   * (`token-renewal.ts`), so a `subPath` mount freezes the token for the pod's
+   * whole life and every run longer than the 60-minute installation-token
+   * lifetime fails its push (#53). Mounting the whole Secret as a directory keeps
+   * `mountPath + "/" + TOKEN_SECRET_KEY` equal to `JOB_MOUNT_PATHS.token`, so the
+   * runner's path is unchanged and a renewal actually lands.
+   */
+  it("mounts the token Secret as a directory, so a renewal can reach the pod", () => {
+    const job = manifest();
+    const tokenMount = job.podTemplate.containers[0]!.volumeMounts!.find((mount) => mount.name === "token");
+    expect(tokenMount).toBeDefined();
+    // No subPath: the one field that makes a mount immune to Secret updates.
+    expect(tokenMount!.subPath).toBeUndefined();
+    // The whole Secret is mounted at the directory holding the file, and the
+    // runner still reads exactly the path it was written for.
+    expect(tokenMount!.mountPath).toBe(dirname(JOB_MOUNT_PATHS.token));
+    expect(join(tokenMount!.mountPath, TOKEN_SECRET_KEY)).toBe(JOB_MOUNT_PATHS.token);
+    expect(tokenMount!.readOnly).toBe(true);
+  });
+
+  /**
+   * Every container that reads the token needs the updatable mount — the seed
+   * reads it at clone time and the runner at push time, and the seed lives in
+   * `initContainers`, so iterating `containers` alone would check the runner
+   * twice and the seed never.
+   */
+  it("gives the seed container the same updatable token mount", () => {
+    const job = manifest();
+    const all = [...(job.podTemplate.initContainers ?? []), ...job.podTemplate.containers];
+    const names = all.map((container) => container.name);
+    expect(names).toEqual(expect.arrayContaining([SEED_CONTAINER_NAME, AGENT_CONTAINER_NAME]));
+    for (const container of all) {
+      const tokenMount = container.volumeMounts?.find((mount) => mount.name === "token");
+      expect(tokenMount, `${container.name} has no token mount`).toBeDefined();
+      expect(tokenMount!.subPath, `${container.name} pins the token with subPath`).toBeUndefined();
+      expect(tokenMount!.mountPath, `${container.name} mounts the token elsewhere`).toBe(dirname(JOB_MOUNT_PATHS.token));
+    }
   });
 
   /**

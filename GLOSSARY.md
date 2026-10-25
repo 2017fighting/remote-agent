@@ -80,6 +80,10 @@ _Avoid_: worker, pod, task
 镜像里烧的 TypeScript 程序：打开 Ticket PVC 上的 durable storage、注入 prompt 与模型、跑一个 agent role、在真正终态时把 run result 写进自己 Job 的 annotation。它是 Job 里唯一的 k8s writer。
 _Avoid_: wrapper, entrypoint, pi 命令
 
+**Submission key**:
+runner 提交这次 run 时用的去重键，形如 `remote-agent:<repo>#<n>:<role>`；崩溃后新 pod 靠它找回同一条未结算的 submission 续跑（ADR-0008）。**已结算的 submission 不可续跑**——同一个键再提交只会立刻拿回那个旧终态——所以这张 conversation 已有结算过的输入 submission 时（模型报错、被 abort），新一次尝试的键会带一个递增的 `#retry-<n>` 后缀，真正开一次新 run。计数只算 `type: "input"` 的结算记录，compaction 那种 `write` 不算一次尝试（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。
+_Avoid_: requestId（那是 durable 的字段名）, 幂等键
+
 **Ticket PVC**:
 一个 ticket 一块、`ReadWriteOncePod`、`truenas-iscsi-delete`（薄置备、`reclaimPolicy: Delete`）的 PVC，比 Job 活得久，里面同时装这个 ticket 的工作副本（`repo/`）、durable 的 session storage（`state/`）与 HOME 的缓存（`home/`）；它的生死由 App 按 Ticket PVC expiry 决定（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）。
 _Avoid_: 工作卷, workspace, job pvc

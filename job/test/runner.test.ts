@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { run } from "../src/internal/runner.js";
+import { GENERATION_RETRY_POLICY, run } from "../src/internal/runner.js";
 import { ReviewFixedPointDoc } from "../src/internal/fixed-point-doc.js";
 import { readRunnerEnv, StartupError, type RunnerEnv } from "../src/internal/env.js";
 import { runRunner } from "../src/runner.js";
@@ -61,6 +61,43 @@ async function readDoc(f: RunnerFixture, token: typeof ReviewFixedPointDoc): Pro
   try {
     const root = await harness.root(BACKGROUND_CONTEXT);
     return await harness.snapshot(token, root.id, BACKGROUND_CONTEXT);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/** Every requestId the volume's session storage carries, in creation order. */
+async function submissionRequestIds(f: RunnerFixture): Promise<(string | undefined)[]> {
+  const storage = await openNodeSqliteStorage(f.paths.sessionDatabase);
+  try {
+    const page = await storage.scanSubmissions({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
+    return page.items.map((submission) => submission.requestId);
+  } finally {
+    await storage.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/**
+ * Leave a settled `write` submission on the volume, the shape a compaction
+ * summary produces. The harness admits it as a passive entry write, so it never
+ * starts a run and must not count as an attempt.
+ */
+async function appendSettledWrite(f: RunnerFixture): Promise<void> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(f.paths.sessionDatabase),
+    { models: f.models, registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    // A write is a passive entry append: no model, no run, so a bare agent suffices.
+    const root = await harness.root(BACKGROUND_CONTEXT, {
+      agent: { model: { provider: "omniroute", modelId: "default" }, thinkingLevel: "high" },
+    });
+    const submission = await root.submit(
+      { type: "write", requestId: "compaction:seeded", entry: { kind: "pi.compaction" } },
+      BACKGROUND_CONTEXT,
+    );
+    expect((await submission.wait(BACKGROUND_CONTEXT)).status).toBe("done");
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
   }
@@ -265,6 +302,9 @@ describe("runner: one run to a Result tool", () => {
     // Exactly one submitted prompt: the second process resumed the same conversation.
     const prompt = await submittedPrompt(fixture);
     expect(prompt).toContain("You are an unattended agent");
+    // And it did not mint a retry key: a crash before the run settles is not a
+    // settled failure, so the base dedup key is still what resumes it (ADR-0008).
+    expect(await submissionRequestIds(fixture)).toEqual([`remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`]);
   });
 
   it("keeps the ticket role's fixed point at the pre-work HEAD across a resume", async () => {
@@ -310,6 +350,130 @@ describe("runner: one run to a Result tool", () => {
     const committed = await readDoc(fixture, ReviewFixedPointDoc);
     expect(committed).toMatchObject({ fixedPoint: await git(["rev-parse", "main"], fixture.worktree), source: "merge-base" });
     expect(recorded.events).toEqual([]);
+  });
+
+  /**
+   * A run that settles `unanswered` (a model error, an abort) leaves a terminal
+   * submission behind. The dedup key is fixed per ticket, so a later pod used to
+   * find that dead submission and get its terminal outcome back instantly —
+   * `run-failed` in 1–2 ms, forever, on a volume re-entry could not repair (#52).
+   * A new pod must start a NEW run instead, so a transient provider error is not
+   * a permanent per-ticket failure.
+   */
+  it("starts a new run when the previous one settled unanswered, instead of replaying its failure", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    // A NON-retryable provider error (a quota rejection, not a transient one):
+    // it settles the run `unanswered` with `model_error` on the first attempt.
+    fixture.script([fauxAssistantMessage([], { stopReason: "error", errorMessage: "insufficient_quota" })]);
+
+    await expect(run(depsFor(fixture, first))).rejects.toThrow(/without a Result tool/);
+    expect(first.events).toEqual([]);
+
+    // The next pod is a real retry: it asks the model again and can still finish.
+    const second: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("finished on the retry")]);
+    const outcome = await run(depsFor(fixture, second));
+    expect(outcome.resumed).toBe(false);
+    expect(second.events).toEqual(["push", "annotate"]);
+    expect(second.results[0]).toMatchObject({ outcome: "done", summary: "finished on the retry" });
+  });
+
+  /**
+   * A retry that also dies of a model error must leave the next pod a way
+   * forward too. The number counts settled attempts, so each failure moves the
+   * key on by one instead of landing back on a settled one.
+   */
+  it("keeps moving the dedup key when a retry fails as well", { timeout: 30_000 }, async () => {
+    fixture = await runnerFixture();
+    const error = () => fauxAssistantMessage([], { stopReason: "error", errorMessage: "insufficient_quota" });
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      fixture.script([error()]);
+      await expect(run(depsFor(fixture, { events: [], results: [] }))).rejects.toThrow(/without a Result tool/);
+    }
+
+    fixture.script([finishTicketCall("fourth time lucky")]);
+    const outcome = await run(depsFor(fixture, { events: [], results: [] }));
+    expect(outcome.resumed).toBe(false);
+    expect(outcome.result).toMatchObject({ outcome: "done", summary: "fourth time lucky" });
+
+    // One base key plus one retry key per dead run.
+    const ids = await submissionRequestIds(fixture);
+    expect(ids[0]).toBe(`remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`);
+    expect(ids).toHaveLength(4);
+    expect(new Set(ids).size).toBe(4);
+    for (const id of ids.slice(1)) expect(id).toMatch(/#retry-\d+$/);
+  });
+
+  /**
+   * The attempt number counts settled **input** submissions only. pi-durable
+   * admits compaction summaries as `type: "write"` on the same conversation and
+   * settles them `done`; counting those would skip attempt numbers and point the
+   * retry log at a compaction instead of at the run it is retrying.
+   */
+  it("ignores settled writes when numbering the retry key", { timeout: 30_000 }, async () => {
+    fixture = await runnerFixture();
+    // A settled `write` submission, the shape a compaction summary leaves behind.
+    await appendSettledWrite(fixture);
+
+    fixture.script([fauxAssistantMessage([], { stopReason: "error", errorMessage: "insufficient_quota" })]);
+    await expect(run(depsFor(fixture, { events: [], results: [] }))).rejects.toThrow(/without a Result tool/);
+
+    fixture.script([finishTicketCall()]);
+    await run(depsFor(fixture, { events: [], results: [] }));
+
+    const ids = await submissionRequestIds(fixture);
+    // The write never becomes a run, so the first run still uses the base key and
+    // the retry is #retry-1 — not #retry-2.
+    expect(ids).toEqual([
+      "compaction:seeded",
+      `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`,
+      `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket#retry-1`,
+    ]);
+  });
+
+  /**
+   * The retry budget must outlast a gateway restart, not a blip. pi-durable's
+   * default is 3 retries / 14 s of backoff, which a ~50 s `omniroute` restart
+   * outlasts every time — that is what killed the 2026-10-24 and 10-25 runs. The
+   * total is asserted, not just the field values, because it is the total that
+   * has to clear the outage.
+   */
+  /**
+   * A *retryable* provider error must not settle the run: the harness retries it
+   * within the run, which is the whole point of the enlarged budget. The first
+   * error is followed by a good response, and the run finishes — no new pod, no
+   * new submission, no `unanswered`.
+   */
+  it("rides out a retryable provider error inside the same run", { timeout: 30_000 }, async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: "Connection error." }),
+      finishTicketCall("survived the blip"),
+    ]);
+
+    const outcome = await run(depsFor(fixture, recorded));
+    expect(outcome.resumed).toBe(false);
+    expect(outcome.result).toMatchObject({ outcome: "done", summary: "survived the blip" });
+    // One submission for the whole run: the retry happened inside it.
+    expect(await submissionRequestIds(fixture)).toEqual([
+      `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`,
+    ]);
+  });
+
+  it("budgets generation retries against a gateway restart, not a blip", () => {
+    const { maxRetries, baseDelayMs, maxAgentDelayMs } = GENERATION_RETRY_POLICY;
+    const totalMs = Array.from({ length: maxRetries }, (_, i) => Math.min(baseDelayMs * 2 ** i, maxAgentDelayMs)).reduce(
+      (sum, delay) => sum + delay,
+      0,
+    );
+    // A liveness-driven restart took ~50 s on both incidents; 3x that is the bar.
+    expect(totalMs).toBeGreaterThan(150_000);
+    // A single wait stays short enough that a long outage is still visible as
+    // attempts rather than as one silent stall.
+    expect(maxAgentDelayMs).toBeLessThanOrEqual(60_000);
   });
 
   it("refuses a thinking level other than the pinned high", async () => {
