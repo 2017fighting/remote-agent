@@ -22,6 +22,31 @@ import type {
  * the kind e2e point the App at a stub (spec #33 §0).
  */
 
+/**
+ * The GitHub REST API version every request pins (#50).
+ *
+ * Unversioned requests default to `2022-11-28`, which GitHub marks as closing
+ * down (sunset 2028-03-10), so `@octokit/request` warns on *every* response
+ * carrying a `Deprecation` header. Once that version retires, unversioned
+ * requests silently fall through to the next supported version instead — pinning
+ * turns both into a reviewed one-line change.
+ *
+ * Sent through the plugin below rather than `Octokit.defaults({ headers })`:
+ * `@octokit/core` 7 reads only `userAgent` / `baseUrl` / `previews` / `timeZone`
+ * from its constructor options and drops `headers` on the floor, so a header set
+ * that way never reaches the wire. The plugin's `hook.before("request")` does,
+ * for all four request paths: `app.octokit` (JWT), the per-installation clients,
+ * the token mint, and `eachRepository`.
+ */
+const GITHUB_API_VERSION = "2026-03-10";
+
+/** Adds the pinned API version to every request this class issues. */
+function pinApiVersion(octokit: { hook: OctokitClient["hook"] }): void {
+  octokit.hook.before("request", (options) => {
+    options.headers["x-github-api-version"] = GITHUB_API_VERSION;
+  });
+}
+
 /** Everything this adapter needs from the environment; read once in `main.ts`. */
 export interface OctokitGitHubConfig {
   /** GITHUB_APP_ID. */
@@ -74,7 +99,7 @@ export class OctokitGitHub implements GitHubPort {
     if (config.privateKey === "") {
       throw new Error("GITHUB_APP_PRIVATE_KEY is required for the GitHub App adapter");
     }
-    const base = Octokit.defaults({ baseUrl: config.apiBaseUrl.replace(/\/+$/, "") });
+    const base = Octokit.defaults({ baseUrl: config.apiBaseUrl.replace(/\/+$/, "") }).plugin(pinApiVersion);
     this.app = new App({
       appId: config.appId,
       privateKey: config.privateKey.replace(/\\n/g, "\n"),
