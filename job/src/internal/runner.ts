@@ -6,9 +6,11 @@ import {
   createRegistry,
   type Conversation,
   type AgentChange,
+  type Cursor,
   type Harness as HarnessHandle,
   type Storage,
   type Submission,
+  type SubmissionRecord,
   type ToolExecutionApi,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -114,7 +116,7 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
     let submission = pending;
     if (decided === undefined && submission === undefined) {
       const fixedPoint = await readOrComputeFixedPoint(deps, harness, root);
-      submission = await submitRun(deps, root, fixedPoint);
+      submission = await submitRun(deps, storage, root, fixedPoint);
       deps.crashAfterSubmit?.();
     }
     deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} resumed=${resumed}`);
@@ -266,7 +268,7 @@ async function resumeUnfinished(deps: RunDeps, harness: HarnessHandle): Promise<
   return pending ? await harness.submission(pending.id, context) : undefined;
 }
 
-async function submitRun(deps: RunDeps, root: Conversation, fixedPoint: ReviewFixedPoint): Promise<Submission> {
+async function submitRun(deps: RunDeps, storage: Storage, root: Conversation, fixedPoint: ReviewFixedPoint): Promise<Submission> {
   const prompt = await renderPrompt({
     role: deps.env.role,
     workItem: deps.env.workItem,
@@ -279,10 +281,67 @@ async function submitRun(deps: RunDeps, root: Conversation, fixedPoint: ReviewFi
       content: prompt,
       // Deduplication key: a process that reaches this line again after a crash finds
       // the same submission instead of starting a second run (ADR-0008).
-      requestId: runRequestId(deps),
+      requestId: await requestIdFor(deps, storage, root),
     },
     context,
   );
+}
+
+/**
+ * The dedup key for this attempt: the ticket's base key, or a numbered retry of
+ * it once an earlier run has already settled `unanswered`.
+ *
+ * `admitSubmission()` returns any existing submission for a `requestId`
+ * regardless of its status, and `resumeUnfinished()` only sees `queued`/`placed`
+ * ones — so a run that died of a model error left a terminal submission that a
+ * later pod could neither resume nor replace. Dedup handed that dead record back
+ * and `waitForResult()` read its terminal outcome immediately: `run-failed` in
+ * 1–2 ms, on every pod, for the life of the volume (#52).
+ *
+ * The base key stays in place for the crash-resume it was built for: a process
+ * that dies before its run settles finds the same `queued`/`placed` submission
+ * and resumes it, never starting a second. Only a *settled* failure moves the
+ * key on, so a transient provider error costs one attempt instead of the ticket.
+ *
+ * The attempt number counts this conversation's settled failures rather than
+ * naming a single dead id: a retry can fail too, and keying off "the base key's
+ * record" would then compute the same replacement twice and land back on a
+ * settled submission. Counting makes each attempt's key fresh while staying
+ * deterministic — two pods racing on the same volume count the same total and
+ * dedup onto each other instead of submitting twice.
+ */
+async function requestIdFor(deps: RunDeps, storage: Storage, root: Conversation): Promise<string> {
+  const base = runRequestId(deps);
+  const prior = await storage.submissionByRequest(root.id, base, context);
+  // No run of this ticket ever settled a failure: either the first attempt, or a
+  // crash-resume that must find the submission it left behind.
+  if (prior !== undefined && prior.status !== "done" && prior.status !== "unanswered") return base;
+
+  const settled = await settledSubmissions(storage, root);
+  if (settled.length === 0) return base;
+
+  // `done` never reaches submitRun (the run is complete, or its result is already
+  // committed), so every record here is an `unanswered` failure of this ticket.
+  const latest = settled[settled.length - 1]!;
+  const next = `${base}#retry-${settled.length}`;
+  deps.log(
+    `runner-retry attempt=${settled.length + 1} previous-submission=${latest.id} status=${latest.status} reason=${latest.reason}`,
+  );
+  return next;
+}
+
+/** This conversation's terminal submissions, oldest first. */
+async function settledSubmissions(storage: Storage, root: Conversation): Promise<readonly SubmissionRecord[]> {
+  const settled: SubmissionRecord[] = [];
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanSubmissions({ conversationId: root.id, order: "ascending" }, 100, cursor, context);
+    for (const submission of page.items) {
+      if (submission.status === "done" || submission.status === "unanswered") settled.push(submission);
+    }
+    cursor = page.next ?? undefined;
+  } while (cursor !== undefined);
+  return settled;
 }
 
 /** The payload a Result tool already committed in an earlier pod, if any. */

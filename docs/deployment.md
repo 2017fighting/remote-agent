@@ -121,10 +121,12 @@ init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOT
 | 卷 | 类型 | 挂载 | 谁挂 |
 | --- | --- | --- | --- |
 | `ticket` | PVC，名字 = Job 名 | `/mnt/agent`（`repo/` · `state/` · `home/`） | seed + runner |
-| `token` | Secret，`agent-<repo-slug>-<issue#>-token` 的 `token` 键 | `/mnt/credentials/token`（`subPath`，只读） | seed + runner |
+| `token` | Secret，`agent-<repo-slug>-<issue#>-token`（整个 Secret） | `/mnt/credentials`（只读；`token` 键落在 `/mnt/credentials/token`） | seed + runner |
 | `prompts` | ConfigMap `remote-agent-prompts` | `/mnt/prompts`（只读） | **只 runner** |
 
 这三块就是镜像会读的全部输入面：少一个 volume，Job 会在第一个模型调用之前就死（seed 拿不到 token 或 runner 读不到 prompt 文件）。**任何一边加路径而不加另一边的断言，都会静默变成「Job 永远起不来」**——这正是 kind e2e 存在的理由（[e2e/README.md](../e2e/README.md)）。
+
+`token` 那条挂的是**整个 Secret 目录**，不是用 `subPath` 挑出 `token` 键——两者最终路径一样，行为却不同。kubelet 传播 Secret 更新靠原子切换卷的符号链接，`subPath` 在容器启动时就把链接解析掉了，之后永远读启动那一刻的文件。App 的续期是原地 patch Secret（`token-renewal.ts`），所以 `subPath` 会把 token 冻在 pod 出生那一刻：任何跑过 60 分钟（installation token 寿命）的 run 都会拿一枚死凭证去 push（[#53](https://github.com/2017fighting/remote-agent/issues/53)）。挂目录则让 ADR-0009 / ADR-0014 那句「挂载晚 1–1.5 分钟生效」重新成立，30 分钟续期阈值也才有意义。
 
 一个已知的重复拼写：token 的挂载路径在 `app/src/renders/job-template.ts` 里是 `TOKEN_MOUNT_PATH`，在 `shared/src/paths.ts` 里是 `JOB_MOUNT_PATHS.token`（Job 镜像读后者）。两者今天都是 `/mnt/credentials/token`，但**没有任何测试把它们绑在一起**（prompts 那条路径是 import 同一个常量、有测试钉住的）。改任一处时两处都要改。
 

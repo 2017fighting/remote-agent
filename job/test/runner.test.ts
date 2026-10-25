@@ -66,6 +66,17 @@ async function readDoc(f: RunnerFixture, token: typeof ReviewFixedPointDoc): Pro
   }
 }
 
+/** Every requestId the volume's session storage carries, in creation order. */
+async function submissionRequestIds(f: RunnerFixture): Promise<(string | undefined)[]> {
+  const storage = await openNodeSqliteStorage(f.paths.sessionDatabase);
+  try {
+    const page = await storage.scanSubmissions({}, 100, undefined, BACKGROUND_CONTEXT);
+    return page.items.map((submission) => submission.requestId);
+  } finally {
+    await storage.close(BACKGROUND_CONTEXT);
+  }
+}
+
 /** The rendered prompt is the user entry of the run — the only prompt the model ever sees. */
 async function submittedPrompt(f: RunnerFixture): Promise<string> {
   const harness = await Harness.open(
@@ -265,6 +276,9 @@ describe("runner: one run to a Result tool", () => {
     // Exactly one submitted prompt: the second process resumed the same conversation.
     const prompt = await submittedPrompt(fixture);
     expect(prompt).toContain("You are an unattended agent");
+    // And it did not mint a retry key: a crash before the run settles is not a
+    // settled failure, so the base dedup key is still what resumes it (ADR-0008).
+    expect(await submissionRequestIds(fixture)).toEqual([`remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`]);
   });
 
   it("keeps the ticket role's fixed point at the pre-work HEAD across a resume", async () => {
@@ -310,6 +324,59 @@ describe("runner: one run to a Result tool", () => {
     const committed = await readDoc(fixture, ReviewFixedPointDoc);
     expect(committed).toMatchObject({ fixedPoint: await git(["rev-parse", "main"], fixture.worktree), source: "merge-base" });
     expect(recorded.events).toEqual([]);
+  });
+
+  /**
+   * A run that settles `unanswered` (a model error, an abort) leaves a terminal
+   * submission behind. The dedup key is fixed per ticket, so a later pod used to
+   * find that dead submission and get its terminal outcome back instantly —
+   * `run-failed` in 1–2 ms, forever, on a volume re-entry could not repair (#52).
+   * A new pod must start a NEW run instead, so a transient provider error is not
+   * a permanent per-ticket failure.
+   */
+  it("starts a new run when the previous one settled unanswered, instead of replaying its failure", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    // A provider error: the run settles `unanswered` with `model_error`.
+    fixture.script([fauxAssistantMessage([], { stopReason: "error", errorMessage: "Connection error." })]);
+
+    await expect(run(depsFor(fixture, first))).rejects.toThrow(/without a Result tool/);
+    expect(first.events).toEqual([]);
+
+    // The next pod is a real retry: it asks the model again and can still finish.
+    const second: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("finished on the retry")]);
+    const outcome = await run(depsFor(fixture, second));
+    expect(outcome.resumed).toBe(false);
+    expect(second.events).toEqual(["push", "annotate"]);
+    expect(second.results[0]).toMatchObject({ outcome: "done", summary: "finished on the retry" });
+  });
+
+  /**
+   * A retry that also dies of a model error must leave the next pod a way
+   * forward too — the suffix is derived from the dead record's own id, so each
+   * failure moves the key on by one instead of landing back on a settled one.
+   */
+  it("keeps moving the dedup key when a retry fails as well", { timeout: 30_000 }, async () => {
+    fixture = await runnerFixture();
+    const error = () => fauxAssistantMessage([], { stopReason: "error", errorMessage: "Connection error." });
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      fixture.script([error()]);
+      await expect(run(depsFor(fixture, { events: [], results: [] }))).rejects.toThrow(/without a Result tool/);
+    }
+
+    fixture.script([finishTicketCall("fourth time lucky")]);
+    const outcome = await run(depsFor(fixture, { events: [], results: [] }));
+    expect(outcome.resumed).toBe(false);
+    expect(outcome.result).toMatchObject({ outcome: "done", summary: "fourth time lucky" });
+
+    // One base key plus one retry key per dead run, all distinct.
+    const ids = await submissionRequestIds(fixture);
+    expect(ids).toHaveLength(4);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids[0]).toBe(`remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`);
+    for (const id of ids.slice(1)) expect(id).toMatch(/#retry-\d+$/);
   });
 
   it("refuses a thinking level other than the pinned high", async () => {

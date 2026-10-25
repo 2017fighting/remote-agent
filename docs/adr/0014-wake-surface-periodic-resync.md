@@ -5,7 +5,7 @@
 ## 决定
 
 - **唤醒源三种，落点只有一个**：webhook（`issues` / `issue_comment` / `sub_issues` / `issue_dependencies` / `installation_repositories`）、Job watch（含 `DELETED`）、resync tick；进程启动时另外做一次 list + 一轮 pass（`trigger=startup`）。三者都只是「去跑一轮」的信号，落点永远是同一个 `reconcile()`——不在 pass 里分叉出「只续期」的快路径，也不为 tick 写第二份重算逻辑。
-- **间隔 5 分钟**，落点与 [ADR-0010](0010-job-resource-budget.md) / [ADR-0012](0012-job-deletion-ttl.md) 同构：App 代码常量 + `RESYNC_INTERVAL_SECONDS` env（ADR-0012 之后 env 键面 5 个）。推导只有一个硬约束：间隔必须小于 ADR-0009 的 30 分钟续期阈值，5 分钟给出 23.5 分钟余量（扣掉 kubelet 挂载同步的 1–1.5 分钟）；顺带把「漏事件后静默等多久」也压到 5 分钟以内。
+- **间隔 5 分钟**，落点与 [ADR-0010](0010-job-resource-budget.md) / [ADR-0012](0012-job-deletion-ttl.md) 同构：App 代码常量 + `RESYNC_INTERVAL_SECONDS` env（ADR-0012 之后 env 键面 5 个）。推导只有一个硬约束：间隔必须小于 ADR-0009 的 30 分钟续期阈值，5 分钟给出 23.5 分钟余量（扣掉 kubelet 挂载同步的 1–1.5 分钟，这一条只在整卷挂载时成立，见 ADR-0009 的 `subPath` 脚注）；顺带把「漏事件后静默等多久」也压到 5 分钟以内。
 - **不做「只在有活 Job 时 tick」的门**：漏接 `DELETED` 的形状恰恰是「票在门内等、而名下已无活 Job」，一个以活 Job 为前提的 tick 会把这一轮掐掉，等于只修了动机的一半。
 - **不做「按 token 到期时刻 arm 一个定时器」**：那是最省调用的形态，但它只覆盖续期，漏事件那半仍要另配周期兜底——两个机制做一件事，且「arm 到最近一个到期点」需要在内存里维护一份到期表并处理它的失效。
 - **单飞 + 深度 1 队列**：同一时刻只有一轮 pass 在跑；期间到达的任何触发合并成**恰好一次**后续 pass。它是 coalesce，不是缓冲区：队列深度恒为 1、不保存触发内容、重启即空（重启后的 list 天然补读）。理由不是洁癖——幂等吸不住并发：「两张票同时过门、各建一张 Job」不是同一动作的重复，而是超配额；label 的两处写也不是同一次 edit 的重放。

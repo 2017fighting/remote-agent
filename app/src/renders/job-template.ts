@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import {
   ANNOTATIONS,
   JOB_ENV_KEYS,
@@ -190,9 +191,20 @@ function ticketVolumeMounts(): K8sVolumeMount[] {
  * The per-Job token as a single file both containers read at git time — never as
  * env (ADR-0009: env is immutable across pod restarts and readable from
  * `kubectl get job -o yaml`).
+ *
+ * The whole Secret is mounted as a directory rather than the one key through
+ * `subPath`. That is load-bearing, not stylistic: kubelet propagates a Secret
+ * update by atomically swapping the *volume* symlink, and a `subPath` mount has
+ * already resolved past that symlink, so it keeps the file the Secret held at
+ * container start. The App renews the installation token by patching the Secret
+ * in place (`token-renewal.ts`), which made `subPath` freeze the token for the
+ * pod's whole life: every run longer than the 60-minute token lifetime pushed
+ * with a dead credential (#53). Mounting the directory keeps the runner's path
+ * identical — `mountPath` is the directory that holds `TOKEN_SECRET_KEY` — so
+ * renewal lands and `JOB_MOUNT_PATHS.token` still names the file.
  */
 function tokenVolumeMount(): K8sVolumeMount {
-  return { name: "token", mountPath: TOKEN_MOUNT_PATH, subPath: TOKEN_SECRET_KEY, readOnly: true };
+  return { name: "token", mountPath: dirname(TOKEN_MOUNT_PATH), readOnly: true };
 }
 
 /**
