@@ -38,6 +38,8 @@ import { mergeBase, revParseHead, runGit, type GitOptions } from "./git.js";
 
 const context = BACKGROUND_CONTEXT;
 const THINKING_LEVEL = "high";
+/** The bot identity every commit this system makes carries (ADR-0009). */
+const COMMIT_IDENTITY = { name: "remote-agent[bot]" } as const;
 /** Page size for storage scans; the same 256 pi-durable uses for its own. */
 const SCAN_PAGE_SIZE = 256;
 
@@ -202,10 +204,24 @@ async function openHarness(
       // GENERATION_RETRY_POLICY): the default budget cannot outlast the gateway
       // restart that made this run necessary in the first place.
       settings: { retry: GENERATION_RETRY_POLICY },
-      // The agent resolves a stopped rebase with `git rebase --continue` (#58), and
-      // git opens the commit message in an editor there. `true` accepts the message
-      // git already has, so the turn can never hang on a prompt nobody can answer.
-      env: () => new NodeExecutionEnv({ cwd: deps.paths.repo, shellEnv: { GIT_EDITOR: "true" } }),
+      // What the agent's own git needs to finish a handed-over rebase (#58):
+      //
+      // - `GIT_EDITOR=true` accepts the commit message git already has, so
+      //   `git rebase --continue` cannot stop on an editor nobody can answer;
+      // - the committer identity, because `--continue` *creates* a commit and the
+      //   runner's shell has no `~/.gitconfig` (`HOME` is the volume's `home/`). The
+      //   runner's own git calls pass `-c` identity flags; the agent's shell cannot,
+      //   so it gets the same bot identity through the environment. Without it the
+      //   rebase stays stopped and the run ends fatal on a resolution that worked.
+      env: () =>
+        new NodeExecutionEnv({
+          cwd: deps.paths.repo,
+          shellEnv: {
+            GIT_EDITOR: "true",
+            GIT_COMMITTER_NAME: COMMIT_IDENTITY.name,
+            GIT_COMMITTER_EMAIL: deps.env.commitEmail,
+          },
+        }),
       now: () => (deps.now?.() ?? new Date()).getTime(),
       onReport: (error) => deps.log(`runner-report error=${String(error)}`),
     },
@@ -705,7 +721,7 @@ export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "lo
   const options = {
     cwd: deps.paths.repo,
     tokenPath: deps.paths.token,
-    identity: { name: "remote-agent[bot]", email: deps.env.commitEmail },
+    identity: { name: COMMIT_IDENTITY.name, email: deps.env.commitEmail },
   };
 
   // One push attempt, as a sequence: fetch + rebase, then push. The whole sequence

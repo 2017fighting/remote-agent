@@ -603,6 +603,44 @@ async function seedHandoffState(f: RunnerFixture, files: string[]): Promise<void
  * the one that can pick — so the runner hands it the stopped rebase (#58).
  */
 describe("runner: a conflicted push is resolved by the agent", () => {
+  /**
+   * The agent's shell has no `~/.gitconfig` (`HOME` is the volume's `home/`), and
+   * `git rebase --continue` creates a commit: without the committer identity in the
+   * environment it stops with "Author identity unknown", leaving the rebase stopped
+   * and the run fatal on a resolution that worked. The image's own git config is
+   * closed on purpose (`runGit()`), so this identity is the only one it can use.
+   */
+  it("hands the agent a committer identity, so the continued rebase can commit", async () => {
+    fixture = await runnerFixture();
+    await contestedFile(fixture);
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([
+      finishTicketCall("first pass"),
+      // Deliberately does NOT pass -c user.name/-c user.email: it relies on the
+      // environment the runner gives the agent's shell.
+      fauxAssistantMessage(
+        [
+          fauxToolCall(
+            "bash",
+            { command: "printf 'both\\n' > contested.txt && git add contested.txt && git rebase --continue" },
+            { id: "call-resolve" },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      finishTicketCall("resolved the conflict"),
+    ]);
+
+    const outcome = await run(depsFor(fixture, recorded, { push: realPush(fixture, recorded) }));
+
+    expect(outcome.exitCode).toBe(0);
+    expect(recorded.results[0]).toMatchObject({ summary: "resolved the conflict" });
+    // The commit the resolution produced carries the bot identity the runner uses.
+    expect(await git(["log", "-1", "--format=%cn <%ce>", "agent/spec-33"], fixture.remote)).toBe(
+      `remote-agent[bot] <${fixture.env.commitEmail}>`,
+    );
+  });
+
   it("hands the stopped rebase over, then pushes and annotates the resolution", async () => {
     fixture = await runnerFixture();
     await contestedFile(fixture);
