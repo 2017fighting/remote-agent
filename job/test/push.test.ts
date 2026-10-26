@@ -1,12 +1,17 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RUNNER_EXIT, SEED_EXIT } from "@remote-agent/shared";
 import {
   FatalPushError,
+  StaleCredentialError,
   classifyPushFailure,
   pushExitCodeFor,
   pushToSpecBranch,
+  STALE_CREDENTIAL_POLL_MS,
+  withStaleCredentialRecovery,
 } from "../src/internal/runner.js";
 import { cleanup, git, runnerFixture, type RunnerFixture } from "./support/runner-fixture.js";
 
@@ -163,14 +168,31 @@ describe("push: a conflict no later pod can fix", () => {
    * network failure is worth another pod. The `couldn't find remote ref` path is
    * the only one that means "no branch yet".
    */
-  it("classifies an unreadable remote as fatal and a network failure as retryable", () => {
-    const auth = classifyPushFailure(
+  /**
+   * The three outcomes, and the reason the auth one is not fatal (#57): GitHub
+   * answers 404 to a repo a credential cannot see, so "token is stale" and "repo is
+   * gone" are the same words on the wire. Reading that as a stale credential costs
+   * one pod; reading it as fatal costs the run.
+   */
+  it("separates a stale credential from a conflict from a transient failure", () => {
+    const stale = [
+      "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/2017fighting/pi-web.git/'",
       "remote: Repository not found.\nfatal: repository 'https://github.com/other/private.git/' not found",
+    ];
+    for (const stderr of stale) {
+      const error = classifyPushFailure(stderr, 128, ["fetch", "origin", "agent/spec-33"]);
+      expect(error).toBeInstanceOf(StaleCredentialError);
+      // Retryable: a new pod re-reads the file, which is how the incident's runs landed.
+      expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.retryable);
+    }
+
+    const fatal = classifyPushFailure(
+      "fatal: '/mnt/agent/repo' does not appear to be a git repository",
       128,
       ["fetch", "origin", "agent/spec-33"],
     );
-    expect(auth).toBeInstanceOf(FatalPushError);
-    expect(pushExitCodeFor(auth)).toBe(RUNNER_EXIT.fatal);
+    expect(fatal).toBeInstanceOf(FatalPushError);
+    expect(pushExitCodeFor(fatal)).toBe(RUNNER_EXIT.fatal);
 
     for (const stderr of [
       "fatal: unable to access 'https://github.com/2017fighting/pi-web.git/': Could not resolve host: github.com",
@@ -179,7 +201,188 @@ describe("push: a conflict no later pod can fix", () => {
     ]) {
       const transient = classifyPushFailure(stderr, 128, ["fetch", "origin", "agent/spec-33"]);
       expect(transient).not.toBeInstanceOf(FatalPushError);
+      expect(transient).not.toBeInstanceOf(StaleCredentialError);
       expect(pushExitCodeFor(transient)).toBe(RUNNER_EXIT.retryable);
+    }
+  });
+});
+
+/**
+ * A credential the pod's mounted file no longer matches (#57).
+ *
+ * GitHub answers `Invalid username or token` / `Authentication failed` when the
+ * token it was handed is stale. That is a condition of the *file*, not of the
+ * volume: the App has already patched the replacement into the Secret, and a new
+ * pod re-reads the file at startup — which is how two runs in the 2026-10-25
+ * incident landed their work. Treating it as unrecoverable is the regression these
+ * tests exist to prevent.
+ *
+ * Local git cannot produce a 401, so the recovery unit takes the sequence it runs
+ * as a callback and these tests drive that callback directly. The wait itself is
+ * real: a real file, a real bound, a real poll.
+ */
+describe("push: a stale mounted credential", () => {
+  /** A throwaway token file the tests can change under the recovery unit. */
+  async function tokenFile(f: RunnerFixture, content: string): Promise<string> {
+    const path = join(f.root, "mounted-token");
+    await writeFile(path, content);
+    return path;
+  }
+
+  /**
+   * Change the token file after a delay, from a timer that deliberately races the
+   * recovery. Failure is swallowed on purpose: the test's temp directory may be
+   * cleaned up before a late timer fires, and an unhandled rejection there would
+   * fail the suite for a reason unrelated to what is under test.
+   */
+  function renewAfter(path: string, content: string, delayMs: number): void {
+    setTimeout(() => {
+      writeFile(path, content).catch(() => {});
+    }, delayMs);
+  }
+
+  it("waits for the mounted file to change, then retries the sequence once", async () => {
+    fixture = await runnerFixture();
+    const path = await tokenFile(fixture, "stale-token\n");
+    const attempts: string[] = [];
+
+    const outcome = await withStaleCredentialRecovery({
+      tokenPath: path,
+      // Short bound so the test is about the behaviour, not the clock.
+      waitMs: 3_000,
+      pollMs: 25,
+      log: () => {},
+      run: async () => {
+        attempts.push("attempt");
+        if (attempts.length === 1) {
+          // The renewal lands while the run is waiting, as kubelet eventually does.
+          renewAfter(path, "fresh-token\n", 60);
+          throw new StaleCredentialError("git push exited 128: Authentication failed");
+        }
+      },
+    });
+
+    expect(outcome).toBe("recovered");
+    expect(attempts).toHaveLength(2);
+  });
+
+  it("stays retryable, not fatal, when the file never changes", async () => {
+    fixture = await runnerFixture();
+    const path = await tokenFile(fixture, "stale-token\n");
+    const attempts: string[] = [];
+
+    const error = await withStaleCredentialRecovery({
+      tokenPath: path,
+      waitMs: 120,
+      pollMs: 20,
+      log: () => {},
+      run: async () => {
+        attempts.push("attempt");
+        throw new StaleCredentialError("git fetch exited 128: Invalid username or token");
+      },
+    }).catch((e: unknown) => e);
+
+    // One attempt, then the same error comes back — a new pod re-reads the file.
+    expect(attempts).toHaveLength(1);
+    expect(error).toBeInstanceOf(StaleCredentialError);
+    expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.retryable);
+  });
+
+  it("does not wait at all for a failure that is not about the credential", async () => {
+    fixture = await runnerFixture();
+    const path = await tokenFile(fixture, "stale-token\n");
+    let polls = 0;
+
+    const started = Date.now();
+    const error = await withStaleCredentialRecovery({
+      tokenPath: path,
+      waitMs: 5_000,
+      pollMs: 20,
+      log: () => {},
+      onPoll: () => {
+        polls += 1;
+      },
+      run: async () => {
+        throw new FatalPushError("git rebase conflicted");
+      },
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(FatalPushError);
+    expect(polls).toBe(0);
+    // Nothing waited: the bound was 5s and this returned at once.
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("retries only once, even if the retry fails the same way", async () => {
+    fixture = await runnerFixture();
+    const path = await tokenFile(fixture, "stale-token\n");
+    const attempts: string[] = [];
+
+    const error = await withStaleCredentialRecovery({
+      tokenPath: path,
+      waitMs: 2_000,
+      pollMs: 20,
+      log: () => {},
+      run: async () => {
+        attempts.push("attempt");
+        // The file changes every time, so a second wait would succeed again.
+        renewAfter(path, `token-${attempts.length}\n`, 40);
+        throw new StaleCredentialError("git push exited 128: Authentication failed");
+      },
+    }).catch((e: unknown) => e);
+
+    // Two attempts is the contract: one retry, then stop being clever.
+    expect(attempts).toHaveLength(2);
+    expect(error).toBeInstanceOf(StaleCredentialError);
+  });
+});
+
+/**
+ * The sequence, end to end: a remote that rejects the credential must not end the
+ * run as fatal, and the recovery must cover the *whole* sequence — the fetch runs
+ * first and is where a rejection actually surfaces.
+ *
+ * The rejection is real: a local HTTP server that always answers 401, which is what
+ * git turns into `Authentication failed`. No network, no mocking of git.
+ */
+describe("push: the recovery is wired into the real sequence", () => {
+  it("waits for the renewal and retries, and never ends the run as fatal", { timeout: 60_000 }, async () => {
+    const f = await runnerFixture();
+    fixture = f;
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      response.writeHead(401, { "WWW-Authenticate": 'Basic realm="git"' });
+      response.end("no");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+
+    try {
+      await writeFile(f.paths.token, "stale-token\n");
+      const env = { ...f.env, remoteUrl: `http://127.0.0.1:${port}/pi-web.git` };
+      await git(["remote", "set-url", "origin", env.remoteUrl], f.worktree);
+      // The renewal lands while the run waits, as kubelet eventually delivers it.
+      setTimeout(() => {
+        writeFile(f.paths.token, "fresh-token\n").catch(() => {});
+      }, 200);
+
+      const started = Date.now();
+      const error = await pushToSpecBranch({ env, paths: f.paths, log: () => {} }).catch((e: unknown) => e);
+      const elapsed = Date.now() - started;
+
+      // Retryable, not fatal: a new pod re-reads the file. This is the assertion the
+      // whole issue exists for.
+      expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.retryable);
+      expect(error).not.toBeInstanceOf(FatalPushError);
+      expect(error).toBeInstanceOf(StaleCredentialError);
+      // It waited for the file rather than failing at once…
+      expect(elapsed).toBeGreaterThanOrEqual(STALE_CREDENTIAL_POLL_MS);
+      // …and it really did run the sequence again (git may itself retry with the
+      // helper's credential, so the request count is a lower bound).
+      expect(requests).toBeGreaterThanOrEqual(2);
+    } finally {
+      server.close();
     }
   });
 });

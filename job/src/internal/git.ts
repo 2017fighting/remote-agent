@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
 
 export interface GitResult {
   exitCode: number;
@@ -100,8 +99,3 @@ export async function mergeBase(repo: string, base: string, head: string): Promi
   return result.stdout.trim();
 }
 
-export async function readTokenFile(path: string): Promise<string> {
-  const token = (await readFile(path, "utf8")).trim();
-  if (token === "") throw new Error(`credential file ${path} is empty`);
-  return token;
-}
