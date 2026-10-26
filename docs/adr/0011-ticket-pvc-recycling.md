@@ -23,11 +23,14 @@ v1 每 ticket 一块 PVC、不随 Job 删（[ADR-0008](0008-durable-runtime-base
 | **T5** `blocked` / **T6a–e** `error` | `expires-at = 判定时刻 + 30d` | App：到点删 |
 | **S3** 收尾 `done`（已开 PR） | `expires-at = 判定时刻 + 7d` | App：到点删 |
 | **S4** 收尾 `blocked` / **S5** 收尾 `error` | `expires-at = 判定时刻 + 30d` | App：到点删 |
+| **S3N → 下一轮** / **S6** 重入收尾 | 上一轮判过、下一块收尾 Job 要起 | App：起 Job 前删（卷 + 同名 Secret，[ADR-0016](0016-closeout-round-starts-on-a-fresh-volume.md)） |
 | **T3** 被占 / **T3L** 自环 | 无 `expires-at`（Claim 时清） | 不删 |
 | **S2** 收尾在跑 | 无 `expires-at` | 不删 |
 | 无 outcome 的孤儿 | 无 `expires-at` | App：无活 Job ∧ 年龄 > 30d |
 
 `implement-spec` 的收尾 Job 也有自己的一块 Ticket PVC（同一个确定性命名规则作用在 spec 号上），回收规则与 ticket 完全一致：**判它 outcome 的那一次 reconcile 写 `expires-at`**（`done` 7d、`blocked` / `error` 30d，set-if-absent）。不把它归给孤儿兜底：孤儿是给「从未走到 outcome」的卷的，一块已经判过的卷按年龄被删，是删对了但理由和时钟都不对。
+
+**2026-10-26 修正（[#60](https://github.com/2017fighting/remote-agent/issues/60)，[ADR-0016](0016-closeout-round-starts-on-a-fresh-volume.md)）**：收尾卷的寿命比上面这张表短一格——**起下一块收尾 Job 的那一次 reconcile 先删掉上一轮那块卷 + 它的同名 Secret，再建新的**。收尾 role 的 conversation 报过一次就是终态的，所以同一块卷上的第二轮只能 no-op：seed 因 marker 匹配跳过（`state/` 一字不动）、runner 见 `remote-agent.run-completed` 直接 exit 0、Job `Complete` 而无 annotation，App 只能判 `no-result`。「重跑不回到干净态」这条**只对中断的 run 成立**，干净终止之后重新打开同一份 storage 什么都不跑，收尾的下一轮要的是「重新判断还剩什么」——那正是已完成的 conversation 挡掉的事。于是 `expires-at` 在收尾卷上的角色缩小为「App 没读到结果时的兜底」：正常路径上它的寿命由下一轮的起点决定。代价明写：上一轮的对话全文在下一轮开始时消失，`blocked` / `error` 的 30 天保留期只在**没有下一轮**时有效。
 
 一个 pass 内的顺序：**先**处理 Claim / 终态（改 label、清或打 `expires-at`），**再**跑回收（删已过期的）。`expires-at` 不存在 = 不可删。
 

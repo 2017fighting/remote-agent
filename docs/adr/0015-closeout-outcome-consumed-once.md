@@ -14,6 +14,7 @@
 - **写序：先标记，后建票**（S3N 内部）。崩在两者之间 → 这一批票没建出来，spec 停在 `closeout-consumed`，等旧对象被 TTL 删掉、起一块**新的**收尾 Job，由 spec role 重新报出「还差什么」。**丢一次 outcome，绝不重复建票**——重复建票是静默污染 GitHub，丢一次 outcome 是下一轮自愈。反序（先建票后标记）会把洞原样留着：崩在中间时票已建好，等它们全关掉、旧对象还在窗里，又被重判一次。
 - **两个窗口，代价不同**：「标记写完、第一张票还没建」丢整批；「某张票建好、还没链接成 sub-issue」丢这一批剩下的票，并留下一张没人链接的孤儿票（在仓库里看得见，只是不在 spec 的 sub-issue 列表里）。后者在标记出现**之前**的代价是整批重来，所以标记把代价从「重复建票」换成「少建几张」——方向对，但没有变没。要真正关掉得让 run result 带幂等键。
 - **写序：先清标记，后起 Job**（S1 → S2）。这一支的前提就是「确定性名下无对象」，所以此处的标记必属上一轮、必然是陈旧的；先清再建，崩在中间的最坏结果是「无标记 + 无对象」，下一轮照常起 Job，什么都不丢。反序会让一块**尚未判定**的新运行带着旧标记，它的 outcome 会被误判成已消费，白跑一整轮。
+- **写序：先清标记、再删上一轮的卷，最后建新卷与新 Job**（S1 → S2，[ADR-0016](0016-closeout-round-starts-on-a-fresh-volume.md)，[#60](https://github.com/2017fighting/remote-agent/issues/60)）。收尾 role 的 conversation 是终态的，所以上一轮那块卷不能再承担一轮：不删它，新 Job 会 `seed-skip` + `already-complete` + 不写 annotation，App 判 `no-result`——「重新判断还剩什么」正是被那块已完成的 conversation 挡掉的。删卷与清标记同属「把上一轮的痕迹清干净」，两者都在建 Job 之前；崩在任意两步之间都停在「无标记 + 无对象」，下一轮照常起 Job。
 - **可见性**：pass 日志加第七个计数器 `closeout-consumed=<n>`（数 spec），与 `deferred` / `waiting` / `idle` 平级。被标记停住的 spec 不出现在 `idle` 里：它没有 open sub-issue，也不是「门内 + Frontier 空」那一支。
 - **标记的寿命由对象兜住**：标记只在「确定性名下有一个终态对象」时才被读，而对象的存在正是「这个 outcome 属于当前这轮」的判据。所以标记不需要 TTL、不需要清理逻辑；人 `kubectl delete job` 掉旧对象，下一轮自动清标记 + 起新 Job。
 
@@ -27,9 +28,10 @@
 ## Consequences
 
 - **S3N 的「已消费」载体从「新票还 open」变成「新票还 open **或** spec 带 `closeout-consumed`」**：前者是快路径（有票在跑时根本不走到收尾分支），后者是兜底（票全关了而对象还在窗里）。
-- **[`docs/architecture.md` §8](../architecture.md#8-两处缺口) 的那条缺口记录作废**，改写进 [§4.5](../architecture.md#45-spec) 的 S3N 行与 [§3](../architecture.md#3-spec-循环) 的代价段。
+- **[`docs/architecture.md` §8](../architecture.md#8-三处缺口) 的那条缺口记录作废**，改写进 [§4.5](../architecture.md#45-spec) 的 S3N 行与 [§3](../architecture.md#3-spec-循环) 的代价段。
 - **一条新代价，明写：每轮之间多一个等删除的间隙。** 新票全部关闭之后，spec 不再立刻起下一块收尾 Job，而是等到那块旧对象被 k8s 按 `ttlSecondsAfterFinished` 删掉（≤ 30 分钟，[ADR-0012](0012-job-deletion-ttl.md)）才开始下一轮。S3N 之后这一轮与下一轮之间就多出这段等待，**且它每轮都可能发生**（[§3](../architecture.md#3-spec-循环) 的轮数无上限让这个间隙可以反复出现）。想立刻跳过的人可以 `kubectl delete job <名>`——`DELETED` 事件就是唤醒源，与 [ADR-0013](0013-claim-gates-on-job-absence.md) 的逃逸口同一个。**被否掉的「按标题去重」方案换来的正是「零等待」，而它猜错时会静默吞掉一张真票**：等 30 分钟比丢一张票便宜。
 - **一条新代价，明写**：S3N 之后到「新票全部关闭」之间，spec 上的 label 集是 `[ready-for-agent, agent:implement, closeout-consumed]`。人读到它要知道 `closeout-consumed` **不是 exit 标记**、不进 `Loop`、不挡授权继承——它只是「上一块收尾 Job 的结论已经落地」的记号。逃生口不变：摘 `agent:implement`（整条 spec 退出门）或 `kubectl delete job`（只影响当前这一块）。
 - **pass 日志多一列**：`closeout-consumed=<n>`。它是「有多少 spec 正卡在一个已经判过的对象上」的可数信号——数值长时间不降，说明 Job 的 TTL 没生效或 watch 没接上。
 - **不新增控制面状态**（[ADR-0001](0001-stateless-reconciler.md)）：标记活在 issue 的 label 上，和 `agent:*`、`ready-for-*` 同一层，重启后从 GitHub 重读。
 - **未核实的前提：仓库里最好存在名为 `closeout-consumed` 的 label。** 现有四个 `agent:*` label 今天能写，说明它们已经建好了。GitHub 对「给 issue 加一个仓库里不存在的 label」到底是自动创建还是 422，查证没有定论（`PATCH /issues/{n}` 带 `labels` 数组这条路没有明确文档），所以**不做依赖**：若它自动创建，一切照常；若它 422，那一次 S3N 的 `editLabels` 会抛错、pass 记一行 `pass-error`，下一轮重试——而**重试是安全的**，因为标记写失败意味着 outcome 还没被消费，会重新走一遍建票分支（这也顺带说明为什么标记必须先写：它失败时停在「什么都没发生」而不是「一半发生了」）。一次性运维动作：把 `closeout-consumed` 建进仓库，与 ADR-0011 的 SC、ADR-0010 的 quota 同级。
+- **收尾卷在下一轮开始时就被删掉**（[ADR-0016](0016-closeout-round-starts-on-a-fresh-volume.md)，[#60](https://github.com/2017fighting/remote-agent/issues/60)）：标记与回收回答的是两个不同的问题——标记管「这块 **outcome** 判过没有」，回收管「这块**卷**还能不能再跑一轮」，两者都还需要。代价是上一轮的对话全文在下一轮开始时消失，`expires-at` 只在**没有下一轮**时决定这块卷的寿命。

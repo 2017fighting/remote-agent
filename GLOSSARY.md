@@ -96,6 +96,10 @@ _Avoid_: 工作卷, workspace, job pvc
 Ticket PVC 上的 `remote-agent/expires-at` annotation（RFC3339）：App 在判定 outcome 的那一次 reconcile 里写一次（`done` 7 天、`blocked` / `error` 30 天），Claim 时清掉；**不存在 = 这块卷不可删**。
 _Avoid_: ttl, 保留期, 过期时间
 
+**Spent volume**:
+一块**已经报过结论**的卷：它 `state/` 里的 conversation 是终态的，所以任何后续轮次都不能在它上面跑（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md) 的「重跑不回到干净态」只对**中断**的 run 成立）。与 Ticket PVC expiry 的区别：expiry 说的是「什么时候可以删」，spent 说的是「这块卷已经不能再承担一轮工作」。收尾的每一轮因此都在**新卷**上开始（起收尾 Job 时 App 先回收上一轮那块，[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)）；runner 遇到「卷上有已完成的 run」也不再静默 no-op，而是判「新 Job 跑在 spent 卷上」并响亮地停下。票被重开时它的卷同样是 spent，只是那条路上还没有人换新卷（[#62](https://github.com/2017fighting/remote-agent/issues/62)）。
+_Avoid_: 用过的卷, 脏卷, 已完成的 PVC
+
 **Job retention**:
 终态 Job 在被 k8s 按其 `ttlSecondsAfterFinished` 删除之前的保留窗（1800 秒）。它不是清理习惯，而是 App 的读取预算：App 要在这段内读到 run result 并把证据落进 GitHub，超出预算的宕机由 no-job 兜底接管。
 _Avoid_: ttl, 清理窗口, job 过期
