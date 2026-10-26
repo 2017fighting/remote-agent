@@ -10,7 +10,7 @@ import {
   type RunnerEnv,
 } from "./internal/env.js";
 import { createOmniRouteModels } from "./internal/provider.js";
-import { inClusterAnnotationWriter } from "./internal/annotation.js";
+import { inClusterAnnotationClient } from "./internal/annotation.js";
 import { RUNNER_EXIT } from "@remote-agent/shared";
 import { pushExitCodeFor, pushToSpecBranch, run, type RunOutcome } from "./internal/runner.js";
 
@@ -36,7 +36,7 @@ export async function runRunner(options: RunnerEntryOptions = {}): Promise<RunOu
   const runnerEnv: RunnerEnv = readRunnerEnv(env, namespace);
   const paths = jobPaths();
   const models = createOmniRouteModels(runnerEnv.omniRoute);
-  const writer = inClusterAnnotationWriter(env, runnerEnv, log);
+  const client = inClusterAnnotationClient(env, runnerEnv, log);
 
   return run({
     env: runnerEnv,
@@ -44,7 +44,8 @@ export async function runRunner(options: RunnerEntryOptions = {}): Promise<RunOu
     models,
     log,
     openStorage: (path) => openNodeSqliteStorage(path),
-    annotate: (result) => writer.write(result),
+    annotate: (result) => client.write(result),
+    hasOwnRunResult: () => client.hasRunResult(),
     push: () => pushToSpecBranch({ env: runnerEnv, paths, log }),
   });
 }

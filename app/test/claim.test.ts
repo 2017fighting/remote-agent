@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { jobName, secretName } from "@remote-agent/shared";
+import { ANNOTATIONS, jobName, secretName } from "@remote-agent/shared";
 import { runReconcilePass } from "../src/reconcile.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
 import { K8sApiError } from "../src/ports/errors.js";
 import { testConfig } from "./helpers.js";
-import { GATE_LABELS, OTHER_REPO, REPO, issue, managedJob, specWorld } from "./world.js";
+import { GATE_LABELS, OTHER_REPO, REPO, issue, managedJob, specWorld, ticketPvc, tokenSecret } from "./world.js";
 
 /**
  * Claim on the App seam (spec #33 §2 step 3, ADR-0013):
@@ -37,6 +37,26 @@ describe("claim write order", () => {
     expect(k8s.writeLog.indexOf(`createJob ${pvc}`)).toBe(2);
     expect(github.writeLog.indexOf(`editLabels ${REPO}#35 +[agent:in-progress] -[]`)).toBe(1);
     expect((await github.getIssue(REPO, 35))?.labels).toContain("agent:in-progress");
+  });
+
+  /**
+   * The other half of ticket #60's decision (ADR-0016): only the closeout role
+   * reclaims. A ticket's volume **is** its history — `resume()` and 「人回来把对话
+   * 全文读出来」 both need it — so a re-claim must keep it and only stop the
+   * retention clock.
+   */
+  it("reuses a ticket's volume on re-claim: clears expires-at and reclaims nothing (ADR-0011)", async () => {
+    const { github, k8s } = oneTicket();
+    const pvc = jobName(REPO, 35);
+    k8s.pvcs.push(ticketPvc(REPO, 35, { expiresAt: "2025-03-08T12:00:00.000Z" }));
+    k8s.secrets.push(tokenSecret(REPO, 35));
+
+    await runReconcilePass({ github, k8s, config }, "tick");
+
+    expect(k8s.writeLog).toEqual([`clearPvcAnnotation ${pvc} ${ANNOTATIONS.expiresAt}`, `createJob ${pvc}`]);
+    expect(k8s.pvcs.map((p) => p.name)).toEqual([pvc]);
+    expect(k8s.pvcs[0]?.annotations[ANNOTATIONS.expiresAt]).toBeUndefined();
+    expect(k8s.secrets.map((s) => s.name)).toEqual([secretName(REPO, 35)]);
   });
 
   it("stops at the first failure and the next pass recomputes from world state", async () => {

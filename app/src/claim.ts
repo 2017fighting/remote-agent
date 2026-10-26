@@ -1,5 +1,6 @@
 import { ANNOTATIONS, secretName } from "@remote-agent/shared";
 import { LABEL_AGENT_IN_PROGRESS } from "./planners/gate.js";
+import { reclaimTicketVolume } from "./reclamation.js";
 import { renderJobManifest, renderTicketPvc, type AgentRole } from "./renders/job-template.js";
 import { renderTokenSecret } from "./renders/token-steward.js";
 import { isAlreadyExists, isQuotaExceeded } from "./ports/errors.js";
@@ -11,6 +12,10 @@ import type { K8sPort } from "./ports/K8sPort.js";
  * Job start-up (spec #33 §2 steps 3 and 4, ADR-0013). Write order is
  *
  *   PVC (if absent) → per-Job Secret (mint) → Job (if absent) → `agent:in-progress`
+ *
+ * and for the closeout role the volume step is a *reclaim* instead of a create:
+ *
+ *   reclaim the spent PVC + Secret (ADR-0016) → PVC → Secret → Job
  *
  * Job before label is deliberate: crashing between the two leaves "Job running
  * + ticket still in the gate", which the k8s half of the gate absorbs next
@@ -26,10 +31,18 @@ import type { K8sPort } from "./ports/K8sPort.js";
  * is also what makes a replay free: on an unchanged world the PVC and the
  * Secret are already there, so nothing is created and no token is minted.
  *
- * The PVC probe does one more thing on the reuse path: it clears
- * `remote-agent/expires-at` (ADR-0011 — set when the outcome was judged, cleared
- * when the volume is claimed again). The clear is a no-op when the key is
- * absent, so the replay stays write-free.
+ * The PVC probe does one more thing on the reuse path, and which one depends on
+ * the role:
+ *
+ * - **a ticket's volume is reused**: `remote-agent/expires-at` is cleared (ADR-0011
+ *   — set when the outcome was judged, cleared when the volume is claimed again),
+ *   so a re-entry resumes the same conversation. The clear is a no-op when the key
+ *   is absent, so the replay stays write-free.
+ * - **a closeout's volume is spent**: the closeout role's conversation is terminal
+ *   once it reported, so a second round on that volume could only no-op (the seed
+ *   skips on its matching marker, the runner sees the finished run and exits
+ *   without an annotation). The volume and its Secret are reclaimed first, so the
+ *   next round seeds from nothing (ADR-0016, ticket #60).
  *
  * Two error classes carry product meaning:
  * - `409 AlreadyExists` is **success** — every create is create-if-absent, so a
@@ -72,7 +85,7 @@ export type ClaimResult =
   | { kind: "failed"; jobName: string; error: unknown };
 
 export async function claimTicket(input: ClaimTicketInput): Promise<ClaimResult> {
-  return startAgentJob({ ...input, markInProgress: true });
+  return startAgentJob({ ...input, markInProgress: true, reclaimSpentVolume: false });
 }
 
 /** S1 → S2: start the closeout Job. No label write — a spec never carries `agent:in-progress`. */
@@ -82,6 +95,9 @@ export async function startCloseoutJob(input: StartCloseoutJobInput): Promise<Cl
     issueNumber: input.specNumber,
     role: "implement-spec",
     markInProgress: false,
+    // The spec's own run: its volume is spent once it has reported, so this round
+    // starts on a fresh one (ADR-0016, ticket #60).
+    reclaimSpentVolume: true,
   });
 }
 
@@ -96,6 +112,12 @@ interface AgentJobInput {
   workItemJson: string;
   /** The Claim *is* the label edit; only the ticket role has one. */
   markInProgress: boolean;
+  /**
+   * Reclaim the volume under the deterministic name instead of reusing it
+   * (ADR-0016). Only the closeout role sets it: a ticket's volume is meant to be
+   * reused, a closeout's is **spent** the moment its round reported.
+   */
+  reclaimSpentVolume: boolean;
 }
 
 async function startAgentJob(input: AgentJobInput): Promise<ClaimResult> {
@@ -115,6 +137,13 @@ async function startAgentJob(input: AgentJobInput): Promise<ClaimResult> {
     //    judged run still carries `remote-agent/expires-at`; this is where that
     //    retention clock stops (an absent value = not deletable).
     if ((await k8s.getPvc(pvc.name)) === null) {
+      await createIfAbsent(() => k8s.createPvc(pvc));
+    } else if (input.reclaimSpentVolume) {
+      // A spent volume: its conversation is terminal, so this round cannot run on
+      // it. Reclaim it and its credential, then create a fresh one below
+      // (ADR-0016). Deleting before creating is what makes the seed and the
+      // runner start from nothing.
+      await reclaimTicketVolume(k8s, pvc.name);
       await createIfAbsent(() => k8s.createPvc(pvc));
     } else {
       await k8s.clearPvcAnnotation(pvc.name, ANNOTATIONS.expiresAt);

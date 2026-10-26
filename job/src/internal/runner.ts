@@ -78,6 +78,15 @@ export interface RunDeps {
    * agent could not resolve (#58).
    */
   annotate(result: RunResultV1): Promise<void>;
+  /**
+   * Whether **this run's own Job** object carries a `remote-agent/run-result`
+   * annotation. Throws when the object cannot be read.
+   *
+   * Consulted only on the already-complete branch (ADR-0016), where it is the one
+   * thing that tells a replacement pod of the Job that finished the run apart from
+   * a new Job created on a spent volume.
+   */
+  hasOwnRunResult(): Promise<boolean>;
   /** Pushes `HEAD` to `agent/spec-<n>`; throws on a failure no later pod can fix, and
    * reports a stopped rebase as `conflict` instead of failing (#58). */
   push(): Promise<PushOutcome>;
@@ -95,7 +104,12 @@ export interface RunOutcome {
   result?: RunResultV1;
   /** True when this process resumed an unfinished run instead of starting a new one. */
   resumed: boolean;
-  /** True when the volume already carried a finished run: nothing was done. */
+  /**
+   * True when the volume already carried a finished run. Nothing is done in either
+   * case, but *why* differs and the exit code carries it: 0 for a replacement pod of
+   * the Job that finished the run, `RUNNER_EXIT.fatal` for a new Job on a spent
+   * volume (ADR-0016).
+   */
   alreadyComplete: boolean;
 }
 
@@ -144,6 +158,36 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
   try {
     const root = await harness.root(context, { agent: implementerAgent(deps) });
     if (await isComplete(harness, root)) {
+      // The volume's conversation is finished. Which Job is asking, though?
+      //
+      // A **replacement pod of the Job that finished it** finds its own run result
+      // already on that Job and has nothing left to do. A **new Job on a spent
+      // volume** — the shape that made a second closeout round do nothing (#60) —
+      // carries no annotation, and returning exit 0 there would end the Job
+      // `Complete` with nothing reported: a shape no reader, human or App, can tell
+      // apart from a crashed runner. Refuse instead (exit 78 → `podFailurePolicy`
+      // `FailJob` → the App judges `unrecoverable`, whose evidence comment already
+      // tells the human to discard the volume). See ADR-0016.
+      //
+      // Presence is the whole test: a Job object is created fresh per round, so an
+      // annotation can only ever be this Job's own.
+      let reported: boolean;
+      try {
+        reported = await deps.hasOwnRunResult();
+      } catch (error) {
+        // "Cannot tell which Job this is." Failing the run would FailJob a Job whose
+        // result may already have landed, so keep the old behaviour instead.
+        deps.log(
+          `runner-open conversation=${ROOT_CONVERSATION_ID} already-complete=true own-result-unreadable=true detail=${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { exitCode: 0, resumed: false, alreadyComplete: true };
+      }
+      if (!reported) {
+        deps.log(`runner-refused reason=spent-volume role=${deps.env.role} job=${deps.env.jobName}`);
+        return { exitCode: RUNNER_EXIT.fatal, resumed: false, alreadyComplete: true };
+      }
       deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} already-complete=true`);
       return { exitCode: 0, resumed: false, alreadyComplete: true };
     }

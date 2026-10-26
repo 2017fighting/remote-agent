@@ -28,7 +28,9 @@ import { migrateLabels, postFailureComment, setExpiresAtIfAbsent } from "./outco
  * - **S1 → S2** the closeout Job object is the marker. It is create-if-absent
  *   under a deterministic name, and while it exists (running, finished, or in
  *   its retention window) no second one starts — the k8s half of the
- *   Claim-gate, unchanged (ADR-0013).
+ *   Claim-gate, unchanged (ADR-0013). Starting one also reclaims the previous
+ *   round's volume and Secret: the closeout role's conversation is terminal once
+ *   it reported, so the next round has to seed from nothing (ADR-0016, #60).
  * - **S2 → S3** the PR is idempotent by head branch, and the label migration is
  *   what takes the spec out of the gate, so the next pass has nothing to do.
  *   PR first, labels second: the reverse crash window would leave the spec
@@ -89,16 +91,25 @@ export interface SpecLoopDeps {
  * every sub-issue's title, body and comments without calling GitHub, which is
  * what `prompts/implement-spec` renders as "the ticket map … above".
  *
- * Starting the Job is also where the previous run's `closeout-consumed` marker
- * goes (ticket #49). The marker can only be stale here — this branch is the one
- * that requires *no* object under the deterministic name — so it is cleared
- * first, and then the Job is created:
+ * Two things about the **previous** round are cleaned up here, because this is
+ * the one branch that requires *no* object under the deterministic name — so
+ * whatever it finds is the previous round's leftover:
+ *
+ * 1. the `closeout-consumed` marker goes (ticket #49), and
+ * 2. the previous round's volume and Secret are reclaimed (ADR-0016, ticket #60).
+ *
+ * Order is marker → reclaim → create, and a crash between any two steps leaves
+ * "no marker, no object", which the next pass replays:
  *
  * - crash after the clear, before the create → next pass sees no marker and no
  *   object, so it clears nothing and starts the closeout. Nothing is lost.
- * - the reverse order would leave a fresh, unjudged run carrying the old
+ * - the reverse marker order would leave a fresh, unjudged run carrying the old
  *   marker, so its outcome would read as "already consumed" until the TTL
  *   deleted the object and a whole closeout run was wasted.
+ *
+ * The reclaim is why the next round's seed finds no marker and no session: the
+ * closeout role's conversation is terminal once it reported, so a second round
+ * on that volume could only no-op (ADR-0016).
  */
 export async function startSpecCloseout(deps: SpecLoopDeps, spec: GitHubIssue): Promise<void> {
   // A new closeout Job means a new run: the previous outcome's marker would
