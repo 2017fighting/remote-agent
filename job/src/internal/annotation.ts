@@ -9,7 +9,7 @@ const SERVICE_ACCOUNT = {
   port: "KUBERNETES_SERVICE_PORT",
 } as const;
 
-export interface AnnotationWriterOptions {
+export interface AnnotationClientOptions {
   jobName: string;
   jobNamespace: string;
   /** In-cluster API base URL; the env vars are the standard downward-API pair. */
@@ -22,34 +22,57 @@ export interface AnnotationWriterOptions {
 }
 
 /**
- * The runner's only kubernetes write: a JSON merge patch of its own Job's
- * `remote-agent/run-result` annotation (ADR-0007). The Job's SA has
- * `jobs get,patch` and nothing else.
+ * The runner's only kubernetes surface: the run result on its **own** Job object.
+ * One write (`remote-agent/run-result` JSON merge patch, ADR-0007) and one read of
+ * the same annotation — the read is what tells a replacement pod of a Job that
+ * already reported apart from a new Job on a spent volume (ADR-0016). The Job's SA
+ * has `jobs get,patch` and nothing else.
  */
-export class JobAnnotationWriter {
-  constructor(private readonly options: AnnotationWriterOptions) {}
+export class JobAnnotationClient {
+  constructor(private readonly options: AnnotationClientOptions) {}
 
   /** Write the run result exactly once. Throws when the patch does not land. */
   async write(result: RunResultV1): Promise<void> {
-    const token = (await readFile(this.options.tokenPath, "utf8")).trim();
-    const doFetch = this.options.fetch ?? (await this.podTrustFetch());
-    const url = `${this.options.apiBaseUrl.replace(/\/+$/, "")}/apis/batch/v1/namespaces/${encodeURIComponent(
-      this.options.jobNamespace,
-    )}/jobs/${encodeURIComponent(this.options.jobName)}`;
-    const body = JSON.stringify({ metadata: { annotations: { [ANNOTATIONS.runResult]: JSON.stringify(result) } } });
-    const response = await doFetch(url, {
+    const response = await this.call({
       method: "PATCH",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/merge-patch+json",
-        accept: "application/json",
-      },
-      body,
+      headers: { "content-type": "application/merge-patch+json" },
+      body: JSON.stringify({ metadata: { annotations: { [ANNOTATIONS.runResult]: JSON.stringify(result) } } }),
     });
     if (!response.ok) {
       throw new Error(`job annotation patch failed: ${response.status} ${await response.text()}`);
     }
     this.options.log?.(`annotation-written job=${this.options.jobName} outcome=${result.outcome}`);
+  }
+
+  /**
+   * Whether this Job carries a run result of its own.
+   *
+   * A failed read **throws** rather than answering `false`: "this Job never
+   * reported" and "I cannot tell" lead to opposite decisions (ADR-0016), so the
+   * caller must be able to tell them apart.
+   */
+  async hasRunResult(): Promise<boolean> {
+    const response = await this.call({ method: "GET" });
+    if (!response.ok) throw new Error(`job read failed: ${response.status} ${await response.text()}`);
+    const body = (await response.json()) as { metadata?: { annotations?: Record<string, string> } };
+    return body.metadata?.annotations?.[ANNOTATIONS.runResult] !== undefined;
+  }
+
+  /**
+   * One request against this Job object. Read and write share the URL, the mounted
+   * token and the CA trust, so they share one call path.
+   */
+  private async call(init: { method: string; headers?: Record<string, string>; body?: string }): Promise<Response> {
+    const token = (await readFile(this.options.tokenPath, "utf8")).trim();
+    const doFetch = this.options.fetch ?? (await this.podTrustFetch());
+    const url = `${this.options.apiBaseUrl.replace(/\/+$/, "")}/apis/batch/v1/namespaces/${encodeURIComponent(
+      this.options.jobNamespace,
+    )}/jobs/${encodeURIComponent(this.options.jobName)}`;
+    return doFetch(url, {
+      method: init.method,
+      headers: { authorization: `Bearer ${token}`, accept: "application/json", ...init.headers },
+      ...(init.body === undefined ? {} : { body: init.body }),
+    });
   }
 
   /**
@@ -71,15 +94,15 @@ export class JobAnnotationWriter {
   }
 }
 
-export function inClusterAnnotationWriter(
+export function inClusterAnnotationClient(
   env: Record<string, string | undefined>,
   job: { jobName: string; jobNamespace: string },
   log?: (line: string) => void,
-): JobAnnotationWriter {
+): JobAnnotationClient {
   const host = env[SERVICE_ACCOUNT.host];
   const port = env[SERVICE_ACCOUNT.port];
   if (!host || !port) throw new Error("KUBERNETES_SERVICE_HOST/PORT are not set: cannot write the run result");
-  return new JobAnnotationWriter({
+  return new JobAnnotationClient({
     jobName: job.jobName,
     jobNamespace: job.jobNamespace,
     apiBaseUrl: `https://${host}:${port}`,

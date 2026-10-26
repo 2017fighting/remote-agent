@@ -19,10 +19,12 @@ import { runRunner } from "../src/runner.js";
 import {
   blockedCall,
   cleanup,
+  finishSpecCall,
   finishTicketCall,
   fauxAssistantMessage,
   fauxToolCall,
   git,
+  noOwnRunResult,
   openStorageFor,
   runnerFixture,
   WORK_ITEM,
@@ -57,6 +59,9 @@ function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<Parame
       await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], f.worktree);
       return { kind: "pushed" } as const;
     },
+    // This run's own Job object carries no run-result annotation: the shape of a
+    // Job that was created fresh (see `noOwnRunResult`).
+    hasOwnRunResult: noOwnRunResult,
     ...overrides,
   };
 }
@@ -274,18 +279,82 @@ describe("runner: one run to a Result tool", () => {
     expect(second.results[0]).toMatchObject({ summary: "decided before the crash" });
   });
 
-  it("does nothing at all when the volume already carries a finished run", async () => {
+  /**
+   * ADR-0016. `already-complete` has two meanings, and only one of them is a
+   * no-op. A **replacement pod of the Job that finished the run** finds its own
+   * annotation on that Job and has nothing left to do. A **new Job on a spent
+   * volume** — the shape that made a second closeout round do nothing (#60) —
+   * carries no annotation, and exiting 0 there would end the Job `Complete` with
+   * nothing reported: a shape no reader, human or App, can tell apart from a
+   * crashed runner. So the runner refuses (exit 78 → `podFailurePolicy` `FailJob`).
+   */
+  it("does nothing at all when the volume's finished run is this Job's own", async () => {
     fixture = await runnerFixture();
     const first: Recorded = { events: [], results: [] };
     fixture.script([finishTicketCall()]);
     expect((await run(depsFor(fixture, first))).alreadyComplete).toBe(false);
 
     const second: Recorded = { events: [], results: [] };
-    const outcome = await run(depsFor(fixture, second));
+    const outcome = await run(
+      depsFor(fixture, second, {
+        // The same Job: its own run-result annotation is already there.
+        hasOwnRunResult: async () => true,
+      }),
+    );
     expect(outcome.alreadyComplete).toBe(true);
+    expect(outcome.exitCode).toBe(0);
     expect(second.events).toEqual([]);
     // No new model request: the scripted response from the first run was not consumed again.
     expect(fixture.pendingResponses()).toBe(0);
+  });
+
+  // The guard is not role-gated (ADR-0016): it defends a role-independent
+  // invariant, and the ticket side is where it actually fires today (a reopened
+  // `done` ticket re-claims on its spent volume, #62).
+  it.each(["implement-ticket", "implement-spec"] as const)(
+    "refuses a new Job on a spent volume instead of ending Complete with no annotation (%s)",
+    async (role) => {
+      fixture = await runnerFixture();
+      const env: RunnerEnv = { ...fixture.env, role, workItem: { ...WORK_ITEM, number: 33 } };
+      const first: Recorded = { events: [], results: [] };
+      fixture.script([role === "implement-spec" ? finishSpecCall({ prBody: "p" }) : finishTicketCall()]);
+      await run(depsFor(fixture, first, { env }));
+
+      // The Job object went away (its TTL) and a new one was created under the same
+      // deterministic name: no annotation on this Job, a finished conversation on
+      // the volume.
+      const second: Recorded = { events: [], results: [] };
+      const log: string[] = [];
+      const outcome = await run(depsFor(fixture, second, { env, log: (line: string) => log.push(line) }));
+
+      expect(outcome.exitCode).toBe(RUNNER_EXIT.fatal);
+      // Nothing was pushed and nothing was annotated: the App reads a Failed Job, not
+      // a Complete one with an empty result.
+      expect(second.events).toEqual([]);
+      expect(log.join("\n")).toContain("runner-refused");
+      expect(log.join("\n")).toContain("spent-volume");
+    },
+  );
+
+  it("keeps exiting 0 when this Job's own annotation cannot be read", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall()]);
+    await run(depsFor(fixture, first));
+
+    // An unreadable API is "cannot tell which Job this is". Failing the run would
+    // FailJob a Job whose result may already have landed (ADR-0016).
+    const second: Recorded = { events: [], results: [] };
+    const outcome = await run(
+      depsFor(fixture, second, {
+        hasOwnRunResult: async () => {
+          throw new Error("jobs.batch is unreachable");
+        },
+      }),
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(second.events).toEqual([]);
   });
 
   it("resumes an unfinished run instead of submitting a second one", async () => {

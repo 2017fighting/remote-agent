@@ -19,6 +19,7 @@ import {
   finishTicketCall,
   git,
   implementerTools,
+  noOwnRunResult,
   openStorageFor,
   reviewerConversations,
   reviewerReport,
@@ -54,6 +55,8 @@ function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Record<string,
       recorded.events.push("push");
       return { kind: "pushed" } as const;
     },
+    // Only the already-complete branch reads it (ADR-0016); these tests never get there.
+    hasOwnRunResult: noOwnRunResult,
     ...overrides,
   };
 }

@@ -174,6 +174,14 @@ export function openStorageFor(): (path: string) => Promise<Awaited<ReturnType<t
   return (path: string) => openNodeSqliteStorage(path);
 }
 
+/**
+ * The shared default for `RunDeps.hasOwnRunResult`: this run's own Job carries no
+ * run-result annotation, which is the shape of a Job that was created fresh. Only
+ * the already-complete branch reads it (ADR-0016), so tests that never reach that
+ * branch can leave it here.
+ */
+export const noOwnRunResult = async (): Promise<boolean> => false;
+
 export function finishTicketCall(summary = "did the thing"): ReturnType<typeof fauxAssistantMessage> {
   return fauxAssistantMessage([fauxToolCall("finish_ticket", { summary }, { id: "call-finish" })], {
     stopReason: "toolUse",

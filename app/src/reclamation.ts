@@ -58,12 +58,24 @@ export async function reclaimVolumes(deps: ReclaimDeps): Promise<ReclaimReport> 
       remaining.push(pvc);
       continue;
     }
-    await deleteIfPresent(() => deps.k8s.deletePvc(pvc.name));
-    // The credential dies with the volume it belongs to (ADR-0011).
-    await deleteIfPresent(() => deps.k8s.deleteSecret(tokenSecretName(pvc.name)));
+    await reclaimTicketVolume(deps.k8s, pvc.name);
   }
 
   return { stats: volumeStats(remaining) };
+}
+
+/**
+ * Delete one ticket's durable state: its Ticket PVC and its same-named per-Job
+ * Secret (ADR-0011 — the credential dies with the volume it belongs to).
+ *
+ * The two objects are one unit here for two different triggers: this step's
+ * expiry/age judgement, and the closeout role's round start, where a **spent**
+ * volume is reclaimed so the next round can seed from nothing (ADR-0016). 404 is
+ * success — the intent is that they are gone.
+ */
+export async function reclaimTicketVolume(k8s: K8sPort, name: string): Promise<void> {
+  await deleteIfPresent(() => k8s.deletePvc(name));
+  await deleteIfPresent(() => k8s.deleteSecret(tokenSecretName(name)));
 }
 
 async function deleteIfPresent(remove: () => Promise<void>): Promise<void> {

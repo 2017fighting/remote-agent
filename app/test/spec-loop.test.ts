@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ANNOTATIONS, isWorkItemV1, jobName, secretName, specBranch, type NewTicket, type WorkItemV1 } from "@remote-agent/shared";
+import { ANNOTATIONS, isWorkItemV1, jobName, secretName, specBranch, tokenSecretName, type NewTicket, type WorkItemV1 } from "@remote-agent/shared";
 import { runReconcilePass, type ReconcileDeps } from "../src/reconcile.js";
 import { FakeGitHub } from "../src/fakes/FakeGitHub.js";
 import { FakeK8s } from "../src/fakes/FakeK8s.js";
+import { K8sApiError } from "../src/ports/errors.js";
 import { testConfig } from "./helpers.js";
-import { GATE_LABELS, REPO, closeoutJob, closedOutSpecWorld, issue, managedJob, specWorld } from "./world.js";
+import { GATE_LABELS, REPO, closeoutJob, closedOutSpecWorld, issue, managedJob, specWorld, ticketPvc, tokenSecret } from "./world.js";
 import { LABEL_CLOSEOUT_CONSUMED } from "../src/planners/spec-loop.js";
 
 /**
@@ -579,6 +580,98 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     // And no second closeout Job either: the object is the S2 state (ADR-0013).
     expect(k8s.writeLog).toEqual([]);
     expect(second.closeoutConsumed).toBe(1);
+  });
+
+  /**
+   * Ticket #60: the closeout role's conversation is terminal once it has reported,
+   * so the next round must not find the previous round's volume. Without this the
+   * fresh closeout Job mounts a spent volume, the seed skips on its matching
+   * marker, the runner sees the finished run and exits 0 without an annotation,
+   * and the App can only judge `no-result` — a whole round that does nothing.
+   */
+  it("reclaims the previous round's spent volume when the next closeout starts (ticket #60)", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s }); // S3N: the outcome is consumed, the follow-ups exist.
+    closeEveryFollowUp(github);
+    // The previous round's volume and credential, with the retention clock the
+    // App wrote when it judged that round.
+    k8s.pvcs.push(ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" }));
+    k8s.secrets.push(tokenSecret(REPO, SPEC));
+    // The TTL finally removes the Job object: the next round's turn.
+    k8s.deleteJob(CLOSEOUT);
+    k8s.writeLog.length = 0;
+    github.writeLog.length = 0;
+
+    await run({ github, k8s });
+
+    // Clear the marker → reclaim the spent volume → build a fresh one. Deleting
+    // first is what makes the seed and the runner start from nothing.
+    expect(k8s.writeLog).toEqual([
+      `deletePvc ${CLOSEOUT}`,
+      `deleteSecret ${tokenSecretName(CLOSEOUT)}`,
+      `createPvc ${CLOSEOUT}`,
+      `createSecret ${tokenSecretName(CLOSEOUT)}`,
+      `createJob ${CLOSEOUT}`,
+    ]);
+    expect(github.writeLog).toEqual([
+      `editLabels ${REPO}#${SPEC} +[] -[${LABEL_CLOSEOUT_CONSUMED}]`,
+      `mintInstallationToken ${REPO}`,
+    ]);
+    // A new volume, not the reused one: the spent round's clock is gone with it.
+    expect(k8s.pvcs.map((pvc) => pvc.annotations)).toEqual([
+      expect.not.objectContaining({ [ANNOTATIONS.expiresAt]: expect.anything() }),
+    ]);
+  });
+
+  it("tolerates a spent volume whose Secret is already gone, and mints a fresh credential", async () => {
+    // The reclaim deletes both objects, but only the volume is guaranteed to be
+    // there (a human may have removed the Secret by hand, and `volumeResetLine`
+    // tells them to). Deleting an absent object is success, as in reclamation.
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({ pvcs: [ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" })] });
+    github.writeLog.length = 0;
+
+    await run({ github, k8s });
+
+    expect(github.writeLog).toEqual([`mintInstallationToken ${REPO}`]);
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+    expect(k8s.secrets.map((secret) => secret.name)).toEqual([secretName(REPO, SPEC)]);
+  });
+
+  it("a crash between the marker clear and the Job create replays cleanly (ticket #60)", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s });
+    closeEveryFollowUp(github);
+    k8s.pvcs.push(ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" }));
+    k8s.secrets.push(tokenSecret(REPO, SPEC));
+    k8s.deleteJob(CLOSEOUT);
+    github.writeLog.length = 0;
+
+    // Die after the marker clear and the reclaim, before the Job exists.
+    k8s.failNextCreate = { object: "job", error: new K8sApiError(500, "job boom") };
+    await expect(run({ github, k8s })).rejects.toThrow(/job boom/);
+
+    // The world is replayable, not half-written: no marker, no Job object.
+    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
+    expect(k8s.jobs).toEqual([]);
+    github.writeLog.length = 0;
+    k8s.writeLog.length = 0;
+
+    await run({ github, k8s });
+
+    // Nothing left to clear, and the round starts. The volume and its Secret are
+    // reclaimed a second time (the crashed pass had already built fresh ones):
+    // "is this volume spent?" has no carrier, so the rule is unconditional, and
+    // one wasted token mint is cheaper than a round that no-ops (ADR-0016).
+    expect(github.writeLog).toEqual([`mintInstallationToken ${REPO}`]);
+    expect(k8s.writeLog).toEqual([
+      `deletePvc ${CLOSEOUT}`,
+      `deleteSecret ${tokenSecretName(CLOSEOUT)}`,
+      `createPvc ${CLOSEOUT}`,
+      `createSecret ${tokenSecretName(CLOSEOUT)}`,
+      `createJob ${CLOSEOUT}`,
+    ]);
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
   });
 
   it("counts the wait as closeoutConsumed, so a consumed closeout is never silent", async () => {
