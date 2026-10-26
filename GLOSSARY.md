@@ -80,6 +80,10 @@ _Avoid_: worker, pod, task
 一条 conversation 上一次**报过结论**的运行。票的 conversation 可以有多轮：报过结论之后，人重开这张票、或重入一张 `blocked` 票，runner 就在同一块卷上开新的一轮，带着上一轮的历史；收尾 role 的 conversation 恰好一轮，所以它的每一轮都在**新卷**上开始（[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)、[ADR-0017](docs/adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）。
 _Avoid_: run（那是「一次运行」，一个 Job 跑一轮）, attempt, 轮次
 
+**Round header**:
+runner 在 round ≥ 2 时前置到 prompt 的那一段：第几轮、上一轮报了哪个 outcome、什么时候报的，以及「正文里的评论是那之后发生的事」。它是 runner 生成的，不住在 prompt ConfigMap 里——它说的那些事实只活在卷上（[ADR-0017](docs/adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）；round 1 没有它。
+_Avoid_: 轮次前缀, round note, preamble
+
 **Runner**:
 镜像里烧的 TypeScript 程序：打开 Ticket PVC 上的 durable storage、注入 prompt 与模型、跑一个 agent role、在真正终态时把 run result 写进自己 Job 的 annotation。它是 Job 里唯一的 k8s writer。
 _Avoid_: wrapper, entrypoint, pi 命令

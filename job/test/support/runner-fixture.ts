@@ -15,9 +15,9 @@ import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { reviewerExtension } from "../../src/internal/reviewer-tools.js";
-import { buildRegistry } from "../../src/internal/runner.js";
+import { buildRegistry, type RunDeps } from "../../src/internal/runner.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import type { WorkItemV1 } from "@remote-agent/shared";
+import type { RunResultV1, WorkItemV1 } from "@remote-agent/shared";
 import { jobPaths, type JobPaths, type RunnerEnv } from "../../src/internal/env.js";
 
 const exec = promisify(execFile);
@@ -168,6 +168,39 @@ export async function runnerFixture(): Promise<RunnerFixture> {
 
 export async function cleanup(fixture: RunnerFixture | undefined): Promise<void> {
   if (fixture) await rm(fixture.root, { recursive: true, force: true });
+}
+
+/** Everything the runner does to the outside world, in order. */
+export interface Recorded {
+  events: string[];
+  results: unknown[];
+}
+
+/**
+ * The run's dependencies with a fixture's real pieces, plus a recorder for the two
+ * things the runner does to the outside world — a push that really lands on the
+ * fixture's bare remote, and the annotation — and `noOwnRunResult` as the default
+ * own-Job answer (the shape of a Job that was created fresh).
+ */
+export function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<RunDeps> = {}): RunDeps {
+  return {
+    env: f.env,
+    paths: f.paths,
+    models: f.models,
+    log: () => {},
+    openStorage: openStorageFor(),
+    annotate: async (result: RunResultV1) => {
+      recorded.events.push("annotate");
+      recorded.results.push(result);
+    },
+    push: async () => {
+      recorded.events.push("push");
+      await git(["push", "origin", `HEAD:refs/heads/${f.env.branch}`], f.worktree);
+      return { kind: "pushed" } as const;
+    },
+    hasOwnRunResult: noOwnRunResult,
+    ...overrides,
+  };
 }
 
 export function openStorageFor(): (path: string) => Promise<Awaited<ReturnType<typeof openNodeSqliteStorage>>> {

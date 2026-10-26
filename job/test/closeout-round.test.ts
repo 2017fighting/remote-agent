@@ -3,16 +3,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RUNNER_EXIT } from "@remote-agent/shared";
 import { MIN_FREE_BYTES, seed } from "../src/internal/seed.js";
-import { run } from "../src/internal/runner.js";
+import { run, type RunDeps } from "../src/internal/runner.js";
 import type { RunnerEnv } from "../src/internal/env.js";
 import {
   cleanup,
+  depsFor as recordedDeps,
   finishSpecCall,
-  git,
-  noOwnRunResult,
-  openStorageFor,
   runnerFixture,
   WORK_ITEM,
+  type Recorded,
   type RunnerFixture,
 } from "./support/runner-fixture.js";
 
@@ -34,30 +33,8 @@ afterEach(async () => {
   fixture = undefined;
 });
 
-interface Recorded {
-  events: string[];
-  results: unknown[];
-}
-
-function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<Parameters<typeof run>[0]> = {}) {
-  return {
-    env: specEnv(f),
-    paths: f.paths,
-    models: f.models,
-    log: () => {},
-    openStorage: openStorageFor(),
-    annotate: async (result: unknown) => {
-      recorded.events.push("annotate");
-      recorded.results.push(result);
-    },
-    push: async () => {
-      recorded.events.push("push");
-      await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], f.worktree);
-      return { kind: "pushed" } as const;
-    },
-    hasOwnRunResult: noOwnRunResult,
-    ...overrides,
-  };
+function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<RunDeps> = {}) {
+  return recordedDeps(f, recorded, { env: specEnv(f), ...overrides });
 }
 
 /** The spec's own run: the closeout role, on the spec's own number. */

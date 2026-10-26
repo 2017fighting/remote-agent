@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { WorkItemComment, WorkItemTicket, WorkItemV1 } from "@remote-agent/shared";
 import type { AgentRole } from "./env.js";
+import type { PreviousRound } from "./round.js";
 
 /**
  * ConfigMap `remote-agent-prompts` keys (ADR-0004): `_common` first, then the
@@ -118,6 +119,48 @@ export function workBody(workItem: WorkItemV1, role: AgentRole): string {
     return tickets === undefined ? workItem.body : `${workItem.body}\n\n${renderTicketMap(tickets)}`;
   }
   return withComments(workItem.body, workItem.comments);
+}
+
+/**
+ * The round header the runner puts in front of the prompt for round 2 and later
+ * (ADR-0017): what the conversation cannot say for itself.
+ *
+ * The history in front of the model ends with its own last act — reporting `done`
+ * or `blocked` — and the work item's comments are the human's answer to it. Without
+ * a line naming the round, the cheapest thing for the model to do is report the
+ * same outcome again, which is the failure ADR-0011 names ("否则 agent 可能直接再报
+ * 一次 done"). Round 1 gets nothing: there is no previous round to describe.
+ *
+ * It is generated here rather than authored in the ConfigMap because the facts it
+ * states — which round, how the last one ended, when — live on the volume, and the
+ * template's key and placeholder surface stays untouched (ADR-0004, ADR-0017).
+ */
+export interface RoundContext {
+  /** 1 for a fresh conversation; every round that reported adds one. */
+  round: number;
+  /**
+   * How the round before this one ended, read before the reset cleared it — or
+   * `null` when this pod did not see that boundary (it opened a volume whose reset
+   * already landed), in which case the header says only what is still true.
+   */
+  previous: PreviousRound | null;
+}
+
+export function roundHeader(context: RoundContext): string {
+  if (context.round <= 1) return "";
+  const previous = context.previous;
+  const reported =
+    previous?.outcome == null
+      ? "A previous round of this ticket already ran and reported its outcome"
+      : `A previous round of this ticket already ran and reported **${previous.outcome}**`;
+  const when = previous?.completedAt ? ` at ${previous.completedAt}` : "";
+  return [
+    `# Round ${context.round} of this ticket`,
+    "",
+    `${reported}${when}. This run is a new round on the same conversation, not a continuation of that ` +
+      "report: the work item's comments are what happened since, so re-read them and continue the work — do " +
+      "not simply re-report the outcome.",
+  ].join("\n");
 }
 
 /**

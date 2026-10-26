@@ -20,8 +20,8 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
 import { RUNNER_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
 import type { JobPaths, RunnerEnv } from "./env.js";
-import { renderPrompt } from "./prompt.js";
-import { readPreviousRound, resetForNewRound, roundHeader, type PreviousRound, type RoundContext } from "./round.js";
+import { renderPrompt, roundHeader, type RoundContext } from "./prompt.js";
+import { readPreviousRound, resetForNewRound, type PreviousRound } from "./round.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
 import {
   ConflictHandoffDoc,
@@ -613,18 +613,25 @@ function isSettled(submission: SubmissionRecord): boolean {
 
 /**
  * Which round this Job is (ADR-0017): round 1 is a fresh conversation, and every
- * reported round adds one.
+ * round that **reported** adds one.
  *
- * The count comes from the same scan that numbers the retry key — this
- * conversation's settled **input** submissions under the run's base key and its
- * numbered retries. The conflict turn's family (`…:implement-ticket#conflict`) is
- * deliberately outside it, or the two families would consume each other's numbers
- * (#58). The reset at a round boundary touches no submission, so the number a
- * crashed new round reads on its next pod is the same one.
+ * "Reported" is the whole point, and it is why the count filters on the settled
+ * status rather than taking every settled submission: a run that died `unanswered`
+ * (a model error) never reported anything, so the pod that retries it is still
+ * running the same round (#52). Counting it as a round would hand that retry a
+ * header claiming a previous round already reported an outcome — a lie the model
+ * cannot check.
+ *
+ * The count comes from the same scan that numbers the retry key. The conflict
+ * turn's family (`…:implement-ticket#conflict`) is deliberately outside it, or the
+ * two families would consume each other's numbers (#58). The reset at a round
+ * boundary touches no submission, so the number a crashed new round reads on its
+ * next pod is the same one.
  */
 async function roundNumberFor(deps: RunDeps, storage: Storage, root: Conversation): Promise<number> {
   const settled = await settledInputSubmissions(storage, root, runRequestId(deps));
-  return settled.length + 1;
+  const reported = settled.filter((submission) => submission.status === "done").length;
+  return reported + 1;
 }
 
 /**

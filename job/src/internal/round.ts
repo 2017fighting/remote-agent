@@ -1,6 +1,6 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, Harness as HarnessHandle } from "@earendil-works/pi-durable";
-import { isRunResultV1 } from "@remote-agent/shared";
+import { isRunResultV1, type RunResultOutcome } from "@remote-agent/shared";
 import { ReviewFixedPointDoc } from "./fixed-point-doc.js";
 import {
   ConflictHandoffDoc,
@@ -55,7 +55,7 @@ export async function resetForNewRound(harness: HarnessHandle, root: Conversatio
  * the round (ADR-0017).
  */
 export interface PreviousRound {
-  outcome: string | null;
+  outcome: RunResultOutcome | null;
   completedAt: string;
 }
 
@@ -65,7 +65,7 @@ export async function readPreviousRound(harness: HarnessHandle, root: Conversati
   return { outcome: outcomeOf(committed?.payload ?? ""), completedAt: completed?.completedAt ?? "" };
 }
 
-function outcomeOf(payload: string): string | null {
+function outcomeOf(payload: string): RunResultOutcome | null {
   if (payload === "") return null;
   try {
     const parsed: unknown = JSON.parse(payload);
@@ -73,43 +73,4 @@ function outcomeOf(payload: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** What the runner knows about this round when it renders the prompt. */
-export interface RoundContext {
-  /** 1 for a fresh conversation; every reported round adds one. */
-  round: number;
-  /**
-   * How the round before this one ended, read before the reset cleared it — or
-   * `null` when this pod did not see that boundary (it opened a volume whose reset
-   * already landed), in which case the header says only what is still true.
-   */
-  previous: PreviousRound | null;
-}
-
-/**
- * The header the runner puts in front of the prompt for round 2 and later
- * (ADR-0017): what the conversation cannot say for itself.
- *
- * The history in front of the model ends with its own last act — reporting `done`
- * or `blocked` — and the work item's comments are the human's answer to it. Without
- * a line naming the round, the cheapest thing for the model to do is report the
- * same outcome again, which is the failure ADR-0011 names ("否则 agent 可能直接再报
- * 一次 done"). Round 1 gets nothing: there is no previous round to describe.
- */
-export function roundHeader(context: RoundContext): string {
-  if (context.round <= 1) return "";
-  const previous = context.previous;
-  const reported =
-    previous?.outcome == null
-      ? "A previous round of this ticket already ran and reported its outcome"
-      : `A previous round of this ticket already ran and reported **${previous.outcome}**`;
-  const when = previous?.completedAt ? ` at ${previous.completedAt}` : "";
-  return [
-    `# Round ${context.round} of this ticket`,
-    "",
-    `${reported}${when}. This run is a new round on the same conversation, not a continuation of that ` +
-      "report: the work item's comments are what happened since, so re-read them and continue the work — do " +
-      "not simply re-report the outcome.",
-  ].join("\n");
 }

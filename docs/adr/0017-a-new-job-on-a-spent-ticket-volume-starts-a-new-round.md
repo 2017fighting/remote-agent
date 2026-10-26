@@ -19,7 +19,7 @@
   - `review-fixed-point` 不清 ⇒ 新一轮继承上一轮的起点，review 范围错（它是 per-run 的值）。
   - `conflict-handoff` 不清 ⇒ 新一轮没有它自己那一轮的解冲突预算。
   - `run-completed` 不清 ⇒ 就是本文要修的那道墙。
-- **读序：先把这一轮要说的事实读出来，再一次 commit 清五个文档，然后才渲 prompt / submit。** 要读的：上一轮的 outcome（`run-result`）、上一轮的 `completedAt`（`run-completed`）、轮次号。**轮次号 = 该 conversation 上基键族（`…:<role>` 与它的 `#retry-<n>`）里已结算的 `input` submission 数 + 1**；冲突交接那一族（`…:<role>#conflict`）不算，否则两族互相占序号（[#58](https://github.com/2017fighting/remote-agent/issues/58)）。submission key 本身一字不动：基键已结算时 `#retry-<n>` 自己会往前走（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。
+- **读序：先把这一轮要说的事实读出来，再一次 commit 清五个文档，然后才渲 prompt / submit。** 要读的：上一轮的 outcome（`run-result`）、上一轮的 `completedAt`（`run-completed`）、轮次号。**轮次号 = 该 conversation 上基键族（`…:<role>` 与它的 `#retry-<n>`）里已结算**且 `status=done`**的 `input` submission 数 + 1**——「报过结论」才是轮次（`GLOSSARY.md` 的 Round），而一条 `unanswered`（模型报错）的 submission 什么都没报，重跑它的那个 pod 仍在同一轮里（[#52](https://github.com/2017fighting/remote-agent/issues/52)），所以它不计；把它计进去，重跑就会拿到一段声称「上一轮已经报过结论」的头。冲突交接那一族（`…:<role>#conflict`）也不算，否则两族互相占序号（[#58](https://github.com/2017fighting/remote-agent/issues/58)）。submission key 本身一字不动：基键已结算时 `#retry-<n>` 自己会往前走。
 - **崩在重置的两侧都干净**：崩在 commit 之前 ⇒ 什么都没变，下一个 pod 看到的还是「新 Job + 已报过结论的卷」，重来一次重置；崩在 commit 之后 ⇒ conversation 是干净的未完成态，下一个 pod 照常 `resume()` / `submit()`。
 - **ticket role 的 `{{work_body}}` 从「只有正文」变成「正文 + `## Comments`」**：与 spec role 的 ticket map 同一套渲染（`**author** (createdAt):` + 正文，最旧在前），**每一轮都渲全部评论**，不按时间切——旧评论对**第一轮**同样从没到过模型（一条票上的评论此前根本进不了 prompt），而重复的部分在第二轮之后已在 conversation 历史里，代价只是几十行文本。
 - **runner 在 round ≥ 2 时给渲好的 prompt 前置一段 round 头**：轮次号 + 上一轮的 outcome + 上一轮报结论的时刻 + 一句「正文里的评论是那之后发生的事：重读它们、接着做，不要直接再报一次」。**模板与占位符一字不动**（ADR-0004 的键面不变），因为这段话说的事实（上一轮怎么结束的、什么时候）只活在卷上。

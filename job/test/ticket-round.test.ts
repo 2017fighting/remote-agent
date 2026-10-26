@@ -3,13 +3,12 @@ import { MIN_FREE_BYTES, seed } from "../src/internal/seed.js";
 import { run } from "../src/internal/runner.js";
 import {
   cleanup,
+  depsFor,
   finishTicketCall,
-  git,
-  noOwnRunResult,
-  openStorageFor,
   runnerFixture,
   submittedPrompts,
   WORK_ITEM,
+  type Recorded,
   type RunnerFixture,
 } from "./support/runner-fixture.js";
 
@@ -29,32 +28,6 @@ afterEach(async () => {
   await cleanup(fixture);
   fixture = undefined;
 });
-
-interface Recorded {
-  events: string[];
-  results: unknown[];
-}
-
-function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<Parameters<typeof run>[0]> = {}) {
-  return {
-    env: f.env,
-    paths: f.paths,
-    models: f.models,
-    log: () => {},
-    openStorage: openStorageFor(),
-    annotate: async (result: unknown) => {
-      recorded.events.push("annotate");
-      recorded.results.push(result);
-    },
-    push: async () => {
-      recorded.events.push("push");
-      await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], f.worktree);
-      return { kind: "pushed" } as const;
-    },
-    hasOwnRunResult: noOwnRunResult,
-    ...overrides,
-  };
-}
 
 function seedDeps(f: RunnerFixture, log: string[]) {
   return {
