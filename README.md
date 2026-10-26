@@ -72,6 +72,8 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 
 S3N 的 outcome **只消费一次**：这块分支判完还留在门内，而它唯一的「已消费」载体原本是它建出来的票——票全部关闭之后载体就没了，旧收尾 Job 却还在 30 分钟保留窗里，同一批 `newTickets` 会被再建一遍。所以 S3N 在 spec 上加一个 `closeout-consumed` label（判定那一次写、起下一块收尾 Job 那一次清）：新票全关之后 spec 停在这儿等旧 Job 的 `DELETED`，然后起一块**新的**收尾 Job 重新判断还剩什么（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）。
 
+**收尾的每一轮都在一块新卷上开始**（[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)，[#60](https://github.com/2017fighting/remote-agent/issues/60)）：收尾 role 的 conversation 报过一次就是终态的，同一块卷上的第二轮只会 `seed-skip` + `already-complete` + 不写 annotation，App 只能判 `no-result`——所以起收尾 Job 时先删掉上一轮那块卷与它的同名 Secret，再建新的。代价明写：上一轮的对话全文在下一轮开始时消失，App 在 GitHub 上的那条评论成为唯一记录（`blocked` / `error` 的 30 天保留期只在**没有下一轮**时有效，想读全文要在重入前读）。runner 侧另有一道守卫：打开卷发现 conversation 已完成、而自己 Job 上没有 `run-result` annotation（新 Job 跑在一块 Spent volume 上）就 exit 78 → `unrecoverable`，评论里现成的指引直接叫人删卷。
+
 这条修法明写两个代价：**每轮之间多一个 ≤30 分钟的等删除间隙**（等不及就 `kubectl delete job <名>`，删除事件即唤醒）；以及**两个崩溃窗口仍然没有载体**——「标记写完、票还没建」丢整批，「票建好、还没链接」丢剩下的票外加一张孤儿票，都靠 TTL 后的新收尾 Job 补回。反过来的写序（先建票后标记）会把重复建票的洞留着。
 
 **代价：轮数无上限。** 收尾 Job 每轮都可能再报 `newTickets`，没人踩刹车；一张 spec 到底要跑多少轮才收尾，不再有人类检查点兜着。并发仍然有界（每轮受 [`MAX_JOBS_GLOBAL` / `MAX_JOBS_PER_REPO`](#job并发) 约束，不会同时起一堆），无上限的只是轮数。逃生口两个，都在人手上：在 issue 上摘 `agent:implement`（整条 spec 立刻退出门），或 `kubectl delete job <名>`（只影响当前这一块）。
@@ -85,10 +87,10 @@ spec 上**从不写 `agent:in-progress`**：它的「在跑」就是「在门内
 1. Claim 时 App 先 create-if-absent 建这块卷（名字就是 Job 名 `agent-<repo-slug>-<issue#>`，`ReadWriteOncePod`，SC `truenas-iscsi-delete` 薄置备，默认 8Gi = 文件系统上限而不是池占用），然后才建 Job、最后写 `agent:in-progress`
 2. Job 的 init container `seed` 把工作副本播进这块卷：`git ls-remote --exit-code` 判 `agent/spec-<n>` 分支在不在 → 全量克隆（分支在就直接 `--branch` 克隆，不在就从 `main` 克隆再 `checkout -b`）→ `fetch origin main:refs/remotes/origin/main`（spec 收尾 role 的 `merge-base origin/main HEAD` 靠它）→ 最后原子写 `state/seeded.json` marker。播种前先做一次 `df` 预检（< 3Gi 直接判 `disk` 失败），因为卷满会让同一个 phase 反复撞 ENOSPC。**工作副本只落在 `repo/`**：`state/` 只放 marker 与 session storage（`state/` 永远在 git 视野之外，`git clean -xfd` 删不掉唯一一份可续跑的历史），`home/` 只当 `HOME`（[ADR-0009](docs/adr/0009-ticket-volume-seeding.md)）
 3. 主容器 `runner` 用的是同一块卷：工作副本在 `repo/`，durable 的 session storage（`session.sqlite`，WAL）在 `state/`，`HOME` 在 `home/`（npm 不重下）。**没有「每次都从零拉取」的问题，也没有需要同步的 base**：同一张票重入时 marker 匹配就跳过播种，未提交改动与历史全在；只有 marker 缺失、且 `state/` 里也没有 session 时才清 `repo/` 重播。
-4. 卷比 Job 活得久，因为 `resume()` 与「人回来把对话全文读出来」（[architecture.md §8 缺口 B](docs/architecture.md#8-两处缺口)）都要它。生死由 App 按 `remote-agent/expires-at` 判：判 Outcome 那一次 reconcile 写一次（`done` 7 天，`blocked` / `error` 30 天，set-if-absent），Claim 时清掉；**不存在 = 不可删**。兜底只看 k8s：无 `expires-at` ∧ 无未终态 Job ∧ 年龄 > 30 天 → 删（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）
+4. 卷比 Job 活得久，因为 `resume()` 与「人回来把对话全文读出来」（[architecture.md §8 缺口 B](docs/architecture.md#8-三处缺口)）都要它。生死由 App 按 `remote-agent/expires-at` 判：判 Outcome 那一次 reconcile 写一次（`done` 7 天，`blocked` / `error` 30 天，set-if-absent），Claim 时清掉；**不存在 = 不可删**。兜底只看 k8s：无 `expires-at` ∧ 无未终态 Job ∧ 年龄 > 30 天 → 删（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）
 5. 回收的对象是两个：Ticket PVC + 同名的 per-Job Secret（凭证跟卷一起死）；Job 本身归 k8s 的 `ttlSecondsAfterFinished`，App 既无 Job 的 `delete` 也无 `patch` 权（[ADR-0012](docs/adr/0012-job-deletion-ttl.md)）
 
-spec 的收尾 Job（`implement-spec`）也是同一套：确定性名、同一块自己的 Ticket PVC、同一条回收规则——它同样会拿到 `expires-at`。
+spec 的收尾 Job（`implement-spec`）也是同一套：确定性名、同一块自己的 Ticket PVC、同一条回收规则——它同样会拿到 `expires-at`。**唯一的例外是删除点**：起下一块收尾 Job 时先删掉上一轮那块（[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)），因为收尾 role 的 conversation 报过一次就不再跑。
 
 ## implement ticket prompt
 
