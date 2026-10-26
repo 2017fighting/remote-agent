@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RUNNER_EXIT, SEED_EXIT } from "@remote-agent/shared";
@@ -37,6 +37,14 @@ async function otherTicket(f: RunnerFixture): Promise<string> {
   await git(["clone", f.remote, other], f.root);
   await git(["checkout", "-B", "agent/spec-33", "origin/agent/spec-33"], other);
   return other;
+}
+
+/** Whether a path exists: git's rebase state is a directory, not a ref. */
+async function exists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** Commit one file in a worktree and return the new HEAD. */
@@ -115,8 +123,8 @@ describe("push: the exit code a failed push ends the pod with", () => {
   });
 });
 
-describe("push: a conflict no later pod can fix", () => {
-  it("fails fatally, leaves no half-applied rebase, and keeps the commits", async () => {
+describe("push: a conflict the agent resolves (#58)", () => {
+  it("hands the stopped rebase over instead of aborting it", async () => {
     fixture = await runnerFixture();
     const other = await otherTicket(fixture);
     await commit(other, "contested.txt", "theirs\n");
@@ -126,17 +134,42 @@ describe("push: a conflict no later pod can fix", () => {
     // The same file, different content: git cannot pick a winner.
     const ours = await commit(fixture.worktree, "contested.txt", "ours\n");
 
-    await expect(pushToSpecBranch({ env: fixture.env, paths: fixture.paths, log: () => {} })).rejects.toThrow(
-      FatalPushError,
-    );
+    const outcome = await pushToSpecBranch({ env: fixture.env, paths: fixture.paths, log: () => {} });
 
+    // The one thing this call may still decide is "which files".
+    expect(outcome).toEqual({ kind: "conflict", files: ["contested.txt"] });
     // Nothing was pushed…
     expect(await git(["rev-parse", "agent/spec-33"], fixture.remote)).toBe(theirs);
-    // …the worktree is back where the run left it (no rebase in progress, our commit intact)…
-    expect(await git(["status", "--porcelain"], fixture.worktree)).toBe("");
-    expect(await git(["rev-parse", "HEAD"], fixture.worktree)).toBe(ours);
-    // …and no conflict markers were left in the file the model wrote.
-    expect(await readFile(join(fixture.worktree, "contested.txt"), "utf8")).toBe("ours\n");
+    // …the rebase is stopped on the conflict, which is what the agent gets handed:
+    // HEAD sits on the tip being replayed onto, and REBASE_HEAD is our own commit.
+    expect(await git(["rev-parse", "HEAD"], fixture.worktree)).toBe(theirs);
+    expect(await git(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], fixture.worktree)).toBe(ours);
+    // …and the worktree carries git's conflict markers, not a resolution.
+    expect(await readFile(join(fixture.worktree, "contested.txt"), "utf8")).toMatch(/<<<<<<< /);
+  });
+
+  it("pushes the resolved work once the agent has finished the rebase", async () => {
+    fixture = await runnerFixture();
+    const other = await otherTicket(fixture);
+    await commit(other, "contested.txt", "theirs\n");
+    await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], other);
+    const theirs = await git(["rev-parse", "HEAD"], other);
+    await commit(fixture.worktree, "contested.txt", "ours\n");
+
+    await pushToSpecBranch({ env: fixture.env, paths: fixture.paths, log: () => {} });
+
+    // What the agent does: write the merged file, stage it, finish the rebase.
+    await writeFile(join(fixture.worktree, "contested.txt"), "both\n");
+    await git(["add", "contested.txt"], fixture.worktree);
+    await git(["-c", "core.editor=true", "rebase", "--continue"], fixture.worktree);
+
+    const outcome = await pushToSpecBranch({ env: fixture.env, paths: fixture.paths, log: () => {} });
+
+    expect(outcome).toEqual({ kind: "pushed" });
+    const pushed = await git(["rev-parse", "agent/spec-33"], fixture.remote);
+    // Both sides landed: the other ticket's commit is an ancestor, the resolution is on top.
+    expect(await git(["merge-base", "--is-ancestor", theirs, pushed], fixture.remote)).toBe("");
+    expect(await git(["show", `${pushed}:contested.txt`], fixture.remote)).toBe("both");
   });
 
   /**

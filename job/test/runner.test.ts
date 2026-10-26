@@ -1,14 +1,23 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { GENERATION_RETRY_POLICY, run } from "../src/internal/runner.js";
+import { RUNNER_EXIT } from "@remote-agent/shared";
+import {
+  FatalPushError,
+  GENERATION_RETRY_POLICY,
+  pushExitCodeFor,
+  pushToSpecBranch,
+  run,
+} from "../src/internal/runner.js";
 import { ReviewFixedPointDoc } from "../src/internal/fixed-point-doc.js";
+import { ConflictHandoffDoc, RunResultDoc } from "../src/internal/run-docs.js";
 import { readRunnerEnv, StartupError, type RunnerEnv } from "../src/internal/env.js";
 import { runRunner } from "../src/runner.js";
 import {
+  blockedCall,
   cleanup,
   finishTicketCall,
   fauxAssistantMessage,
@@ -46,6 +55,7 @@ function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<Parame
     push: async () => {
       recorded.events.push("push");
       await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], f.worktree);
+      return { kind: "pushed" } as const;
     },
     ...overrides,
   };
@@ -484,6 +494,238 @@ describe("runner: one run to a Result tool", () => {
       run(depsFor(fixture, recorded, { env: { ...fixture.env, thinkingLevel: "low" } })),
     ).rejects.toThrow(/not the pinned level high/);
     expect(recorded.events).toEqual([]);
+  });
+});
+
+/** Every user entry the volume carries, oldest first: the run's prompt, then a conflict turn's. */
+async function submittedPrompts(f: RunnerFixture): Promise<string[]> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(f.paths.sessionDatabase),
+    { models: f.models, registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const page = await root.entries({}, 200, undefined, BACKGROUND_CONTEXT);
+    return page.items
+      .flatMap((entry) => {
+        if (entry.kind !== "pi.user") return [];
+        const content = (entry.model?.[0] as { content?: unknown } | undefined)?.content;
+        return [typeof content === "string" ? content : JSON.stringify(content)];
+      })
+      .reverse();
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/** A second clone of the bare remote, standing in for the ticket that pushed first. */
+async function otherTicket(f: RunnerFixture): Promise<string> {
+  const other = join(f.root, "other");
+  await git(["clone", f.remote, other], f.root);
+  await git(["checkout", "-B", "agent/spec-33", "origin/agent/spec-33"], other);
+  return other;
+}
+
+/** `contested.txt` says one thing on the branch and another here: git cannot pick. */
+async function contestedFile(f: RunnerFixture): Promise<string> {
+  const other = await otherTicket(f);
+  await writeFile(join(other, "contested.txt"), "theirs\n");
+  await git(["add", "-A"], other);
+  await git(["commit", "-m", "work contested.txt (another ticket)"], other);
+  await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], other);
+  await writeFile(join(f.worktree, "contested.txt"), "ours\n");
+  await git(["add", "-A"], f.worktree);
+  await git(["commit", "-m", "work contested.txt (this run)"], f.worktree);
+  return other;
+}
+
+/**
+ * The hand-off turn's work: the merged file, staged, and the rebase carried to its
+ * end. With `rival`, another ticket pushes to the same file right after — the branch
+ * moving again under a resolution that was already reported.
+ */
+function resolveConflictCall(options: { id?: string; rival?: string } = {}): ReturnType<typeof fauxAssistantMessage> {
+  const rival = JSON.stringify(options.rival ?? "");
+  const moved = options.rival === undefined ? "" :
+    ` && cd ${rival} && printf 'theirs again\\n' > contested.txt && ` +
+    "git -c user.email=test@example.com -c user.name=test commit -qam 'work contested.txt (another ticket, again)' && " +
+    "git push -q origin HEAD:refs/heads/agent/spec-33";
+  return fauxAssistantMessage(
+    [
+      fauxToolCall(
+        "bash",
+        { command: `printf 'both\\n' > contested.txt && git add contested.txt && git rebase --continue${moved}` },
+        { id: options.id ?? "call-resolve" },
+      ),
+    ],
+    { stopReason: "toolUse" },
+  );
+}
+
+/** The real push, recorded so a test can see where it happened in the sequence. */
+function realPush(f: RunnerFixture, recorded: { events: string[] }) {
+  return async () => {
+    recorded.events.push("push");
+    return pushToSpecBranch({ env: f.env, paths: f.paths, log: () => {} });
+  };
+}
+
+/**
+ * The state a pod leaves when it dies between claiming a conflict hand-off and
+ * submitting the turn: a committed run result plus a claimed, unreported hand-off.
+ */
+async function seedHandoffState(f: RunnerFixture, files: string[]): Promise<void> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(f.paths.sessionDatabase),
+    { models: f.models, registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT, {
+      agent: { model: { provider: "omniroute", modelId: "default" }, thinkingLevel: "high" },
+    });
+    await root.commit(async (tx) => {
+      const result = await tx.doc(RunResultDoc, root.id);
+      result.payload = JSON.stringify({ v: 1, outcome: "done", summary: "first pass" });
+      const handoff = await tx.doc(ConflictHandoffDoc, root.id);
+      handoff.attemptedAt = "2026-01-01T00:00:00.000Z";
+      handoff.files = files;
+    }, BACKGROUND_CONTEXT);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/**
+ * A conflict is one file rewritten on both sides: git cannot pick a winner, and the
+ * old push died here on purpose (#55). The agent that wrote one of the two sides is
+ * the one that can pick — so the runner hands it the stopped rebase (#58).
+ */
+describe("runner: a conflicted push is resolved by the agent", () => {
+  it("hands the stopped rebase over, then pushes and annotates the resolution", async () => {
+    fixture = await runnerFixture();
+    await contestedFile(fixture);
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([
+      finishTicketCall("first pass"),
+      resolveConflictCall(),
+      finishTicketCall("resolved the conflict"),
+    ]);
+
+    const outcome = await run(depsFor(fixture, recorded, { push: realPush(fixture, recorded) }));
+
+    expect(outcome.exitCode).toBe(0);
+    // Push, one turn, push again, one annotation: the turn's report is what lands.
+    expect(recorded.events).toEqual(["push", "push", "annotate"]);
+    expect(recorded.results).toHaveLength(1);
+    expect(recorded.results[0]).toMatchObject({ outcome: "done", summary: "resolved the conflict" });
+    // Both sides landed on the branch, on the one file that conflicted.
+    expect(await git(["show", "agent/spec-33:contested.txt"], fixture.remote)).toBe("both");
+    // Exactly one extra submission, keyed apart from the run it reopens.
+    expect(await submissionRequestIds(fixture)).toEqual([
+      `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`,
+      `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket#conflict`,
+    ]);
+    // Its message says which rebase is stopped and on which paths.
+    const prompts = await submittedPrompts(fixture);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("agent/spec-33");
+    expect(prompts[1]).toContain("contested.txt");
+  });
+
+  it("finishes a claimed turn before pushing when the previous pod died before submitting it", async () => {
+    fixture = await runnerFixture();
+    await contestedFile(fixture);
+    // The stopped rebase the crashed pod leaves behind: its push started it, its
+    // claim recorded it, and it died before submitting the turn.
+    await pushToSpecBranch({ env: fixture.env, paths: fixture.paths, log: () => {} });
+    await seedHandoffState(fixture, ["contested.txt"]);
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([resolveConflictCall(), finishTicketCall("resolved the conflict")]);
+
+    await run(depsFor(fixture, recorded, { push: realPush(fixture, recorded) }));
+
+    // The turn came first: a push before it would push nothing and report the run done.
+    expect(recorded.events).toEqual(["push", "annotate"]);
+    expect(recorded.results[0]).toMatchObject({ summary: "resolved the conflict" });
+    expect(await git(["show", "agent/spec-33:contested.txt"], fixture.remote)).toBe("both");
+    // No second run was submitted: the claimed turn already exists.
+    expect(await submissionRequestIds(fixture)).toEqual([
+      `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket#conflict`,
+    ]);
+  });
+
+  it("fails when the turn reports without finishing the rebase", async () => {
+    fixture = await runnerFixture();
+    await contestedFile(fixture);
+    const recorded: Recorded = { events: [], results: [] };
+    // Two reports and no `git rebase --continue` in between.
+    fixture.script([finishTicketCall("first pass"), finishTicketCall("claimed done")]);
+
+    const error = await run(depsFor(fixture, recorded, { push: realPush(fixture, recorded) })).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(FatalPushError);
+    expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.fatal);
+    expect((error as Error).message).toMatch(/still stopped on a conflict/);
+    // Nothing was pushed or annotated: the run's work never left the volume.
+    expect(recorded.events).toEqual(["push"]);
+    expect(recorded.results).toEqual([]);
+  });
+
+  it("goes fatal on the next pod too when the reported rebase is still stopped", async () => {
+    fixture = await runnerFixture();
+    await contestedFile(fixture);
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("first pass"), finishTicketCall("claimed done")]);
+    await run(depsFor(fixture, first, { push: realPush(fixture, first) })).catch(() => {});
+
+    const second: Recorded = { events: [], results: [] };
+    const error = await run(depsFor(fixture, second, { push: realPush(fixture, second) })).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(FatalPushError);
+    expect((error as Error).message).toMatch(/still stopped on a conflict/);
+    // A reported hand-off is a spent budget: no model request, no push, no annotation.
+    expect(fixture.pendingResponses()).toBe(0);
+    expect(second.events).toEqual([]);
+    expect(second.results).toEqual([]);
+  });
+
+  it("stops after the one resolution turn when the branch moves again underneath it", async () => {
+    fixture = await runnerFixture();
+    const rival = await contestedFile(fixture);
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([
+      finishTicketCall("first pass"),
+      resolveConflictCall({ rival }),
+      finishTicketCall("resolved the conflict"),
+    ]);
+
+    const error = await run(depsFor(fixture, recorded, { push: realPush(fixture, recorded) })).catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(FatalPushError);
+    expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.fatal);
+    expect((error as Error).message).toMatch(/after the one resolution turn/);
+    // One turn, two pushes, no annotation: the budget is one reported attempt.
+    expect(recorded.events).toEqual(["push", "push"]);
+    expect(recorded.results).toEqual([]);
+    expect(await submissionRequestIds(fixture)).toHaveLength(2);
+  });
+
+  it("annotates `blocked` without pushing when the agent cannot resolve it", async () => {
+    fixture = await runnerFixture();
+    await contestedFile(fixture);
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("first pass"), blockedCall({ summary: "the two intents cannot both hold" })]);
+
+    await run(depsFor(fixture, recorded, { push: realPush(fixture, recorded) }));
+
+    // The rebase is still stopped, so pushing could only conflict again — and an
+    // `error` would replace the agent's verdict.
+    expect(recorded.events).toEqual(["push", "annotate"]);
+    expect(recorded.results[0]).toMatchObject({ outcome: "blocked" });
   });
 });
 

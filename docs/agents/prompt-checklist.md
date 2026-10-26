@@ -103,6 +103,8 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 **不做**（agent 手上就不该有这些通道）：push、开 PR、关票或改 label、调 `gh`、调 `kubectl`。push 由 runner 做，GitHub 写入由 App 做（ADR-0002）。
 
+**唯一的例外写在这里**（[#58](https://github.com/2017fighting/remote-agent/issues/58)）：冲突时 runner 会把**停在冲突上的 rebase** 交给 agent，那一刻工作副本归它——解冲突、`git add`、`GIT_EDITOR=true git rebase --continue`、跑全量测试与 typecheck、用同一个 Result tool 再自述一次。规矩写死在同一段里：保住对方提交的意图、不许 `--abort` / `--skip` / `-X ours|theirs`、不重跑 `code_review`（那一轮已用掉）、**仍然不 push**。不写成新条目，是因为它只从「不做」这一栏里开一个口子，其余各栏不变。
+
 - **落点**：init container / runner / App。
 
 ### 11. tdd 的 seam → `_common`

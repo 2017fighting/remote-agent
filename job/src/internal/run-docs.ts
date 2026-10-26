@@ -59,3 +59,42 @@ export const RunCompletedDoc = defineDoc<RunCompletedState>({
   initial: () => ({ completedAt: "" }),
   checkpointWhen: () => false,
 });
+
+/**
+ * The one conflict-resolution turn a run may take (#58): the push stopped on a
+ * rebase conflict, so the stopped rebase is handed to the agent that wrote one
+ * side of it.
+ *
+ * Three states, read from the volume rather than from the process, because each
+ * one is a different instruction to a pod that opens this volume next:
+ *
+ * - `attemptedAt` is written **before** the turn is submitted, so a crash mid-turn
+ *   resumes that same turn instead of granting a second one;
+ * - `reported` is set by the Result tool that closes the turn (`commitRunResult`),
+ *   which is also what lets it replace the run's earlier report;
+ * - `files` is what git left unmerged, so a resumed pod hands over the same list.
+ *
+ * The budget is one **reported** attempt: `reported` plus another conflict is a
+ * condition of the branch, not of the volume, and goes fatal.
+ */
+export type ConflictHandoffState = {
+  /** ISO time the turn was claimed; "" until a rebase first stops on a conflict. */
+  attemptedAt: string;
+  /** The paths git left unmerged: the turn's, and the exit's, whole work list. */
+  files: string[];
+  /** Whether that turn has re-reported the run's result. */
+  reported: boolean;
+};
+
+/** What a volume that never met a conflict reads: no attempt, no paths, no report. */
+export const EMPTY_CONFLICT_HANDOFF: ConflictHandoffState = { attemptedAt: "", files: [], reported: false };
+
+export const ConflictHandoffDoc = defineDoc<ConflictHandoffState>({
+  kind: "remote-agent.conflict-handoff",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ attemptedAt: "", files: [], reported: false }),
+  checkpointWhen: () => false,
+});

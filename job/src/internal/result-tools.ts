@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { RunResultV1 } from "@remote-agent/shared";
 import type { AgentRole } from "./env.js";
-import { RunResultDoc } from "./run-docs.js";
+import { ConflictHandoffDoc, RunResultDoc } from "./run-docs.js";
 
 export const RESULT_EXTENSION_NAME = "remote-agent-result";
 
@@ -162,12 +162,19 @@ export function resultExtension(tools: readonly ToolRegistration[]): Extension {
  * The default recorder: commit the payload on the conversation's run-result doc.
  * The first call of a run wins, so a model that calls two Result tools in one
  * round still yields exactly one annotation.
+ *
+ * The one exception is a run reopened by a handed-over conflict (#58): the turn
+ * that resolves it speaks for the same run, so its report replaces the one that
+ * preceded the hand-off — and marks the hand-off reported, which is what spends
+ * the one-attempt budget and lets a later pod go straight to the push.
  */
 export function commitRunResult(result: RunResultV1, api: ToolExecutionApi): Promise<boolean> {
   return api.commit(async (tx) => {
     const doc = await tx.doc(RunResultDoc, api.conversationId);
-    if (doc.payload !== "") return false;
+    const handoff = await tx.doc(ConflictHandoffDoc, api.conversationId);
+    if (doc.payload !== "" && handoff.attemptedAt === "") return false;
     doc.payload = JSON.stringify(result);
+    if (handoff.attemptedAt !== "") handoff.reported = true;
     return true;
   }, BACKGROUND_CONTEXT);
 }

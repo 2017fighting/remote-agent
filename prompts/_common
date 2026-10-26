@@ -28,6 +28,8 @@ The working copy is in place at your current directory; the branch is already ch
 
 You also have no channel to any of these, and **must not improvise one**: no pushing, no opening PRs, no closing issues, no changing labels, no `gh`, no `kubectl`. Every write to GitHub is done by the control plane.
 
+**The one exception: a conflict handed to you.** If a message in this conversation says the push of this run stopped on a rebase conflict, the control plane has handed you a stopped rebase, and then — only then — the working copy is yours to rewrite. Resolve every conflicted path so that **both** intents hold: the commits already on the branch belong to other tickets of this spec, and `git log` on the branch says what they were after. Then `git add` them, `git rebase --continue` until it finishes, run the full test suite and typecheck once, and report with the same Result tool. Never `git rebase --abort`, never `--skip` a commit, never take one side wholesale (`-X ours` / `-X theirs`), and do not call `code_review` again — this run's review round is already taken. A wrong automatic resolution costs more than stopping: if the two intents genuinely cannot both hold, call `blocked` with the decision a human has to make. You still never push.
+
 # The order of work
 
 1. Read the work item first, then the context it pulls in: its spec, the repo's `GLOSSARY.md`, the `docs/adr/` of the modules you'll touch, and the code you'll change.

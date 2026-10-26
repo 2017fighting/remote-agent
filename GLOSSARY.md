@@ -81,8 +81,12 @@ _Avoid_: worker, pod, task
 _Avoid_: wrapper, entrypoint, pi 命令
 
 **Submission key**:
-runner 提交这次 run 时用的去重键，形如 `remote-agent:<repo>#<n>:<role>`；崩溃后新 pod 靠它找回同一条未结算的 submission 续跑（ADR-0008）。**已结算的 submission 不可续跑**——同一个键再提交只会立刻拿回那个旧终态——所以这张 conversation 已有结算过的输入 submission 时（模型报错、被 abort），新一次尝试的键会带一个递增的 `#retry-<n>` 后缀，真正开一次新 run。计数只算 `type: "input"` 的结算记录，compaction 那种 `write` 不算一次尝试（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。
+runner 提交这次 run 时用的去重键，形如 `remote-agent:<repo>#<n>:<role>`；崩溃后新 pod 靠它找回同一条未结算的 submission 续跑（ADR-0008）。**已结算的 submission 不可续跑**——同一个键再提交只会立刻拿回那个旧终态——所以这张 conversation 已有结算过的输入 submission 时（模型报错、被 abort），新一次尝试的键会带一个递增的 `#retry-<n>` 后缀，真正开一次新 run。计数只算 `type: "input"` 的结算记录，compaction 那种 `write` 不算一次尝试（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。一段 conversation 可以有**两个键族**：run 自己的 `…:<role>`，与冲突交接那一轮的 `…:<role>#conflict`——各自的 `#retry-<n>` 从自己的基键数起，否则两族会互相占用序号（[#58](https://github.com/2017fighting/remote-agent/issues/58)）。
 _Avoid_: requestId（那是 durable 的字段名）, 幂等键
+
+**Conflict hand-off**:
+一次运行里唯一那轮「解冲突」的交接：push 把本次提交 rebase 到 spec 分支的 tip 上时停在冲突上，runner 不 abort，把停着的 rebase 与未合并路径清单交给同一个 conversation 里的 agent（编辑 → `git add` → `git rebase --continue`），agent 跑全量测试后重述 run result，runner 再 push。预算只记**已自述的一次**，写在卷上的 `remote-agent.conflict-handoff` 里：声明的解没解成（rebase 仍停着、或 `HEAD` 不再含本次提交）与解完再撞都是 `FatalPushError`，agent 说两边意图不能共存则自述 `blocked`（[#58](https://github.com/2017fighting/remote-agent/issues/58)）。
+_Avoid_: 自动解冲突、merge 冲突、重试 push
 
 **Ticket PVC**:
 一个 ticket 一块、`ReadWriteOncePod`、`truenas-iscsi-delete`（薄置备、`reclaimPolicy: Delete`）的 PVC，比 Job 活得久，里面同时装这个 ticket 的工作副本（`repo/`）、durable 的 session storage（`state/`）与 HOME 的缓存（`home/`）；它的生死由 App 按 Ticket PVC expiry 决定（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md)）。
@@ -113,7 +117,7 @@ push 时被远端拒绝的那枚挂载 token——文件的状态，不是卷的
 _Avoid_: token 过期（分不清是文件陈旧还是卷坏了）, auth 失败（同一措辞在 seed 那边是 fatal）
 
 **Spec branch**:
-`agent/spec-<n>`——**按 spec 命名，不按 ticket**，所以同一 spec 的每个 ticket 都往同一个 ref 推。push 前 runner 会 fetch 该分支并把本次的提交 rebase 到它的 tip 上，因此两个 ticket 先后落地的顺序是安全的；改到同一批行时 rebase 会冲突，那是 `FatalPushError`（runner exit 78 → `podFailurePolicy` `FailJob`），一次就停等人工，而不是把同一个 push 重放完 `backoffLimit`（[#55](https://github.com/2017fighting/remote-agent/issues/55)）。
+`agent/spec-<n>`——**按 spec 命名，不按 ticket**，所以同一 spec 的每个 ticket 都往同一个 ref 推。push 前 runner 会 fetch 该分支并把本次的提交 rebase 到它的 tip 上，因此两个 ticket 先后落地的顺序是安全的；改到同一批行时 rebase 会冲突，runner 不 abort，而是把停在那里的 rebase 交给 agent 按语义解一次（**Conflict hand-off**），解不动由 agent 自述 `blocked`。解完再撞、或凭证/仓库读不到，才是 `FatalPushError`（runner exit 78 → `podFailurePolicy` `FailJob`），一次就停等人工，而不是把同一个 push 重放完 `backoffLimit`（[#55](https://github.com/2017fighting/remote-agent/issues/55)、[#58](https://github.com/2017fighting/remote-agent/issues/58)）。
 _Avoid_: 工作分支, feature branch
 
 **Slot**:

@@ -140,7 +140,7 @@ init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOT
 
 `parallelism: 1`、`restartPolicy: Never`、`terminationGracePeriodSeconds: 120`、`fsGroup: 1000`、SA `agent-job`、PVC `ReadWriteOncePod` + SC `truenas-iscsi-delete`、agent 容器 requests `500m/2Gi` + memory limit `6Gi`、seed 容器 requests `100m/128Mi` 无 limit、`podFailurePolicy`：seed 容器 exit 78 → `FailJob`，**以及 runner 容器 exit 78 → `FailJob`**（[ADR-0009](adr/0009-ticket-volume-seeding.md) / [ADR-0010](adr/0010-job-resource-budget.md)）。
 
-runner 那条规则管的是「重试不可能改变结果」的那一类失败：目前只有 `agent/spec-<n>` 分支上的 rebase 冲突——分支按 **spec** 命名，同一 spec 的两个 ticket 会写同一个 ref，改到同一批行时谁也解不了。没有这条规则时 runner 会原样重放同一个 push 直到 `backoffLimit` 耗尽（`pi-web#4` 就是这样丢了一轮：五个 pod、五次同样的拒绝），所以它必须是**一次就停**。其余 runner 失败仍旧 exit 1，走正常 backoff。
+runner 那条规则管的是「重试不可能改变结果」的那一类失败：仓库根本不是 git 仓库，以及**已经交给 agent 解过一次、再撞上来的** rebase 冲突（[#58](https://github.com/2017fighting/remote-agent/issues/58)）。分支按 **spec** 命名，同一 spec 的两个 ticket 会写同一个 ref，改到同一批行时 runner 选不出赢家——所以冲突时它不 abort，把停在冲突上的 rebase 交给 agent 去按语义解（同一 conversation 的一轮新输入 + 一次可覆盖的 run result），agent 解不动就 `blocked`，解得动就再自述一次，runner 随后 push。**一次就停**针对的是「解完了还撞」：那时再重放同一个 push 只会一直撞（`pi-web#4` 就是这样丢了一轮：五个 pod、五次同样的拒绝）。凭证被拒也不在这类里——那是挂载文件陈旧而非卷坏了，runner 会等文件变化重试一次，等不到就交给新 pod（[#57](https://github.com/2017fighting/remote-agent/issues/57)）。其余 runner 失败仍旧 exit 1，走正常 backoff。
 
 ### 6.1 Job 上的身份：标签只放合法值，机器可读的身份进注解
 

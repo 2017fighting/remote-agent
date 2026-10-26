@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   Harness,
@@ -21,7 +22,14 @@ import { RUNNER_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItem
 import type { JobPaths, RunnerEnv } from "./env.js";
 import { renderPrompt } from "./prompt.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
-import { ReviewRoundDoc, RunCompletedDoc, RunResultDoc } from "./run-docs.js";
+import {
+  ConflictHandoffDoc,
+  EMPTY_CONFLICT_HANDOFF,
+  ReviewRoundDoc,
+  RunCompletedDoc,
+  RunResultDoc,
+  type ConflictHandoffState,
+} from "./run-docs.js";
 import { resultExtension, resultToolsForRole, commitRunResult } from "./result-tools.js";
 import { codeReviewTool, type ReviewReports } from "./code-review.js";
 import { runReview } from "./reviewer.js";
@@ -62,10 +70,15 @@ export interface RunDeps {
   models: Models;
   /** durable storage on the Ticket PVC; a fresh handle per open. */
   openStorage(path: string): Promise<Storage>;
-  /** Writes the run result on the Job annotation. Called only after a successful push. */
+  /**
+   * Writes the run result on the Job annotation. Called exactly once, after the
+   * delivery step: a successful push, or a `blocked` report on a conflict the
+   * agent could not resolve (#58).
+   */
   annotate(result: RunResultV1): Promise<void>;
-  /** Pushes `HEAD` to `agent/spec-<n>`; throws on any failure, including a non-fast-forward. */
-  push(): Promise<void>;
+  /** Pushes `HEAD` to `agent/spec-<n>`; throws on a failure no later pod can fix, and
+   * reports a stopped rebase as `conflict` instead of failing (#58). */
+  push(): Promise<PushOutcome>;
   log(line: string): void;
   now?(): Date;
   /** Simulates a process death right after the run is admitted (before any model request). */
@@ -134,9 +147,13 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
     }
 
     // Outcome already decided but not delivered (the previous pod died before the push
-    // landed): go straight to push + annotate, never back through the agent.
+    // landed): go straight to push + annotate, never back through the agent. A claimed
+    // conflict hand-off is the one case that still has an unfinished submission behind
+    // an already-committed result: the turn that resolves the stopped rebase (#58).
+    const handoff = await readConflictHandoff(harness, root);
     const decided = await readCommittedResult(deps, harness, root);
-    const pending = decided === undefined ? await resumeUnfinished(deps, harness) : undefined;
+    const mayHoldConflictTurn = handoff.attemptedAt !== "" && !handoff.reported;
+    const pending = decided === undefined || mayHoldConflictTurn ? await resumeUnfinished(deps, harness) : undefined;
     const resumed = decided !== undefined || pending !== undefined;
     let submission = pending;
     if (decided === undefined && submission === undefined) {
@@ -145,13 +162,13 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
       deps.crashAfterSubmit?.();
     }
     deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} resumed=${resumed}`);
-    const result = decided ?? (await waitForResult(deps, harness, root, submission!));
+    const result = submission === undefined ? decided! : await waitForResult(deps, harness, root, submission);
     // Push strictly precedes the annotation: a push failure leaves no result behind,
     // so k8s starts a new pod that resumes to this same point and pushes again.
-    await deps.push();
-    await deps.annotate(result);
+    const delivered = await pushAndResolveConflict(deps, storage, harness, root, result);
+    await deps.annotate(delivered);
     await markComplete(harness, root);
-    return { exitCode: 0, result, resumed, alreadyComplete: false };
+    return { exitCode: 0, result: delivered, resumed, alreadyComplete: false };
   } finally {
     for (const [signal, handler] of handlers) process.removeListener(signal, handler);
     await harness.close(context);
@@ -185,7 +202,10 @@ async function openHarness(
       // GENERATION_RETRY_POLICY): the default budget cannot outlast the gateway
       // restart that made this run necessary in the first place.
       settings: { retry: GENERATION_RETRY_POLICY },
-      env: () => new NodeExecutionEnv({ cwd: deps.paths.repo }),
+      // The agent resolves a stopped rebase with `git rebase --continue` (#58), and
+      // git opens the commit message in an editor there. `true` accepts the message
+      // git already has, so the turn can never hang on a prompt nobody can answer.
+      env: () => new NodeExecutionEnv({ cwd: deps.paths.repo, shellEnv: { GIT_EDITOR: "true" } }),
       now: () => (deps.now?.() ?? new Date()).getTime(),
       onReport: (error) => deps.log(`runner-report error=${String(error)}`),
     },
@@ -304,16 +324,188 @@ async function submitRun(deps: RunDeps, storage: Storage, root: Conversation, fi
     fixedPoint: fixedPoint.fixedPoint,
     promptsDir: deps.paths.prompts,
   });
+  // Deduplication key: a process that reaches this line again after a crash finds
+  // the same submission instead of starting a second run (ADR-0008).
+  return submitInput(deps, storage, root, prompt, "");
+}
+
+/** One conversation turn, admitted under this run's dedup key for its family. */
+async function submitInput(
+  deps: RunDeps,
+  storage: Storage,
+  root: Conversation,
+  content: string,
+  suffix: string,
+): Promise<Submission> {
   return root.submit(
-    {
-      type: "input",
-      content: prompt,
-      // Deduplication key: a process that reaches this line again after a crash finds
-      // the same submission instead of starting a second run (ADR-0008).
-      requestId: await submissionKeyFor(deps, storage, root),
-    },
+    { type: "input", content, requestId: await submissionKeyFor(deps, storage, root, suffix) },
     context,
   );
+}
+
+/**
+ * The push, and the one turn a stopped rebase buys (#58).
+ *
+ * `deps.push()` reconciles our commits onto the branch tip. When that rebase stops
+ * on a conflict, the runner cannot choose a winner — but the agent that wrote one
+ * side can, and it still holds the conversation and the suite. So the stopped
+ * rebase is handed over as one more turn in the same conversation; when it
+ * reports, the run is pushed and annotated with *its* result.
+ *
+ * What this process does next is read from the volume on every pass, never from
+ * its own earlier turn:
+ *
+ * - no hand-off yet → push; a conflict claims the hand-off (durable, **before** the
+ *   turn is submitted) and loops;
+ * - claimed, not reported → the turn still owns the worktree: resume it (a crash),
+ *   or submit it under the next numbered key when the earlier one settled
+ *   unanswered (a model error — the #52 shape), then verify it finished the rebase;
+ * - claimed, reported → push. A conflict here is `FatalPushError`: one *reported*
+ *   attempt is the whole budget, so either the branch moved again or the
+ *   resolution did not hold. Unreported attempts are pod retries, bounded by the
+ *   Job's own backoff and deadline like every other retry.
+ *
+ * A `blocked` report ends the run without a push: the rebase is still stopped, so
+ * pushing could only conflict again — and an `error` would replace the agent's
+ * verdict with a human's guess (ADR-0009).
+ */
+async function pushAndResolveConflict(
+  deps: RunDeps,
+  storage: Storage,
+  harness: HarnessHandle,
+  root: Conversation,
+  first: RunResultV1,
+): Promise<RunResultV1> {
+  let result = first;
+  for (;;) {
+    const handoff = await readConflictHandoff(harness, root);
+    if (handoff.attemptedAt !== "") {
+      if (!handoff.reported) {
+        // The turn owns the worktree until it reports. Pushing first would push the
+        // commit the rebase started from — nothing — and annotate a run whose work
+        // never left the volume.
+        const pending = await resumeUnfinished(deps, harness);
+        const submission = pending ?? (await submitConflictHandoff(deps, storage, root, handoff.files));
+        result = await waitForResult(deps, harness, root, submission);
+        if (result.outcome === "blocked") return result;
+      }
+      // Whatever the report said, git decides: a rebase still stopped here, or a
+      // report with nothing left to push, is a condition of the volume and goes
+      // fatal — the budget was the turn that just ran.
+      await assertHandoffFinishedTheRebase(deps, handoff.files);
+    }
+
+    const outcome = await deps.push();
+    if (outcome.kind === "pushed") return result;
+    // Read again: the turn that just ran is what reported, so this is the branch
+    // rejecting a resolution it already made — the one reported attempt is spent.
+    const after = await readConflictHandoff(harness, root);
+    if (after.reported) {
+      const paths = (outcome.files.length > 0 ? outcome.files : after.files).join(", ");
+      throw new FatalPushError(
+        `git rebase onto origin/${deps.env.branch} still conflicts after the one resolution turn (${paths}): ` +
+          "the branch moved again, or the resolution did not hold",
+      );
+    }
+    await claimConflictHandoff(deps, harness, root, outcome.files);
+  }
+}
+
+/**
+ * What the hand-off's report is worth: the rebase must be finished, and the run's
+ * commits must still be on top of the branch tip.
+ *
+ * Without both checks a turn that reported without `git rebase --continue`, or
+ * that reset the worktree to the tip, would be annotated `done` while its work
+ * stayed on the volume: the push would succeed as "Everything up-to-date".
+ */
+async function assertHandoffFinishedTheRebase(deps: RunDeps, files: readonly string[]): Promise<void> {
+  const branch = specBranch(deps.env.specNumber);
+  const options = { cwd: deps.paths.repo, tokenPath: deps.paths.token };
+  if (await rebaseInProgress(deps.paths.repo, options)) {
+    throw new FatalPushError(
+      `the conflict hand-off reported without finishing the rebase onto origin/${branch} (${files.join(", ")}): ` +
+        "it is still stopped on a conflict",
+    );
+  }
+  const ahead = await runGit(["rev-list", "--count", `refs/remotes/origin/${branch}..HEAD`], options);
+  if (ahead.exitCode !== 0) {
+    throw new Error(
+      `git rev-list --count refs/remotes/origin/${branch}..HEAD failed (${ahead.exitCode}): ${ahead.stderr.trim()}`,
+    );
+  }
+  if (Number(ahead.stdout.trim()) === 0) {
+    throw new FatalPushError(
+      `the conflict hand-off reported but left nothing to push onto origin/${branch}: ` +
+        "the run's commits are no longer on top of it",
+    );
+  }
+  deps.log(`push-conflict-resolved ahead=${ahead.stdout.trim()}`);
+}
+
+/**
+ * The conflict hand-off's message: which rebase is stopped, on which paths, and the
+ * commands that finish it. The rules — keep both intents, never abort or skip,
+ * re-report, still never push — live in `_common`, which every role reads
+ * (ADR-0004: no prompt text in the image).
+ */
+function conflictHandoffPrompt(input: { branch: string; files: readonly string[] }): string {
+  return [
+    `The push of this run to \`${input.branch}\` stopped on a rebase conflict, and the control plane has handed you the stopped rebase.`,
+    "",
+    `It is still in progress against \`origin/${input.branch}\`, and git left these paths unmerged:`,
+    ...input.files.map((file) => `  - ${file}`),
+    "",
+    `Resolve them the way your instructions describe for a handed-over conflict. The commits already on the branch are other tickets of this spec, and \`git log origin/${input.branch}\` says what they were after. Then:`,
+    "  1. `git add` each path you resolved.",
+    "  2. `git rebase --continue`, and repeat if it stops on another commit.",
+    "  3. Run the full test suite and the typecheck once against the merged result.",
+    "  4. Call the same Result tool again with the final summary, commentBody and warnings. That report replaces the one this run made before the conflict, and the control plane pushes after it.",
+    "",
+  ].join("\n");
+}
+
+async function submitConflictHandoff(
+  deps: RunDeps,
+  storage: Storage,
+  root: Conversation,
+  files: readonly string[],
+): Promise<Submission> {
+  return submitInput(deps, storage, root, conflictHandoffPrompt({ branch: deps.env.branch, files }), CONFLICT_KEY_SUFFIX);
+}
+
+/**
+ * Suffix that keeps the conflict hand-off's dedup keys off the run's own (#58): a
+ * run holds two submission families, and each numbers its retries from its own base.
+ */
+const CONFLICT_KEY_SUFFIX = "#conflict";
+
+/** The conflict hand-off's durable state; `initial` when this volume never had one. */
+async function readConflictHandoff(harness: HarnessHandle, root: Conversation): Promise<ConflictHandoffState> {
+  const state = await harness.snapshot(ConflictHandoffDoc, root.id, context);
+  return state ?? EMPTY_CONFLICT_HANDOFF;
+}
+
+/**
+ * Spend the one attempt, **before** the turn is submitted: a pod that dies between
+ * the claim and the submit resumes the same turn, and a pod that finds a claimed
+ * hand-off never starts a second one.
+ */
+async function claimConflictHandoff(
+  deps: RunDeps,
+  harness: HarnessHandle,
+  root: Conversation,
+  files: readonly string[],
+): Promise<void> {
+  let claimed = false;
+  await root.commit(async (tx) => {
+    const doc = await tx.doc(ConflictHandoffDoc, root.id);
+    if (doc.attemptedAt !== "") return;
+    doc.attemptedAt = (deps.now?.() ?? new Date()).toISOString();
+    doc.files = [...files];
+    claimed = true;
+  }, context);
+  if (claimed) deps.log(`push-conflict-handoff files=${files.join(",")}`);
 }
 
 /** A submission that can no longer change: the run it admitted has ended. */
@@ -344,9 +536,14 @@ function isSettled(submission: SubmissionRecord): boolean {
  * `ReadWriteOncePod` with `parallelism: 1` (ADR-0008), so exactly one process
  * reads it and the count cannot race.
  */
-async function submissionKeyFor(deps: RunDeps, storage: Storage, root: Conversation): Promise<string> {
-  const base = runRequestId(deps);
-  const settled = await settledInputSubmissions(storage, root);
+async function submissionKeyFor(
+  deps: RunDeps,
+  storage: Storage,
+  root: Conversation,
+  suffix = "",
+): Promise<string> {
+  const base = `${runRequestId(deps)}${suffix}`;
+  const settled = await settledInputSubmissions(storage, root, base);
   if (settled.length === 0) return base;
 
   const attempt = settled.length + 1;
@@ -359,20 +556,30 @@ async function submissionKeyFor(deps: RunDeps, storage: Storage, root: Conversat
 }
 
 /**
- * This conversation's settled **input** submissions, oldest first.
+ * This conversation's settled **input** submissions for one base key, oldest first.
+ *
+ * Scoped to the base (and its numbered retries) because a run can hold two
+ * families: its own `…:implement-ticket` and the conflict turn's
+ * `…:implement-ticket#conflict` (#58). Counting across both would make each family
+ * skip numbers the other used.
  *
  * Input-only on purpose: pi-durable admits compaction summaries as `type:
  * "write"` on the same conversation and settles them `done`, so counting every
  * settled record would inflate the attempt number and point the retry log at a
  * compaction rather than at the failed run it is retrying.
  */
-async function settledInputSubmissions(storage: Storage, root: Conversation): Promise<readonly SubmissionRecord[]> {
+async function settledInputSubmissions(
+  storage: Storage,
+  root: Conversation,
+  base: string,
+): Promise<readonly SubmissionRecord[]> {
   const settled: SubmissionRecord[] = [];
   let cursor: Cursor | undefined;
   do {
     const page = await storage.scanSubmissions({ conversationId: root.id, order: "ascending" }, SCAN_PAGE_SIZE, cursor, context);
     for (const submission of page.items) {
-      if (submission.type === "input" && isSettled(submission)) settled.push(submission);
+      if (submission.type !== "input" || !isSettled(submission)) continue;
+      if (submission.requestId === base || submission.requestId?.startsWith(`${base}#retry-`)) settled.push(submission);
     }
     cursor = page.next ?? undefined;
   } while (cursor !== undefined);
@@ -463,6 +670,17 @@ async function computeFixedPoint(deps: RunDeps, source: ReviewFixedPoint["source
 }
 
 /**
+ * What the push left the volume in. `conflict` is not a failure: the rebase is
+ * stopped, still in progress, waiting for the agent (#58).
+ */
+type ConflictOutcome = { kind: "conflict"; files: readonly string[] };
+
+export type PushOutcome = { kind: "pushed" } | ConflictOutcome;
+
+/** What the reconcile step decided: our commits are ready to push, or git stopped. */
+type ReconcileOutcome = { kind: "ready" } | ConflictOutcome;
+
+/**
  * Push `HEAD` to `agent/spec-<n>`, reading the token from the mounted file at push
  * time (ADR-0009).
  *
@@ -476,13 +694,13 @@ async function computeFixedPoint(deps: RunDeps, source: ReviewFixedPoint["source
  *
  * So the push fetches the branch and rebases our work onto its tip first. That is
  * what a human would do, and it makes the shared branch safe to write from two
- * places in sequence. A rebase that **conflicts** is the one case the runner
- * cannot resolve — the two tickets changed the same lines with different intent —
- * so it aborts the rebase (leaving the worktree exactly as the run left it) and
- * throws a fatal error, which the entry turns into an exit code `podFailurePolicy`
- * maps to FailJob. Deterministic means one attempt, not five.
+ * places in sequence. A rebase that **conflicts** means two tickets changed the
+ * same lines with different intent: the runner cannot pick a winner, but the agent
+ * that wrote one side can — it still holds the conversation and can run the whole
+ * suite against the merged result (#58). So the rebase is left stopped, exactly as
+ * git left it, and this call reports the paths that need that decision.
  */
-export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "log">): Promise<void> {
+export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "log">): Promise<PushOutcome> {
   const branch = specBranch(deps.env.specNumber);
   const options = {
     cwd: deps.paths.repo,
@@ -493,8 +711,11 @@ export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "lo
   // One push attempt, as a sequence: fetch + rebase, then push. The whole sequence
   // is the unit the stale-credential recovery retries, because the fetch runs
   // first and is where a rejected credential usually surfaces.
-  const attempt = async (): Promise<void> => {
-    await reconcileWithBranch(deps, branch, options);
+  const attempt = async (): Promise<PushOutcome> => {
+    const reconciled = await reconcileWithBranch(deps, branch, options);
+    // A stopped rebase is not a failure of the attempt: the agent resolves it (#58),
+    // so the sequence ends here and the recovery has nothing to retry.
+    if (reconciled.kind === "conflict") return reconciled;
 
     const result = await runGit(["push", "origin", `HEAD:refs/heads/${branch}`], options);
     if (result.exitCode !== 0) {
@@ -505,15 +726,18 @@ export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "lo
       throw classifyPushFailure(result.stderr, result.exitCode, ["push", "origin", branch]);
     }
     deps.log(`pushed branch=${branch}`);
+    return { kind: "pushed" };
   };
 
-  await withStaleCredentialRecovery({
+  return withStaleCredentialRecovery({
     tokenPath: deps.paths.token,
     waitMs: STALE_CREDENTIAL_WAIT_MS,
     pollMs: STALE_CREDENTIAL_POLL_MS,
     log: deps.log,
     run: attempt,
   });
+
+
 }
 
 /**
@@ -529,7 +753,7 @@ async function reconcileWithBranch(
   deps: Pick<RunDeps, "env" | "paths" | "log">,
   branch: string,
   options: GitOptions,
-): Promise<void> {
+): Promise<ReconcileOutcome> {
   // `+` because a fetch of an explicit refspec refuses to move the
   // remote-tracking ref backwards, and a previous run may have left a rewritten
   // one behind. The remote is the only authority for where the branch is; the
@@ -543,7 +767,7 @@ async function reconcileWithBranch(
     // would read that as "first ticket" and push with a dead credential.
     if (/couldn't find remote ref/i.test(fetched.stderr)) {
       deps.log(`push-branch-new branch=${branch}`);
-      return;
+      return { kind: "ready" };
     }
     throw classifyPushFailure(fetched.stderr, fetched.exitCode, ["fetch", "origin", branch]);
   }
@@ -552,46 +776,74 @@ async function reconcileWithBranch(
   const ancestor = await runGit(["merge-base", "--is-ancestor", remoteRef, "HEAD"], options);
   // 0 = already an ancestor, 1 = it is not (a rebase is needed), anything else = the
   // ref is unreadable, which is not a decision this function may guess at.
-  if (ancestor.exitCode === 0) return;
+  if (ancestor.exitCode === 0) return { kind: "ready" };
   if (ancestor.exitCode !== 1) {
     throw new Error(`git merge-base against ${remoteRef} failed (${ancestor.exitCode}): ${ancestor.stderr.trim()}`);
   }
 
   deps.log(`push-rebase onto=origin/${branch}`);
   const rebased = await runGit(["rebase", remoteRef], options);
-  if (rebased.exitCode === 0) return;
+  if (rebased.exitCode === 0) return { kind: "ready" };
 
-  // Only a rebase that actually started and stopped on a conflict is the case no
-  // later pod can fix. `git rebase` also fails before it begins — a worktree with
-  // unstaged changes is the common one — and that is not a conflict between two
-  // tickets, so it must not borrow the fatal class (or the message).
+  // `git rebase` also fails before it begins — a worktree with unstaged changes is
+  // the common one — and that is not a conflict between two tickets: no later pod
+  // would see it differently either, but the volume, not the branch, is what needs
+  // fixing. It stays retryable and must not borrow the conflict's message.
   const inProgress = await rebaseInProgress(deps.paths.repo, options);
   if (!inProgress) {
     throw new Error(
       `git rebase onto origin/${branch} did not start (${rebased.exitCode}): ${rebased.stderr.trim() || rebased.stdout.trim()}`,
     );
   }
-  // Leave the worktree as the run left it: a half-applied rebase would make the
-  // next pod's work ambiguous. The commits survive on the branch either way.
-  const aborted = await runGit(["rebase", "--abort"], options);
-  const abortNote = aborted.exitCode === 0 ? "" : ` (and \`rebase --abort\` failed: ${aborted.stderr.trim()})`;
-  throw new FatalPushError(
-    `git rebase onto origin/${branch} conflicted: ${rebased.stderr.trim() || rebased.stdout.trim()}${abortNote}`,
-  );
+  // Leave the rebase exactly where git stopped it: the conflict is the agent's to
+  // resolve, and aborting would throw away the state that resolution starts from.
+  const files = await conflictedFiles(deps.paths.repo, options);
+  deps.log(`push-conflict onto=origin/${branch} files=${files.join(",")}`);
+  return { kind: "conflict", files };
 }
 
-/** Whether git left a rebase half-applied: the only signal that separates a conflict from a rebase that never began. */
+/** The paths git left unmerged: the exit's whole work list when it is handed the rebase. */
+async function conflictedFiles(repo: string, options: GitOptions): Promise<readonly string[]> {
+  const result = await runGit(["diff", "--name-only", "--diff-filter=U"], options);
+  if (result.exitCode !== 0) {
+    throw new Error(`git diff --diff-filter=U failed (${result.exitCode}): ${result.stderr.trim()}`);
+  }
+  return result.stdout
+    .split("\n")
+    .map((path) => path.trim())
+    .filter((path) => path !== "")
+    .sort();
+}
+
+/**
+ * Whether git has a rebase half-applied: the only signal that separates a conflict
+ * from a rebase that never began.
+ *
+ * Read from the state directory, **not** from `REBASE_HEAD`: that file survives a
+ * rebase that completed, so a volume whose last push rebased cleanly would report
+ * "in progress" forever, and the next dirty-worktree failure would be read as a
+ * conflict no human can fix (#58 depends on this signal being exact).
+ */
 async function rebaseInProgress(repo: string, options: GitOptions): Promise<boolean> {
-  const result = await runGit(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], options);
-  // REBASE_HEAD is written only once a rebase has a commit to stop on.
-  return result.exitCode === 0;
+  for (const state of ["rebase-merge", "rebase-apply"]) {
+    const path = await runGit(["rev-parse", "--git-path", state], options);
+    if (path.exitCode !== 0) continue;
+    const directory = resolve(repo, path.stdout.trim());
+    const exists = await stat(directory).then(
+      () => true,
+      () => false,
+    );
+    if (exists) return true;
+  }
+  return false;
 }
 
 /**
  * A push that no later pod can fix, so it gets one attempt and then a human
- * (`podFailurePolicy` → `FailJob`, #55). Narrow on purpose: the rebase stopped on
- * a conflict between two tickets' work, or the repository is not a git repository
- * at all. Everything else has a later pod, or this process, that can still fix it.
+ * (`podFailurePolicy` → `FailJob`, #55). Narrow on purpose: the repository is not a
+ * git repository at all, or the rebase was handed to the agent, it reported a
+ * resolution, and the branch still rejects it (#58). Everything else has a later
+ * pod, or this process, that can still fix it.
  */
 export class FatalPushError extends Error {}
 
@@ -657,14 +909,14 @@ const STALE_CREDENTIAL_WAIT_MS = 120_000;
 const STALE_CREDENTIAL_POLL_MS = 5_000;
 
 /** The parameters of one recovery attempt; every one is injected so a test never sleeps for minutes. */
-export interface StaleCredentialRecovery {
+export interface StaleCredentialRecovery<T> {
   /** The mounted token file. Its *content* is what says whether a renewal has landed. */
   tokenPath: string;
   waitMs: number;
   pollMs: number;
   log(line: string): void;
   /** Runs the whole fetch + rebase + push sequence. Rejects on any failure. */
-  run(): Promise<void>;
+  run(): Promise<T>;
 }
 
 /**
@@ -689,13 +941,12 @@ export interface StaleCredentialRecovery {
  * - **Waiting is bounded.** A file that never changes must not hang the pod; when
  *   the bound expires the stale-credential error comes back unchanged.
  */
-export async function withStaleCredentialRecovery(params: StaleCredentialRecovery): Promise<void> {
+export async function withStaleCredentialRecovery<T>(params: StaleCredentialRecovery<T>): Promise<T> {
   // Fingerprinted before the attempt so the wait cannot miss a renewal that
   // landed mid-attempt (see the comment in the catch block).
   const fingerprintBefore = await tokenFingerprint(params.tokenPath);
   try {
-    await params.run();
-    return;
+    return await params.run();
   } catch (error) {
     if (!(error instanceof StaleCredentialError)) throw error;
 
@@ -713,7 +964,7 @@ export async function withStaleCredentialRecovery(params: StaleCredentialRecover
     params.log("push-stale-credential retrying");
     // Deliberately not caught: a second failure of any kind ends this process's
     // attempt, and its own classification decides retryable vs fatal.
-    await params.run();
+    return await params.run();
   }
 }
 
@@ -727,7 +978,7 @@ async function tokenFingerprint(path: string): Promise<string> {
 }
 
 /** Poll until the file's fingerprint differs from `before`, or the bound expires. */
-async function waitForFileChange(params: StaleCredentialRecovery, before: string): Promise<boolean> {
+async function waitForFileChange(params: StaleCredentialRecovery<unknown>, before: string): Promise<boolean> {
   const deadline = Date.now() + params.waitMs;
   while (Date.now() < deadline) {
     await sleep(params.pollMs);

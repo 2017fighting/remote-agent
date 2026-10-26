@@ -52,6 +52,7 @@ function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Record<string,
     },
     push: async () => {
       recorded.events.push("push");
+      return { kind: "pushed" } as const;
     },
     ...overrides,
   };
@@ -477,6 +478,23 @@ describe("#40 prompt carrier", () => {
     const dir = await readdir(join(REPO_ROOT, "prompts"));
     expect(dir.sort()).toEqual([...KEYS].sort());
     expect([...PROMPT_TEMPLATE_KEYS].sort()).toEqual([...KEYS].sort());
+  });
+
+  /**
+   * The conflict hand-off is the one exception to `_common`'s "do not
+   * checkout/pull/push": the agent owns a handed-over rebase (#58). The rules that
+   * make an automatic resolution safe live there — and only there, so the runner's
+   * message cannot drift from them.
+   */
+  it("grants the conflict hand-off its carve-out in _common, with the rules that make it safe", async () => {
+    const text = await readFile(join(REPO_ROOT, "prompts", "_common"), "utf8");
+    expect(text).toContain("conflict handed to you");
+    expect(text).toContain("git rebase --continue");
+    for (const rule of ["rebase --abort", "--skip", "-X ours", "code_review", "blocked"]) {
+      expect(text).toContain(rule);
+    }
+    // Still not the agent's push: the control plane writes to the branch.
+    expect(text).toContain("You still never push");
   });
 
   it("keeps the two review templates free of sub-agent bans only where the tool table already holds", async () => {
