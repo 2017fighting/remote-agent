@@ -92,7 +92,7 @@ export function placeholderValues(input: RenderPromptInput): Record<string, stri
   return {
     work_ref: workRef,
     work_title: input.workItem.title,
-    work_body: workBody(input.workItem),
+    work_body: workBody(input.workItem, input.role),
     ticket_number: String(input.workItem.number),
     spec_number: String(input.workItem.specNumber),
     fixed_point: input.fixedPoint,
@@ -100,15 +100,36 @@ export function placeholderValues(input: RenderPromptInput): Record<string, stri
 }
 
 /**
- * The body the prompt shows: the work item's own body, followed by the ticket
- * map when the App sent one (spec #33 user story 26). `prompts/implement-spec`
- * calls the ticket map "rendered above", so it has to arrive inside the body
- * section — the templates themselves are verbatim and never change.
+ * The body the prompt shows.
+ *
+ * The ticket role gets its own body **and its own comments**: the body is the
+ * acceptance surface, but the comments are where a human writes a correction —
+ * including the one that made them reopen the ticket (ADR-0017). The spec role
+ * keeps its ticket map and nothing else; its own comments are a separate gap
+ * ([#65](https://github.com/2017fighting/remote-agent/issues/65)).
+ *
+ * `prompts/implement-spec` calls the ticket map "rendered above", so it has to
+ * arrive inside the body section — the templates themselves are verbatim and never
+ * change.
  */
-export function workBody(workItem: WorkItemV1): string {
-  const tickets = workItem.tickets;
-  if (tickets === undefined) return workItem.body;
-  return `${workItem.body}\n\n${renderTicketMap(tickets)}`;
+export function workBody(workItem: WorkItemV1, role: AgentRole): string {
+  if (role === "implement-spec") {
+    const tickets = workItem.tickets;
+    return tickets === undefined ? workItem.body : `${workItem.body}\n\n${renderTicketMap(tickets)}`;
+  }
+  return withComments(workItem.body, workItem.comments);
+}
+
+/**
+ * A ticket's comments under the body, oldest first, in the same format the ticket
+ * map uses for a sub-issue's comments — one reader learns one shape. A ticket with
+ * no comments gets no empty heading.
+ */
+function withComments(body: string, comments: WorkItemComment[]): string {
+  if (comments.length === 0) return body;
+  const lines = [body.trimEnd(), "", "## Comments", ""];
+  for (const comment of comments) lines.push(...commentLines(comment));
+  return lines.join("\n").trimEnd();
 }
 
 /**

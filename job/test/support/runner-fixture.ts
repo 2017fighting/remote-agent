@@ -308,6 +308,36 @@ export interface ToolResultRecord {
   text: string;
 }
 
+/**
+ * Every user entry the volume carries, oldest first: one rendered prompt per round,
+ * then a conflict turn's. The only prompt the model ever sees.
+ */
+export async function submittedPrompts(fixture: RunnerFixture): Promise<string[]> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+    { models: fixture.models, registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const page = await root.entries({}, 200, undefined, BACKGROUND_CONTEXT);
+    return page.items
+      .flatMap((entry) => {
+        if (entry.kind !== "pi.user") return [];
+        const content = (entry.model?.[0] as { content?: unknown } | undefined)?.content;
+        return [typeof content === "string" ? content : JSON.stringify(content)];
+      })
+      .reverse();
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/** The first prompt on the conversation: round 1's. */
+export async function submittedPrompt(fixture: RunnerFixture): Promise<string> {
+  return (await submittedPrompts(fixture))[0] ?? "";
+}
+
 /** Every tool result the implementer's transcript holds, oldest first. */
 export async function toolResults(fixture: RunnerFixture): Promise<ToolResultRecord[]> {
   const harness = await Harness.open(
