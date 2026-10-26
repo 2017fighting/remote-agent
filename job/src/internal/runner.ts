@@ -1,4 +1,5 @@
-import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   Harness,
@@ -488,17 +489,31 @@ export async function pushToSpecBranch(deps: Pick<RunDeps, "env" | "paths" | "lo
     tokenPath: deps.paths.token,
     identity: { name: "remote-agent[bot]", email: deps.env.commitEmail },
   };
-  await reconcileWithBranch(deps, branch, options);
 
-  const result = await runGit(["push", "origin", `HEAD:refs/heads/${branch}`], options);
-  if (result.exitCode !== 0) {
-    // A non-fast-forward here means the branch moved again between the fetch and
-    // the push. It is not retryable in this process, but it is also not the
-    // deterministic conflict `reconcileWithBranch` classifies — the next pod
-    // fetches the newer tip and reconciles, so this stays a retryable failure.
-    throw new Error(`git push to ${branch} failed (${result.exitCode}): ${result.stderr.trim()}`);
-  }
-  deps.log(`pushed branch=${branch}`);
+  // One push attempt, as a sequence: fetch + rebase, then push. The whole sequence
+  // is the unit the stale-credential recovery retries, because the fetch runs
+  // first and is where a rejected credential usually surfaces.
+  const attempt = async (): Promise<void> => {
+    await reconcileWithBranch(deps, branch, options);
+
+    const result = await runGit(["push", "origin", `HEAD:refs/heads/${branch}`], options);
+    if (result.exitCode !== 0) {
+      // A non-fast-forward here means the branch moved again between the fetch and
+      // the push. It is not this process's to fix, but it is also not the
+      // deterministic conflict `reconcileWithBranch` classifies — the next pod
+      // fetches the newer tip and reconciles.
+      throw classifyPushFailure(result.stderr, result.exitCode, ["push", "origin", branch]);
+    }
+    deps.log(`pushed branch=${branch}`);
+  };
+
+  await withStaleCredentialRecovery({
+    tokenPath: deps.paths.token,
+    waitMs: STALE_CREDENTIAL_WAIT_MS,
+    pollMs: STALE_CREDENTIAL_POLL_MS,
+    log: deps.log,
+    run: attempt,
+  });
 }
 
 /**
@@ -574,21 +589,51 @@ async function rebaseInProgress(repo: string, options: GitOptions): Promise<bool
 
 /**
  * A push that no later pod can fix, so it gets one attempt and then a human
- * (`podFailurePolicy` → `FailJob`, #55). Two shapes qualify: the rebase stopped on
- * a conflict between two tickets' work, and the credential or repository cannot be
- * read at all — ADR-0009's "GitHub answers 404 to a repo the credential cannot
- * see", which the seed treats as equally fatal.
+ * (`podFailurePolicy` → `FailJob`, #55). Narrow on purpose: the rebase stopped on
+ * a conflict between two tickets' work, or the repository is not a git repository
+ * at all. Everything else has a later pod, or this process, that can still fix it.
  */
 export class FatalPushError extends Error {}
 
 /**
- * Classify a failed git operation during the push. `repo_unreachable` is the one
- * kind another pod may survive; everything else is a condition of the volume or
- * the credential, which the next pod would meet identically.
+ * The mounted token no longer authenticates — a condition of the *file*, not of the
+ * volume (#57).
+ *
+ * GitHub answers `Invalid username or token` / `Authentication failed` when the
+ * token it was handed is stale. The App has already patched the replacement into
+ * the Secret, so the fix is either to wait for kubelet to deliver it (this
+ * process) or to start a pod that reads the file fresh (the next one). Neither is
+ * a human's job, so this is never fatal — it was, briefly, and that turned a
+ * recoverable incident into a lost run.
+ */
+export class StaleCredentialError extends Error {}
+
+/**
+ * Classify a failed git operation during the push. Three outcomes, because the
+ * recovery differs:
+ *
+ * - `StaleCredentialError` — the credential is stale; wait for the file, then let
+ *   the next attempt (or the next pod) use the new one.
+ * - `FatalPushError` — no attempt can change it.
+ * - a plain `Error` — transient (network, a non-fast-forward that raced another
+ *   pod); the ordinary backoff handles it.
+ *
+ * The auth patterns are deliberately broad and the fatal ones deliberately narrow:
+ * GitHub answers 404 to a repo a credential cannot see, so a repo genuinely absent
+ * and a token that cannot see it are the same words on the wire. Reading that as
+ * "stale credential" is the safer mistake — it costs one pod, where the opposite
+ * costs the run.
  */
 export function classifyPushFailure(stderr: string, exitCode: number, args: readonly string[]): Error {
   const text = stderr.toLowerCase();
   const detail = `git ${args.join(" ")} exited ${exitCode}: ${stderr.trim()}`;
+  // Two distinct wordings, both fatal: a bad *remote path* says "does not appear
+  // to be a git repository", while a non-repository *cwd* says "not a git
+  // repository (or any parent …)". The second shape is the volume's worktree
+  // itself being gone or never seeded — no pod fixes that.
+  if (text.includes("does not appear to be a git repository") || text.includes("not a git repository")) {
+    return new FatalPushError(detail);
+  }
   if (
     text.includes("authentication failed") ||
     text.includes("could not read username") ||
@@ -596,18 +641,109 @@ export function classifyPushFailure(stderr: string, exitCode: number, args: read
     text.includes("permission denied") ||
     text.includes("invalid username or password") ||
     text.includes("invalid username or token") ||
-    text.includes("repository not found") ||
-    text.includes("does not appear to be a git repository")
+    text.includes("repository not found")
   ) {
-    return new FatalPushError(detail);
+    return new StaleCredentialError(detail);
   }
   return new Error(detail);
 }
 
 /**
+ * How long to wait for a renewal the App already wrote to reach the pod, and how
+ * often to look. ADR-0009 puts kubelet's propagation at ~1–1.5 minutes, so 2
+ * minutes clears it with margin.
+ */
+const STALE_CREDENTIAL_WAIT_MS = 120_000;
+const STALE_CREDENTIAL_POLL_MS = 5_000;
+
+/** The parameters of one recovery attempt; every one is injected so a test never sleeps for minutes. */
+export interface StaleCredentialRecovery {
+  /** The mounted token file. Its *content* is what says whether a renewal has landed. */
+  tokenPath: string;
+  waitMs: number;
+  pollMs: number;
+  log(line: string): void;
+  /** Runs the whole fetch + rebase + push sequence. Rejects on any failure. */
+  run(): Promise<void>;
+}
+
+/**
+ * Run the push sequence, and when the mounted credential turns out to be stale,
+ * wait for it to change and run the sequence once more (#57).
+ *
+ * This exists because the App can write a renewal the pod has not received yet:
+ * a reconcile pass patches the Secret (and the pass log carries `renewed=<n>`),
+ * while kubelet needs up to ~1–1.5 minutes to swap the volume's symlink. A push
+ * that lands in that window authenticates with the token it was born with and is
+ * rejected. Waiting is the only fix available inside the process — the file is
+ * the only channel.
+ *
+ * Three properties matter, and each has a test:
+ *
+ * - **Only a stale credential waits.** A conflict, a network failure, a
+ *   non-fast-forward: none of them get better by waiting, so they return at once.
+ * - **The retry happens at most once.** If the second attempt fails too, this
+ *   process is done; the next pod reads the file fresh, which is the other half of
+ *   the recovery and must stay reachable. So the error it throws is the original
+ *   kind, never fatal.
+ * - **Waiting is bounded.** A file that never changes must not hang the pod; when
+ *   the bound expires the stale-credential error comes back unchanged.
+ */
+export async function withStaleCredentialRecovery(params: StaleCredentialRecovery): Promise<void> {
+  // Fingerprinted before the attempt so the wait cannot miss a renewal that
+  // landed mid-attempt (see the comment in the catch block).
+  const fingerprintBefore = await tokenFingerprint(params.tokenPath);
+  try {
+    await params.run();
+    return;
+  } catch (error) {
+    if (!(error instanceof StaleCredentialError)) throw error;
+
+    // The fingerprint is taken from *before* the attempt, not now: a renewal that
+    // arrived while the attempt was failing is then already visible, and the wait
+    // retries at once instead of sitting out its bound for a change it has.
+    params.log(`push-stale-credential waiting-for-renewal file=${fingerprintBefore}`);
+    const changed = await waitForFileChange(params, fingerprintBefore);
+    if (!changed) {
+      // Nothing arrived: hand the original failure to the ordinary retry path.
+      params.log(`push-stale-credential renewal-not-seen waited-ms=${params.waitMs}`);
+      throw error;
+    }
+
+    params.log("push-stale-credential retrying");
+    // Deliberately not caught: a second failure of any kind ends this process's
+    // attempt, and its own classification decides retryable vs fatal.
+    await params.run();
+  }
+}
+
+/** A fingerprint of the mounted file: content hash, or a marker when it cannot be read. */
+async function tokenFingerprint(path: string): Promise<string> {
+  try {
+    return createHash("sha256").update(await readFile(path)).digest("hex").slice(0, 16);
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** Poll until the file's fingerprint differs from `before`, or the bound expires. */
+async function waitForFileChange(params: StaleCredentialRecovery, before: string): Promise<boolean> {
+  const deadline = Date.now() + params.waitMs;
+  while (Date.now() < deadline) {
+    await sleep(params.pollMs);
+    if ((await tokenFingerprint(params.tokenPath)) !== before) return true;
+  }
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Which exit code a failed run ends the pod with. Only a `FatalPushError` is
- * terminal; everything else (a fetch that timed out, a push that raced another
- * pod, a model error) is what `backoffLimit` is for.
+ * terminal; everything else — a stale credential (#57), a fetch that timed out, a
+ * push that raced another pod, a model error — is what `backoffLimit` is for.
  */
 export function pushExitCodeFor(error: unknown): typeof RUNNER_EXIT.retryable | typeof RUNNER_EXIT.fatal {
   return error instanceof FatalPushError ? RUNNER_EXIT.fatal : RUNNER_EXIT.retryable;

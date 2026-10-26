@@ -108,6 +108,10 @@ _Avoid_: done flag, lock file, 初始化标记
 review 只审它之后的 diff 的那个提交。ticket role 取**本次运行的起点**（runner 开工前读到的 HEAD，存进 durable，`resume()` 后不变），spec 收尾 role 取**分支起点**（`git merge-base origin/main HEAD`）。值由 runner 注入 prompt 与 `code_review` 工具。
 _Avoid_: base sha, diff 起点, 基准提交
 
+**Stale credential**:
+push 时被远端拒绝的那枚挂载 token——文件的状态，不是卷的状态：App 已把新 token patch 进 Secret，只是 kubelet 还没把它送到 pod。恢复有两条互补的路径：runner 进程内等文件内容变化后重跑一次整段 fetch+rebase+push；等不到就以 retryable 退出，新 pod 启动时重新解析挂载自然读到新文件。凭证类失败因此**永远不是 fatal**（[#57](https://github.com/2017fighting/remote-agent/issues/57)）。与 seed 的 `auth` 分类刻意不对称：seed 拿的是刚 mint 的 token，被拒就是 mint 错了，仍 fatal。
+_Avoid_: token 过期（分不清是文件陈旧还是卷坏了）, auth 失败（同一措辞在 seed 那边是 fatal）
+
 **Spec branch**:
 `agent/spec-<n>`——**按 spec 命名，不按 ticket**，所以同一 spec 的每个 ticket 都往同一个 ref 推。push 前 runner 会 fetch 该分支并把本次的提交 rebase 到它的 tip 上，因此两个 ticket 先后落地的顺序是安全的；改到同一批行时 rebase 会冲突，那是 `FatalPushError`（runner exit 78 → `podFailurePolicy` `FailJob`），一次就停等人工，而不是把同一个 push 重放完 `backoffLimit`（[#55](https://github.com/2017fighting/remote-agent/issues/55)）。
 _Avoid_: 工作分支, feature branch
