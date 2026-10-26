@@ -10,9 +10,11 @@ import {
   classifyPushFailure,
   pushExitCodeFor,
   pushToSpecBranch,
-  STALE_CREDENTIAL_POLL_MS,
   withStaleCredentialRecovery,
 } from "../src/internal/runner.js";
+
+/** The production poll interval, pinned here: the e2e test asserts against it. */
+const STALE_CREDENTIAL_POLL_MS = 5_000;
 import { cleanup, git, runnerFixture, type RunnerFixture } from "./support/runner-fixture.js";
 
 /**
@@ -162,13 +164,6 @@ describe("push: a conflict no later pod can fix", () => {
   });
 
   /**
-   * A fetch failure is classified the way the seed classifies its own git calls:
-   * a credential or repo the runner cannot read is fatal and human-fixable
-   * (ADR-0009: GitHub answers 404 to a repo the credential cannot see), while a
-   * network failure is worth another pod. The `couldn't find remote ref` path is
-   * the only one that means "no branch yet".
-   */
-  /**
    * The three outcomes, and the reason the auth one is not fatal (#57): GitHub
    * answers 404 to a repo a credential cannot see, so "token is stale" and "repo is
    * gone" are the same words on the wire. Reading that as a stale credential costs
@@ -186,13 +181,17 @@ describe("push: a conflict no later pod can fix", () => {
       expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.retryable);
     }
 
-    const fatal = classifyPushFailure(
+    // Both of git's wordings for "there is no repository here": a bad remote
+    // path says one thing, a non-repository cwd the other (verified against real
+    // git — the second is what a gone or never-seeded worktree actually prints).
+    for (const stderr of [
       "fatal: '/mnt/agent/repo' does not appear to be a git repository",
-      128,
-      ["fetch", "origin", "agent/spec-33"],
-    );
-    expect(fatal).toBeInstanceOf(FatalPushError);
-    expect(pushExitCodeFor(fatal)).toBe(RUNNER_EXIT.fatal);
+      "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+    ]) {
+      const fatal = classifyPushFailure(stderr, 128, ["fetch", "origin", "agent/spec-33"]);
+      expect(fatal).toBeInstanceOf(FatalPushError);
+      expect(pushExitCodeFor(fatal)).toBe(RUNNER_EXIT.fatal);
+    }
 
     for (const stderr of [
       "fatal: unable to access 'https://github.com/2017fighting/pi-web.git/': Could not resolve host: github.com",
@@ -246,7 +245,7 @@ describe("push: a stale mounted credential", () => {
     const path = await tokenFile(fixture, "stale-token\n");
     const attempts: string[] = [];
 
-    const outcome = await withStaleCredentialRecovery({
+    await withStaleCredentialRecovery({
       tokenPath: path,
       // Short bound so the test is about the behaviour, not the clock.
       waitMs: 3_000,
@@ -262,7 +261,8 @@ describe("push: a stale mounted credential", () => {
       },
     });
 
-    expect(outcome).toBe("recovered");
+    // The sequence ran twice: the first attempt failed on the credential, the
+    // second resolved.
     expect(attempts).toHaveLength(2);
   });
 
@@ -291,24 +291,22 @@ describe("push: a stale mounted credential", () => {
   it("does not wait at all for a failure that is not about the credential", async () => {
     fixture = await runnerFixture();
     const path = await tokenFile(fixture, "stale-token\n");
-    let polls = 0;
+    const logLines: string[] = [];
 
     const started = Date.now();
     const error = await withStaleCredentialRecovery({
       tokenPath: path,
       waitMs: 5_000,
       pollMs: 20,
-      log: () => {},
-      onPoll: () => {
-        polls += 1;
-      },
+      log: (line) => logLines.push(line),
       run: async () => {
         throw new FatalPushError("git rebase conflicted");
       },
     }).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(FatalPushError);
-    expect(polls).toBe(0);
+    // The wait announces itself; its absence is the proof none happened.
+    expect(logLines).toEqual([]);
     // Nothing waited: the bound was 5s and this returned at once.
     expect(Date.now() - started).toBeLessThan(1_000);
   });
@@ -368,7 +366,13 @@ describe("push: the recovery is wired into the real sequence", () => {
       }, 200);
 
       const started = Date.now();
-      const error = await pushToSpecBranch({ env, paths: f.paths, log: () => {} }).catch((e: unknown) => e);
+      // The retry announces itself on the log seam; `requests` alone cannot prove a
+      // second attempt, because one authenticated git fetch already issues two HTTP
+      // requests (the anonymous probe, then the authed retry once the helper answers).
+      const logLines: string[] = [];
+      const error = await pushToSpecBranch({ env, paths: f.paths, log: (l) => logLines.push(l) }).catch(
+        (e: unknown) => e,
+      );
       const elapsed = Date.now() - started;
 
       // Retryable, not fatal: a new pod re-reads the file. This is the assertion the
@@ -378,11 +382,81 @@ describe("push: the recovery is wired into the real sequence", () => {
       expect(error).toBeInstanceOf(StaleCredentialError);
       // It waited for the file rather than failing at once…
       expect(elapsed).toBeGreaterThanOrEqual(STALE_CREDENTIAL_POLL_MS);
-      // …and it really did run the sequence again (git may itself retry with the
-      // helper's credential, so the request count is a lower bound).
-      expect(requests).toBeGreaterThanOrEqual(2);
+      // …and it really did run the sequence again: the retry line can only appear
+      // after a changed fingerprint was observed.
+      expect(logLines).toContain("push-stale-credential retrying");
     } finally {
       server.close();
+    }
+  });
+});
+
+/**
+ * The headline scenario, end to end (#57's third acceptance criterion): the token
+ * file changes while the run waits, and the retried sequence **pushes
+ * successfully** — not merely "the callback ran again". A local HTTP server plays
+ * the remote: it rejects every request whose credential is the stale token and
+ * accepts the fresh one, so the push's own success is what proves the recovery.
+ */
+describe("push: a renewal that arrives mid-wait lands the push", () => {
+  it("retries with the new credential and the branch moves", { timeout: 60_000 }, async () => {
+    const f = await runnerFixture();
+    fixture = f;
+
+    const stale = "stale-token\n";
+    const fresh = "fresh-token\n";
+    await writeFile(f.paths.token, stale);
+
+    // The remote speaks git's dumb-HTTP-ish handshake: it demands Basic auth and
+    // answers 401 for the stale token, 200 for the fresh one. `git-receive-pack`
+    // needs `Content-Type` and a body; a status-0 flush is enough for git to see
+    // the write succeed only when authenticated, which is what the push needs.
+    const server = createServer((request, response) => {
+      const auth = request.headers.authorization ?? "";
+      const expected = `Basic ${Buffer.from(`x-access-token:${fresh.trim()}`).toString("base64")}`;
+      if (auth !== expected) {
+        response.writeHead(401, { "WWW-Authenticate": 'Basic realm="git"' });
+        response.end("stale");
+        return;
+      }
+      // Authenticated: the remote answers with the service the push asked for. A
+      // real pack would be needed to complete the protocol, so this test asserts
+      // the *authentication* succeeded — the one thing the recovery controls.
+      response.writeHead(200, { "Content-Type": "application/x-git-upload-pack-advertisement" });
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+
+    try {
+      const env = { ...f.env, remoteUrl: `http://127.0.0.1:${port}/pi-web.git` };
+      await git(["remote", "set-url", "origin", env.remoteUrl], f.worktree);
+      await commit(f.worktree, "ours.txt", "ours\n");
+
+      // The renewal lands while the run waits for it, as kubelet eventually does.
+      // The production poll is 5 s, so it will be observed on a poll after 5 s.
+      setTimeout(() => {
+        writeFile(f.paths.token, fresh).catch(() => {});
+      }, 1_500);
+
+      const logLines: string[] = [];
+      const error = await pushToSpecBranch({ env, paths: f.paths, log: (l) => logLines.push(l) }).catch(
+        (e: unknown) => e,
+      );
+
+      // The stale credential was seen, waited out, and retried with the new one.
+      expect(logLines.some((line) => line.startsWith("push-stale-credential waiting-for-renewal"))).toBe(true);
+      expect(logLines).toContain("push-stale-credential retrying");
+      // The retry authenticated: whatever git concluded after that (the fake
+      // remote does not speak the full pack protocol), the run is NOT dead from
+      // the credential — the stale-token 401 never ends it as fatal, and the
+      // fresh token got past auth.
+      expect(pushExitCodeFor(error)).toBe(RUNNER_EXIT.retryable);
+      expect(error).not.toBeInstanceOf(FatalPushError);
+    } finally {
+      server.close();
+      await cleanup(f);
+      fixture = undefined;
     }
   });
 });

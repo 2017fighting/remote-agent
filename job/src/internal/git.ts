@@ -98,4 +98,3 @@ export async function mergeBase(repo: string, base: string, head: string): Promi
   if (result.exitCode !== 0) throw new Error(`git merge-base ${base} ${head} failed: ${result.stderr.trim()}`);
   return result.stdout.trim();
 }
-

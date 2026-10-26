@@ -627,7 +627,13 @@ export class StaleCredentialError extends Error {}
 export function classifyPushFailure(stderr: string, exitCode: number, args: readonly string[]): Error {
   const text = stderr.toLowerCase();
   const detail = `git ${args.join(" ")} exited ${exitCode}: ${stderr.trim()}`;
-  if (text.includes("does not appear to be a git repository")) return new FatalPushError(detail);
+  // Two distinct wordings, both fatal: a bad *remote path* says "does not appear
+  // to be a git repository", while a non-repository *cwd* says "not a git
+  // repository (or any parent …)". The second shape is the volume's worktree
+  // itself being gone or never seeded — no pod fixes that.
+  if (text.includes("does not appear to be a git repository") || text.includes("not a git repository")) {
+    return new FatalPushError(detail);
+  }
   if (
     text.includes("authentication failed") ||
     text.includes("could not read username") ||
@@ -645,11 +651,10 @@ export function classifyPushFailure(stderr: string, exitCode: number, args: read
 /**
  * How long to wait for a renewal the App already wrote to reach the pod, and how
  * often to look. ADR-0009 puts kubelet's propagation at ~1–1.5 minutes, so 2
- * minutes clears it with margin; polling every 5 s is well inside the 60 s token
- * lifetime it is protecting.
+ * minutes clears it with margin.
  */
-export const STALE_CREDENTIAL_WAIT_MS = 120_000;
-export const STALE_CREDENTIAL_POLL_MS = 5_000;
+const STALE_CREDENTIAL_WAIT_MS = 120_000;
+const STALE_CREDENTIAL_POLL_MS = 5_000;
 
 /** The parameters of one recovery attempt; every one is injected so a test never sleeps for minutes. */
 export interface StaleCredentialRecovery {
@@ -660,8 +665,6 @@ export interface StaleCredentialRecovery {
   log(line: string): void;
   /** Runs the whole fetch + rebase + push sequence. Rejects on any failure. */
   run(): Promise<void>;
-  /** Test seam: called once per poll, before the file is read. */
-  onPoll?(): void;
 }
 
 /**
@@ -669,10 +672,11 @@ export interface StaleCredentialRecovery {
  * wait for it to change and run the sequence once more (#57).
  *
  * This exists because the App can write a renewal the pod has not received yet:
- * `token-renewal.ts` patches the Secret and logs `renewed=1`, while kubelet needs
- * up to ~1–1.5 minutes to swap the volume's symlink. A push that lands in that
- * window authenticates with the token it was born with and is rejected. Waiting is
- * the only fix available inside the process — the file is the only channel.
+ * a reconcile pass patches the Secret (and the pass log carries `renewed=<n>`),
+ * while kubelet needs up to ~1–1.5 minutes to swap the volume's symlink. A push
+ * that lands in that window authenticates with the token it was born with and is
+ * rejected. Waiting is the only fix available inside the process — the file is
+ * the only channel.
  *
  * Three properties matter, and each has a test:
  *
@@ -685,16 +689,21 @@ export interface StaleCredentialRecovery {
  * - **Waiting is bounded.** A file that never changes must not hang the pod; when
  *   the bound expires the stale-credential error comes back unchanged.
  */
-export async function withStaleCredentialRecovery(params: StaleCredentialRecovery): Promise<"recovered"> {
+export async function withStaleCredentialRecovery(params: StaleCredentialRecovery): Promise<void> {
+  // Fingerprinted before the attempt so the wait cannot miss a renewal that
+  // landed mid-attempt (see the comment in the catch block).
+  const fingerprintBefore = await tokenFingerprint(params.tokenPath);
   try {
     await params.run();
-    return "recovered";
+    return;
   } catch (error) {
     if (!(error instanceof StaleCredentialError)) throw error;
 
-    const before = await tokenFingerprint(params.tokenPath);
-    params.log(`push-stale-credential waiting-for-renewal file=${before}`);
-    const changed = await waitForFileChange(params, before);
+    // The fingerprint is taken from *before* the attempt, not now: a renewal that
+    // arrived while the attempt was failing is then already visible, and the wait
+    // retries at once instead of sitting out its bound for a change it has.
+    params.log(`push-stale-credential waiting-for-renewal file=${fingerprintBefore}`);
+    const changed = await waitForFileChange(params, fingerprintBefore);
     if (!changed) {
       // Nothing arrived: hand the original failure to the ordinary retry path.
       params.log(`push-stale-credential renewal-not-seen waited-ms=${params.waitMs}`);
@@ -705,7 +714,6 @@ export async function withStaleCredentialRecovery(params: StaleCredentialRecover
     // Deliberately not caught: a second failure of any kind ends this process's
     // attempt, and its own classification decides retryable vs fatal.
     await params.run();
-    return "recovered";
   }
 }
 
@@ -723,7 +731,6 @@ async function waitForFileChange(params: StaleCredentialRecovery, before: string
   const deadline = Date.now() + params.waitMs;
   while (Date.now() < deadline) {
     await sleep(params.pollMs);
-    params.onPoll?.();
     if ((await tokenFingerprint(params.tokenPath)) !== before) return true;
   }
   return false;
