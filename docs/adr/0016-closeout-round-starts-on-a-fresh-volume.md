@@ -10,10 +10,10 @@
 - **回收落在「起 Job」那一个函数里，用一个显式入参打开**：`startAgentJob` 已经拥有写序（PVC → Secret → Job）与复用路径（清 `expires-at`），所以收尾的回收是它的一个分支——复用路径从「清 `expires-at`」换成「删 PVC + 删同名 Secret」，由 `startCloseoutJob` 传入的开关打开。**ticket 的 Claim 一字不改**：一张票的卷本来就该被复用（`resume()`、`resume` 之外的「接着之前跑」、人回来读全文都靠它）。
 - **无条件删**。`start-closeout` 的前提就是「确定性名下无对象」，所以那块卷只可能是两种：上一轮**判过**的，或上一轮 App 在保留窗内**没读到结果**的（[ADR-0012](0012-job-deletion-ttl.md) 的超预算宕机路径）。两种情况下新的一轮都会从 ticket map 与分支重新算出「还剩什么」，丢的只是证据——这条代价明写，见下。
 - **runner 侧加一道守卫，把「Complete 而无 annotation」这个形状变成不可能**：打开 durable storage 后若 conversation 已完成（`RunCompletedDoc` 有值），读**自己 Job** 的 `remote-agent/run-result` annotation（`agent-job` SA 已有 `batch/jobs get,patch`，[ADR-0007](0007-run-result-contract.md)）：
-  - annotation **不在** ⇒ 这是**一块新 Job 跑在一块 spent 卷上**（同一块 Job 的替补 pod 会读到它自己写下的 annotation）⇒ 记一行日志并以 `RUNNER_EXIT.fatal`（78）退出。Job 的 `podFailurePolicy` 直接 `FailJob`，App 判 `unrecoverable`，而 `unrecoverable` 的证据评论里已经有 `volumeResetLine`——「先删掉这块卷和它的 Secret」这句现成的指引。
+  - annotation **不在** ⇒ 这是**一块新 Job 跑在一块 spent 卷上**（同一块 Job 的替补 pod 会读到它自己写下的 annotation）⇒ 记一行日志并以 `RUNNER_EXIT.fatal`（78）退出。Job 的 `podFailurePolicy` 直接 `FailJob`，App 判 `unrecoverable`，而 `unrecoverable` 的证据评论里已经有 `volumeResetLine`——「先删掉这块卷和它的 Secret」这句现成的指引。**（2026-10-26，[ADR-0017](0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md) 收窄）**：这一支现在只归**收尾 role**——票这边同样形状的那一次（重开的 `done` 票、人重入的 `blocked` 票）改为**就地开新的一轮**，而不是拒绝。
   - annotation **在** ⇒ 同一块 Job 的替补 pod，这次 run 的结论已经落地 ⇒ 照旧 `already-complete=true` + exit 0。
   - GET 失败按「判断不了」处理，保持今天的 exit 0：**不能因为 API 读不到，就把一次已经成功的 run 判死。**
-- **守卫对两个 role 都生效**，因为它守的是「一个 Job 不能在没有为这一轮报过结论的情况下 `Complete`」，与 role 无关。它的活路在 ticket 侧（[#62](https://github.com/2017fighting/remote-agent/issues/62)：重开一张 `done` 票会带着上一轮的卷被重新 Claim），在收尾侧是保险——App 侧的回收已经把那条路关掉，守卫负责在别的路径上不让它重新长出来。
+- **守卫只对收尾 role 生效**（[ADR-0017](0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）：它守的是「收尾的每一轮都在新卷上开始」这条不变式——收尾卷上出现「新 Job + 已报过结论」只可能是 App 的回收没发生。ticket role 的同类形状是正常路径（人的重开 / 重入），由「就地开一轮新的」处理，而不是拒绝；两个 role 各自都还满足「一个 Job 不能在没有为这一轮报过结论的情况下 `Complete`」。
 
 ## Considered Options
 
@@ -32,5 +32,5 @@
 - **S3N 与 `closeout-consumed` 不受影响**：标记回答的是「这块 outcome 判过没有」（对象的身份），回收回答的是「这块卷还能不能再跑一轮」（卷的身份）。两者都还需要——标记挡的是「票全关了而旧 Job 对象还在保留窗里」的重判，回收挡的是「新 Job 挂在 spent 卷上」的 no-op。
 - **ADR-0011 就地改**：回收表加一行「起下一块收尾 Job 时删」，并说明收尾卷的寿命短一格。
 - **ADR-0015 就地改**：S1 → S2 的写序从「清标记、建 Job」变成「清标记、删旧卷、建新卷与新 Job」，崩在任意两步之间都停在可重放的状态。
-- **[#62](https://github.com/2017fighting/remote-agent/issues/62) 明写为未解决**：ticket role 的同类 no-op（重开一张 `done` 票）**没有**被这条决定修好——它被守卫变得响亮，但那条路要的是「同一条 conversation 上再跑一轮，带着上一轮的历史」，那是一个独立的决定（固定点、`RunCompletedDoc`、Submission key 三件事一起变）。[`docs/architecture.md` §8](../architecture.md#8-三处缺口) 记着它。
+- **[#62](https://github.com/2017fighting/remote-agent/issues/62) 已由 [ADR-0017](0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md) 解决**：ticket role 的同类形状（新 Job 跑在一块已报过结论的票卷上）不再拒绝，而是**就地开新的一轮**——重置五个 per-run 文档、渲 prompt（评论进正文 + round 头）、submit。本文的守卫因此收窄为收尾 role 的守卫。
 - **一次删除动作多出来，且它在写序最前面**：删卷失败（API 报错）会让这次 `startAgentJob` 判 `failed`，pass 记一行错误、不建 Job，下一轮重算重试；删成功而建 Job 前崩掉，则下一轮看到「无标记 + 无对象」照常起 Job。两个窗口都不留半状态。

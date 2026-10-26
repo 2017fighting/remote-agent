@@ -411,7 +411,9 @@ flowchart LR
 
 **这里还有一个词汇缺口**：这个能力在 `GLOSSARY.md` 里没有名字。按 `docs/agents/domain.md`，不要直接造词——留给 `/domain-modeling` 定名，再开 ADR。
 
-### 缺口 C：重开一张 `done` 票不会真的再跑一轮（[#62](https://github.com/2017fighting/remote-agent/issues/62)）
+### 缺口 C：重开一张 `done` 票不会真的再跑一轮（[#62](https://github.com/2017fighting/remote-agent/issues/62)）——**已决定，待实现**
+
+> **已决定（[ADR-0017](adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）**：runner 在「新 Job + 已报过结论的票卷」上就地重置这一轮的五个 per-run 文档、把票的评论渲进 prompt、前置一段 round 头，开新的一轮；收尾 role 照旧拒绝。下面这段描述的是**改动前的行为**，实现落地时本节连同 §4.3 / §6 的相应句子一并改写（不要在实现之前删掉本节）。
 
 现状：`done`（T4）关票时只摘 `agent:in-progress`，`ready-for-agent` 留着（[§4.3](#43-ticket)），所以重开一张票就把它送回 `Gate`；旧 Job 对象一过 30 分钟保留窗，Claim 就再占上它，而 Claim 复用的正是上一轮那块卷（[ADR-0011](adr/0011-ticket-pvc-recycling.md)）。卷上 `state/session.sqlite` 带着 `remote-agent.run-completed`，runner 的 open 路径于是直接 `already-complete=true` + exit 0、**不写 annotation** → Job `Complete` 而无 annotation → App 判 `no-result` → `agent:error`。人的新评论模型一眼没看，一轮 Job 的额度先没了。
 

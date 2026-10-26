@@ -76,6 +76,10 @@ _Avoid_: mode, action, agent type
 一个 k8s Job，跑一个 agent role，对应一张 ticket（或某个 spec 的收尾）。Job 的终态是这次运行唯一的结论来源；pod 可以在 `resume()` 里重启，所以 pod 的终态不说明任何事。
 _Avoid_: worker, pod, task
 
+**Round**（一轮）:
+一条 conversation 上一次**报过结论**的运行。票的 conversation 可以有多轮：报过结论之后，人重开这张票、或重入一张 `blocked` 票，runner 就在同一块卷上开新的一轮，带着上一轮的历史；收尾 role 的 conversation 恰好一轮，所以它的每一轮都在**新卷**上开始（[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)、[ADR-0017](docs/adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）。
+_Avoid_: run（那是「一次运行」，一个 Job 跑一轮）, attempt, 轮次
+
 **Runner**:
 镜像里烧的 TypeScript 程序：打开 Ticket PVC 上的 durable storage、注入 prompt 与模型、跑一个 agent role、在真正终态时把 run result 写进自己 Job 的 annotation。它是 Job 里唯一的 k8s writer。
 _Avoid_: wrapper, entrypoint, pi 命令
@@ -97,7 +101,7 @@ Ticket PVC 上的 `remote-agent/expires-at` annotation（RFC3339）：App 在判
 _Avoid_: ttl, 保留期, 过期时间
 
 **Spent volume**:
-一块**已经报过结论**的卷：它 `state/` 里的 conversation 是终态的，所以任何后续轮次都不能在它上面跑（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md) 的「重跑不回到干净态」只对**中断**的 run 成立）。与 Ticket PVC expiry 的区别：expiry 说的是「什么时候可以删」，spent 说的是「这块卷已经不能再承担一轮工作」。收尾的每一轮因此都在**新卷**上开始（起收尾 Job 时 App 先回收上一轮那块，[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)）；runner 遇到「卷上有已完成的 run」也不再静默 no-op，而是判「新 Job 跑在 spent 卷上」并响亮地停下。票被重开时它的卷同样是 spent，只是那条路上还没有人换新卷（[#62](https://github.com/2017fighting/remote-agent/issues/62)）。
+一块**已经报过结论**的卷：它 `state/` 里的 conversation 报过一次结论（[ADR-0011](docs/adr/0011-ticket-pvc-recycling.md) 的「重跑不回到干净态」只对**中断**的 run 成立）。这个事实**不等于**「这块卷不能再跑」——能不能再跑由 role 决定：收尾 role 的 conversation 是终态的，所以它的下一轮必须在新卷上开始（起收尾 Job 时 App 先回收上一轮那块，[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)）；票的卷被复用，runner 在一块的**新 Job** 上就地开新的一轮（[ADR-0017](docs/adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）。与 Ticket PVC expiry 的区别：expiry 说的是「什么时候可以删」，spent 说的是「这块卷上的对话已经报过结论」。
 _Avoid_: 用过的卷, 脏卷, 已完成的 PVC
 
 **Job retention**:
