@@ -1,7 +1,7 @@
 {
   "name": "remote-agent",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "engines": {
     "node": ">=22.19.0"
   },
