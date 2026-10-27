@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
   applyManifests,
   createRunner,
@@ -32,7 +34,9 @@ import {
 } from "./scenario.js";
 import {
   AssertionTimeout,
+  clearFailFast,
   delay,
+  failRunFast,
   isJobFinished,
   AppReportedFailure,
   jobTerminalReason,
@@ -160,6 +164,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const runner = createRunner({ verbose: options.verbose });
   const scratch = await workDir(options.keep);
   let currentSection: Section = "cluster";
+  let stopStubWatch: (() => void) | null = null;
   const markSection = (name: Section): void => {
     currentSection = name;
   };
@@ -247,6 +252,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     // once the pod is up: the harness copies the real repository in.
     await waitForDeployment(runner, context, "stub-github", options.timeoutMs);
     await waitForDeployment(runner, context, "stub-model", options.timeoutMs);
+    // From here on the world the run asserts against lives in the stub's memory,
+    // so a restart has to end the run instead of silently rolling it back.
+    stopStubWatch = watchStubGitHubPod(context);
     await seedStubGitHubRepo(runner, context, projectRoot);
 
     markSection("app");
@@ -297,6 +305,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     }
     return { ok: false, sections: sectionsOf(runner), failure: message };
   } finally {
+    stopStubWatch?.();
+    clearFailFast();
     await scratch.cleanup();
   }
 }
@@ -460,6 +470,83 @@ export function bakedJobImageFromDeclarations(lines: string): string | null {
   const tag = /^var JOB_IMAGE_TAG = "([^"]+)";$/m.exec(lines);
   if (repository === null || tag === null) return null;
   return `${repository[1]}:${tag[1]}`;
+}
+
+// --- stub liveness ---------------------------------------------------------
+
+const exec = promisify(execFile);
+
+/** The bits of a pod the stub watcher compares between polls. */
+interface StubPodIdentity {
+  pod: string;
+  restarts: number;
+}
+
+interface StubPodList {
+  items: Array<{
+    metadata: { name: string };
+    status?: { containerStatuses?: Array<{ restartCount?: number }> };
+  }>;
+}
+
+/**
+ * Watch the stub-github pod for a restart or a replacement, and end the run when
+ * it happens.
+ *
+ * The stub's world lives in memory (`stub-github/server.ts` builds one
+ * `StubWorld` at startup), so a restarted container re-initialises it from the
+ * scenario: every label, comment and PR the App wrote is gone, while the Jobs it
+ * created are still in k8s. The App only judges a run whose ticket still carries
+ * `agent:in-progress`, so it can never catch up — it waits out the Job objects'
+ * retention window instead. Nothing downstream can be asserted, and the symptom
+ * is a five-minute timeout that names the App (ticket #69).
+ *
+ * Only stub-github is watched: stub-model replays a script from a ConfigMap and
+ * holds nothing the assertions read back.
+ *
+ * Deliberately not routed through the runner: this fires every two seconds, and
+ * every `kubectl` the runner sees is echoed into the log.
+ */
+function watchStubGitHubPod(context: string, intervalMs = 2000): () => void {
+  let seen: StubPodIdentity | null = null;
+  const timer = setInterval(() => {
+    void readStubPodIdentity(context)
+      .then((current) => {
+        if (current === null) return;
+        if (seen === null) {
+          seen = current;
+          return;
+        }
+        if (current.pod === seen.pod && current.restarts === seen.restarts) return;
+        failRunFast(
+          new Error(
+            `stub-github restarted (${seen.pod} restarts=${seen.restarts} → ${current.pod} restarts=${current.restarts}): ` +
+              "its world is in memory, so every write the App made was rolled back and nothing " +
+              "downstream can be asserted. Fix the stub's crash — this run says nothing about the App.",
+          ),
+        );
+      })
+      .catch(() => {
+        // The cluster may be going away mid-run; the run's own reads will speak up.
+      });
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
+/** The stub pod's name and restart count, or null when it cannot be read. */
+async function readStubPodIdentity(context: string): Promise<StubPodIdentity | null> {
+  try {
+    const { stdout } = await exec(
+      "kubectl",
+      ["--context", context, "-n", NAMESPACE, "get", "pod", "-l", "app=stub-github", "-o", "json"],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+    const pod = (JSON.parse(stdout) as StubPodList).items[0];
+    if (pod === undefined) return null;
+    return { pod: pod.metadata.name, restarts: pod.status?.containerStatuses?.[0]?.restartCount ?? 0 };
+  } catch {
+    return null;
+  }
 }
 
 async function waitForDeployment(
