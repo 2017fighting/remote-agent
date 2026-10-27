@@ -72,28 +72,31 @@ export async function resolvePromptTemplates(sources: PromptSources): Promise<Pr
 }
 
 /**
- * One key: the override directory first, the image directory second. The source
- * is logged for every read, whichever one answers; when neither carries the key
- * the error names both directories, because the operator has to know where to
- * put the file.
+ * One key: the directories in precedence order — the override first, the image
+ * second — and the first one that carries the file answers. The source is logged
+ * for every read, whichever one answered; when neither carries the key the error
+ * names both directories, because the operator has to know where to put the file.
  */
 export async function readPromptFile(sources: PromptSources, key: PromptTemplateKey): Promise<string> {
-  if (sources.overrideDir !== undefined) {
-    const override = await readIfPresent(join(sources.overrideDir, key));
-    if (override !== undefined) {
-      sources.log(`prompt-source=${key}:override`);
-      return override;
+  for (const { dir, source } of promptDirectories(sources)) {
+    const text = await readIfPresent(join(dir, key));
+    if (text !== undefined) {
+      sources.log(`prompt-source=${key}:${source}`);
+      return text;
     }
-  }
-  const image = await readIfPresent(join(sources.imageDir, key));
-  if (image !== undefined) {
-    sources.log(`prompt-source=${key}:image`);
-    return image;
   }
   const override = sources.overrideDir ?? "(none: PROMPTS_DIR is not set)";
   throw new Error(
     `prompt template ${key} is missing from both the override directory (${override}) and the image directory (${sources.imageDir})`,
   );
+}
+
+/** The two prompt directories in precedence order, each with its log label. */
+function promptDirectories(sources: PromptSources): Array<{ dir: string; source: "image" | "override" }> {
+  return [
+    ...(sources.overrideDir === undefined ? [] : [{ dir: sources.overrideDir, source: "override" as const }]),
+    { dir: sources.imageDir, source: "image" },
+  ];
 }
 
 /** A missing file is not an error here — it just means "try the next directory". */

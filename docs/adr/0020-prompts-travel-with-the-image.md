@@ -31,8 +31,8 @@
 
 ### 发布与切换
 
-- **T1（镜像内 prompt）与 T2（可选覆盖卷）分两次 release**：#76 是 T1——镜像开始带 prompt、runner 开始从镜像读并逐 key 记来源，而 Job 模板仍挂着旧的 ConfigMap，它对 runner 已经**惰性**，`prompt-source=<key>:image` 就是这一点的证据。T2（[#77](https://github.com/2017fighting/remote-agent/issues/77)，已落地）把 `prompts-override` 卷与 `PROMPTS_DIR` 接进模板、并摘掉旧 ConfigMap。每步单独可回滚。
-- 删 home-ops 的 ConfigMap 副本必须与「含 T1+T2 的 pin bump」同一个 PR：旧 App 仍在渲染那个卷，ConfigMap 先没则 Job 起不来。T2 落地后渲染 Job 的是新 App，它不再挂那个卷，所以删除不再要求先清空 Job；仍然建议与 pin bump 同一个 PR，让「旧 App + 已删 ConfigMap」这个窗口不存在。
+- **T1（镜像内 prompt，[#76](https://github.com/2017fighting/remote-agent/issues/76)）与 T2（可选覆盖卷，[#77](https://github.com/2017fighting/remote-agent/issues/77)）原计划分两次 release**，但两者落在同一张 spec 的同一分支上，随**同一次** release 发出：中间那个「镜像已带 prompt、旧 ConfigMap 仍挂着但没人读」的过渡态没有真实存在过，所以这两步不单独可回滚（回滚就是回滚整个 pin）。代价明写，缓解办法见下一条。
+- **home-ops 的删链必须与含 T1+T2 的 pin bump 同一个 PR**（[docs/deployment.md §8](../deployment.md)）：旧 App 仍在渲染 `remote-agent-prompts` 卷，ConfigMap 先没则那些 Job 起不来。合在同一个 PR 里做，那个窗口就不存在；不要求先清空 Job——新 App 不再挂那个卷。
 
 ## Considered Options
 

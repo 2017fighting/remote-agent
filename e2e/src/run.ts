@@ -37,6 +37,7 @@ import {
 } from "./scenario.js";
 import {
   AssertionTimeout,
+  assertPromptSources,
   clearFailFast,
   delay,
   failRunFast,
@@ -45,6 +46,8 @@ import {
   jobTerminalReason,
   kubectlJson,
   poll,
+  promptSourceLine,
+  waitForPromptSource,
   type K8sDeploymentObject,
   type K8sJobObject,
   type K8sObjectList,
@@ -806,64 +809,6 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
   return observed;
 }
 
-/** `prompt-source=<key>:<image|override>` — one line per resolved key (ADR-0020). */
-function promptSourceLine(key: string, source: "image" | "override"): string {
-  return `prompt-source=${key}:${source}`;
-}
-
-/** The lines a run must carry: `override` for the one key the fixture holds, `image` for the rest. */
-function expectedPromptSources(promptKeys: readonly string[], overrideKey: string | null): string[] {
-  return promptKeys.map((key) => promptSourceLine(key, key === overrideKey ? "override" : "image"));
-}
-
-/** The runner container's log text, or null when the pod is not up yet or the read failed. */
-async function readRunnerLogs(runner: Runner, context: string, jobName: string): Promise<string | null> {
-  const result = await runner.run(
-    "kubectl",
-    ["--context", context, "-n", NAMESPACE, "logs", `job/${jobName}`, "-c", "runner"],
-    { allowFailure: true },
-  );
-  return result.exitCode === 0 ? result.stdout : null;
-}
-
-/** The trimmed lines of a log, as a set for exact-line membership. */
-function logLines(logs: string): Set<string> {
-  return new Set(logs.split("\n").map((line) => line.trim()));
-}
-
-/**
- * Poll a Job's runner log until it carries `line`.
- *
- * The runner resolves the whole prompt key surface before it does any work
- * (ADR-0020), so this returns early in the run — long before the App can create
- * the next ticket's Job, which is what makes deleting the override here safe. A
- * Job that reaches terminal without the line fails at once instead of waiting out
- * the timeout.
- */
-async function waitForPromptSource(
-  runner: Runner,
-  context: string,
-  jobName: string,
-  line: string,
-  timeoutMs: number,
-): Promise<void> {
-  const observed = await poll<{ logs: string; job: K8sJobObject | null }>({
-    description: `${jobName} runner logs ${line}`,
-    timeoutMs,
-    intervalMs: 1000,
-    observe: async () => ({
-      logs: (await readRunnerLogs(runner, context, jobName)) ?? "",
-      job: await kubectlJson<K8sJobObject>(runner, context, NAMESPACE, "job", jobName),
-    }),
-    until: ({ logs, job }) => logLines(logs).has(line) || (job !== null && isJobFinished(job)),
-    describe: ({ logs, job }) =>
-      `${logs === "" ? "(no logs yet)" : `${logs.split("\n").length} lines`}; job ${job === null ? "absent" : "present"}`,
-  });
-  if (!logLines(observed.logs).has(line)) {
-    throw new Error(`${jobName} finished without logging ${line}; the prompt override did not resolve`);
-  }
-}
-
 /**
  * Delete the incident override so later runs fall back to the image (ADR-0020).
  * A forgotten override is the failure this hatch exists to make visible. The
@@ -883,37 +828,6 @@ async function deletePromptsOverride(runner: Runner, context: string): Promise<v
     "--ignore-not-found",
   ]);
   runner.note(`deleted ${PROMPTS_OVERRIDE_CONFIGMAP}; the next run must fall back to the image`);
-}
-
-/**
- * Assert a run's per-key prompt sources (ADR-0020). The override hatch is the
- * only path that can turn a key's source to `override`, so these lines are the
- * evidence that the optional volume, `PROMPTS_DIR` and the per-key fallback are
- * wired end to end — and that a deleted object yields an image-only run.
- */
-async function assertPromptSources(
-  runner: Runner,
-  context: string,
-  jobName: string,
-  overrideKey: string | null,
-  promptKeys: readonly string[],
-): Promise<void> {
-  const logs = await readRunnerLogs(runner, context, jobName);
-  if (logs === null) {
-    throw new Error(`could not read ${jobName}'s runner logs to check the prompt sources`);
-  }
-  const lines = logLines(logs);
-  const missing = expectedPromptSources(promptKeys, overrideKey).filter((line) => !lines.has(line));
-  if (missing.length > 0) {
-    throw new Error(
-      `${jobName}'s runner logs are missing ${missing.join(", ")}; the prompt hatch did not resolve per key`,
-    );
-  }
-  runner.note(
-    overrideKey === null
-      ? `${jobName}: every prompt key from the image`
-      : `${jobName}: ${overrideKey} from the override, the rest from the image`,
-  );
 }
 
 /** The final world (ticket #41 acceptance criteria). */
