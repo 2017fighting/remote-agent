@@ -170,9 +170,9 @@ prompt 模板**随 Job 镜像发布**（[ADR-0020](adr/0020-prompts-travel-with-
 
 ### 事故热改
 
-覆盖卷常驻、但默认不存在：Job 模板挂一个 `optional: true` 的 ConfigMap `remote-agent-prompts-override` 到 `/mnt/prompts-override`，`PROMPTS_DIR` 指向它。事故里只改一个 key：
+覆盖卷常驻、但默认不存在：Job 模板挂一个 `optional: true` 的 ConfigMap `remote-agent-prompts-override` 到 `/mnt/prompts-override`，`PROMPTS_DIR` 指向它。**这是事故工具，不是常规发布路径**：prompt 的正常变更走 `prompts/` + 一次 release（§10），只有事故里要临时改一句、又等不起一次发版时才用它，而且用完必须删掉。事故里只改一个 key（键面就是上面那五个：`_common` / `implement-ticket` / `implement-spec` / `review-standards` / `review-spec`；只放要改的那一个）：
 
-1. `kubectl create configmap remote-agent-prompts-override -n remote-agent --from-file=<key>=<path>`（只要一个文件，键名就是 prompt key）。
+1. `kubectl create configmap remote-agent-prompts-override -n remote-agent --from-file=<key>=<path>`（`--from-file` 的文件名就是 prompt key）。
 2. 等下一轮 Job 起来，看它的日志：那个 key 是 `prompt-source=<key>:override`，其余仍是 `:image`。
 3. **用完删掉**：`kubectl delete configmap remote-agent-prompts-override -n remote-agent`。忘记删就会一直生效，而这是唯一的线索来源。
 
