@@ -96,7 +96,7 @@ spec 的收尾 Job（`implement-spec`）也是同一套：确定性名、同一�
 
 ## implement ticket prompt
 
-镜像里**没有 skill 层**：durable 没有 Skill 工具、没有 slash command，runner 也不扫目录（[ADR-0004](docs/adr/0004-prompts-live-in-configmap.md)）。prompt 是 ConfigMap `remote-agent-prompts` 里的纯文本，`_common` 拼在最前，再拼 role 模板（`implement-ticket` / `implement-spec`），由 runner 渲染占位符后交给模型。所以 mattpocock 那套里 AFK 必需的语义全部由我们自己钉死，落点只有四类：角色 prompt、工具自述、App、init container/runner——**不引入 wrapper、辅助命令、skill 加载器**（[prompt 必写项清单](docs/agents/prompt-checklist.md)）。
+镜像里**没有 skill 层**：durable 没有 Skill 工具、没有 slash command，runner 不扫 skill 目录（[ADR-0004](docs/adr/0004-prompts-live-in-configmap.md)）。prompt 是**随 Job 镜像发布**的纯文本（[ADR-0020](docs/adr/0020-prompts-travel-with-the-image.md)）：runner 从镜像内的 canonical 目录读，`_common` 拼在最前，再拼 role 模板（`implement-ticket` / `implement-spec`），渲染占位符后交给模型；事故时可用 `PROMPTS_DIR` 覆盖单个 key，每个 key 解析时打一行 `prompt-source=<key>:<image|override>`。所以 mattpocock 那套里 AFK 必需的语义全部由我们自己钉死，落点只有四类：角色 prompt、工具自述、App、init container/runner——**不引入 wrapper、辅助命令、skill 加载器**（[prompt 必写项清单](docs/agents/prompt-checklist.md)）。
 
 `implement-ticket` 掐掉了上游「问用户」的分支：
 

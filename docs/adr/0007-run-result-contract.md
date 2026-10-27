@@ -4,7 +4,7 @@
 
 结果**载体**沿用 pi 时代的结论：pi 1.3.0 的 `-p --mode json` 既没有 `result` 事件、退出码也分不出「agent 自判没做完」与「正常跑完」（见 `research/pi-afk-contract`），所以「agent 主动自述」这条通道是必要的。换基座（[ADR-0008](0008-durable-runtime-base.md)）只砍掉了管线里「解析 pi json 流」那一层，判定证据从 pi 的 `stopReason`/退出码换成 durable 的 `submission.wait()` 与 task outcome。
 
-选它而不是「约定文本块」（模型措辞、markdown 围栏、转义都会伤到它，多行 `newTickets.body` 尤其难）或「runner 纯推断」（`blocked` 这类自述会彻底丢失）：工具是类型化、可校验、且模型在工具表里直接看得到的通道。代价是 runner 里多一份属于 entrypoint 契约的代码——ADR-0004 禁的是 prompt，不是契约。
+选它而不是「约定文本块」（模型措辞、markdown 围栏、转义都会伤到它，多行 `newTickets.body` 尤其难）或「runner 纯推断」（`blocked` 这类自述会彻底丢失）：工具是类型化、可校验、且模型在工具表里直接看得到的通道。代价是 runner 里多一份属于 entrypoint 契约的代码——[ADR-0020](0020-prompts-travel-with-the-image.md) 把 prompt 文本与 runner 代码分得很清（prompt 随镜像走，但它的键面、结果格式、env 契约仍由 runner 代码钉死），这里禁的是把 prompt 文本当契约，不是禁契约代码。
 
 ## Considered Options
 

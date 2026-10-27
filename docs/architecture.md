@@ -27,7 +27,7 @@ flowchart TB
         PVC[("Ticket PVC<br/>一票一块 · ReadWriteOncePod<br/>repo/ · state/ · home/")]
         Secret["per-Job Secret<br/>installation token"]
         Seed["init container seed<br/>播种工作副本"]
-        Agent["Agent Job<br/>一个 ticket 一个（+ spec 收尾一个）<br/>AGENT_ROLE 决定挂哪份 prompt"]
+        Agent["Agent Job<br/>一个 ticket 一个（+ spec 收尾一个）<br/>AGENT_ROLE 决定用镜像里哪份 prompt"]
         GQ{{"Guardrail quota<br/>只算对象数量"}}
         PVC --> Seed
         Secret -.->|挂成文件| Seed

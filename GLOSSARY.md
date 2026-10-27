@@ -81,7 +81,7 @@ _Avoid_: worker, pod, task
 _Avoid_: run（那是「一次运行」，一个 Job 跑一轮）, attempt, 轮次
 
 **Round header**:
-runner 在 round ≥ 2 时前置到 prompt 的那一段：第几轮、上一轮报了哪个 outcome、什么时候报的，以及「正文里的评论是那之后发生的事」。它是 runner 生成的，不住在 prompt ConfigMap 里——它说的那些事实只活在卷上（[ADR-0017](docs/adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）；round 1 没有它。
+runner 在 round ≥ 2 时前置到 prompt 的那一段：第几轮、上一轮报了哪个 outcome、什么时候报的，以及「正文里的评论是那之后发生的事」。它是 runner 生成的，不住在 prompt 模板里——它说的那些事实只活在卷上（[ADR-0017](docs/adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）；round 1 没有它。
 _Avoid_: 轮次前缀, round note, preamble
 
 **Runner**:
