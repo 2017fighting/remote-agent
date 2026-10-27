@@ -10,7 +10,7 @@
 - **一仓一版本，`node` 策略，版本号落在 root `package.json`**。与 `ci.yml` 里那条既有决定同源（「One tag decision for both images」）：App 镜像与 Job 镜像从来是同一个版本，多包各自发版会让 tag 变成 `app-v0.8.0` 之类，直接绕过触发条件。
 - **`include-component-in-tag: false`**：manifest 模式下 tag 默认是 `<component>-v<version>`（即 `remote-agent-v0.8.0`），只有关掉它才是 `v0.8.0`。这不是审美，是 `ci.yml` 的 `tags: ["v*"]` 与七个历史 tag 的形状共同钉死的。
 - **tag 由 PAT 创建（`secrets.RELEASE_PLEASE_TOKEN`），不是 `GITHUB_TOKEN`**：用 `GITHUB_TOKEN` 创建的 tag/release **不触发** `on: push: tags` 的工作流，于是 release 出来了、GHCR 上一个新镜像都没有——整条链路静默断在最关键的一步。
-- **触发模型：`push main` 维护 release PR，`workflow_dispatch` 合并它**。平时每次合并 PR，release-please 在 main 上更新/创建那条 release PR，所以「下一个版本是几」随时可见；合并几个 PR 之后手动派发一次，那一次 run 把 release PR squash 合并掉（`--squash --delete-branch`）。**打 tag 发生在合并之后的那次 run 里**（合并产生的 push main 触发它）——这不是绕路，而是 release-please 的固有形状：`release-pr` 只开 PR，`release` 才打 tag。
+- **触发模型：`push main` 维护 release PR，`workflow_dispatch` 合并它**。平时每次合并 PR，release-please 在 main 上更新/创建那条 release PR，所以「下一个版本是几」随时可见；合并几个 PR 之后手动派发一次，那一次 run 把 release PR squash 合并掉（`--squash --delete-branch`）。**打 tag 发生在合并之后的那次 run 里**（合并产生的 push main 触发它）——这不是绕路，而是 release-please 的固有形状：`release-pr` 只开 PR，`release` 才打 tag。**那条 PR 是按 `autorelease: pending` label 找的，不读 action 的 `pr` 输出**：PR 内容未变时 release-please 不报任何 PR（`maybeUpdateExistingPullRequest` 直接返回 `undefined`），而派发时通常正是这个状态（PR 就是同一批 commit 生成的）——读那个输出会让“发版”静默变成“什么都不做”。
 - **0.x 期间的版本推进只开 `bump-minor-pre-major`**：fix → patch、feat → minor、BREAKING → minor（不会意外跳 `1.0.0`）。**不开 `bump-patch-for-minor-pre-major`**：那会让一批新功能也只涨一个 patch，版本号就再也说不清「这一版多了什么」。
 - **release PR 跳过 `build-images` 与 `kind-e2e`**（`ci.yml` 按 `autorelease: pending` label 判断，分支前缀 `release-please--` 作为兜底）。它只改 `package.json` / `package-lock.json` / `CHANGELOG.md` / manifest，而且是被立即合并的；真正的门禁在合并之后的 **main push** 与 **tag push** 上，两者都跑完整链路（含 45 分钟的 kind e2e），所以镜像的准入一字未松。
 - **落地时把 root `package.json` 与 `package-lock.json` 的 version 手动对齐到 `0.7.0`**，与 manifest 一致，让第一次 release PR 的 diff 是干净的 `0.7.0 → 0.7.1`。
@@ -30,5 +30,5 @@
 - **一次发版要等两轮完整 CI**：合并 release PR 的 main push 跑一遍（~50 分钟，含 kind e2e），tag push 再跑一遍才把 semver 镜像推上 GHCR。tag 上那次是「重复」的（同一个 commit 刚在 main 上过门），换来的是「镜像只在完整链路上线」这条不变式。
 - **tag 不是点按钮那一刻出现的**：顺序是 dispatch run（合并）→ push run（tag + Release）→ `ci.yml` tag run（镜像）。日志要按这个顺序读。
 - **多了一个长期凭据**：`secrets.RELEASE_PLEASE_TOKEN`（fine-grained PAT：Contents 读写、Pull requests 读写、Issues 读写）。它过期时症状是「PR 合并了，但没有 tag」——release-please workflow 会直接红。
-- **`autorelease: pending` / `autorelease: tagged` 两个 label 是这套机制的零件**：`ci.yml` 用它识别 release PR（分支前缀是兜底）。`pending` 不存在时 release-please 打标是否 422 未经验证——落地时已预先创建，所以这个不确定性被消掉了。
+- **`autorelease: pending` / `autorelease: tagged` 两个 label 是这套机制的零件**：`ci.yml` 用它识别 release PR（分支前缀是兜底），`workflow_dispatch` 用它找到要合并的那条 PR。`pending` 不存在时 release-please 打标是否 422 未经验证——落地时已预先创建，所以这个不确定性被消掉了。
 - **`docs/deployment.md` §10 是发版链路的操作面**（哪一步产生什么、要等多久），本 ADR 只记为什么这么定。

@@ -41,12 +41,23 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # The only human action in a release: dispatch this workflow. `pr` is the
-      # release PR as JSON, empty when there is nothing to release — so an
-      # accidental dispatch on a quiet main is a no-op, not a failure.
+      # The only human action in a release: dispatch this workflow. The release
+      # PR is found by its label rather than by the action's `pr` output: that
+      # output is empty whenever release-please found the PR already up to date
+      # and left it alone (`maybeUpdateExistingPullRequest` returns undefined
+      # when the body is unchanged) — which is exactly the state a dispatch
+      # usually finds, since the PR was generated from the same commits. A merge
+      # step that quietly merges nothing is how a release disappears without a
+      # trace, so the lookup is by the label release-please itself guarantees.
       - name: Merge the release PR
-        if: github.event_name == 'workflow_dispatch' && steps.release.outputs.pr != ''
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh pr merge "${{ fromJSON(steps.release.outputs.pr).number }}" --squash --delete-branch
+        run: |
+          number="$(gh pr list --label 'autorelease: pending' --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            echo "no release PR is pending; nothing to release"
+            exit 0
+          fi
+          gh pr merge "$number" --squash --delete-branch
