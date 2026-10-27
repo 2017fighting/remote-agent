@@ -8,7 +8,7 @@ import { JOB_IMAGE } from "../src/job-image.js";
 import {
   AGENT_CONTAINER_NAME,
   JOB_ONLY_ENV_KEYS,
-  PROMPTS_CONFIGMAP_NAME,
+  PROMPTS_OVERRIDE_CONFIGMAP_NAME,
   SEED_CONTAINER_NAME,
   SEED_ENTRYPOINT,
   TOKEN_SECRET_KEY,
@@ -121,6 +121,7 @@ describe("job template: env key surface", () => {
       JOB_ENV_KEYS.omniRouteModel,
       JOB_ENV_KEYS.omniRouteReviewModel,
       JOB_ENV_KEYS.omniRouteApiKey,
+      JOB_ENV_KEYS.promptsDir,
       JOB_ENV_KEYS.jobName,
       JOB_ENV_KEYS.jobNamespace,
     ]);
@@ -164,7 +165,7 @@ describe("job template: env key surface", () => {
     const emitted = manifest().podTemplate.containers[0]!.env!.map((e) => e.name).sort();
     const declared = Object.values(JOB_ENV_KEYS).sort();
     expect(emitted).toEqual(declared);
-    expect(emitted).toHaveLength(14);
+    expect(emitted).toHaveLength(15);
   });
 
   it("emits GITHUB_APP_ID so agent commits carry the bot identity (ADR-0009)", () => {
@@ -284,30 +285,46 @@ describe("job template: volumes and mounts", () => {
   });
 
   /**
-   * The legacy prompt ConfigMap mount. The runner no longer reads it — prompts
-   * ship in the Job image (ADR-0020) — but the mount stays until the override
-   * hatch (#75) points `PROMPTS_DIR` at it, so the volume must still be present
-   * and mounted at the imported constant. This is what keeps the hatch from
-   * silently losing its directory when it is finally wired.
+   * The incident override hatch (ADR-0020): a ConfigMap an operator can create to
+   * hot-edit one prompt key without a release. `optional: true` is the
+   * load-bearing field — the ConfigMap is normally absent and k8s then mounts an
+   * empty directory, so the hatch adds no required object to the Job.
+   * `PROMPTS_DIR` names the same path so the runner's per-key fallback reaches the
+   * override first; mount path and env value must be one spelling or the
+   * operator's file sits unmounted while the runner reads image-only.
    */
-  it("keeps the legacy prompts ConfigMap mount on the runner", () => {
+  it("mounts an optional prompts-override ConfigMap and points PROMPTS_DIR at it", () => {
     const job = manifest();
     expect(job.podTemplate.volumes).toContainEqual({
-      name: "prompts",
-      configMap: { name: PROMPTS_CONFIGMAP_NAME },
+      name: "prompts-override",
+      configMap: { name: PROMPTS_OVERRIDE_CONFIGMAP_NAME, optional: true },
     });
+    expect(PROMPTS_OVERRIDE_CONFIGMAP_NAME).toBe("remote-agent-prompts-override");
     expect(job.podTemplate.containers[0]!.volumeMounts).toContainEqual({
-      name: "prompts",
-      mountPath: JOB_MOUNT_PATHS.prompts,
+      name: "prompts-override",
+      mountPath: JOB_MOUNT_PATHS.promptsOverride,
       readOnly: true,
     });
-    // The constant the template mounts is the one the hatch will point at.
-    expect(JOB_MOUNT_PATHS.prompts).toBe("/mnt/prompts");
+    expect(JOB_MOUNT_PATHS.promptsOverride).toBe("/mnt/prompts-override");
+    const env = new Map(job.podTemplate.containers[0]!.env!.map((e) => [e.name, e]));
+    expect(env.get(JOB_ENV_KEYS.promptsDir)?.value).toBe(JOB_MOUNT_PATHS.promptsOverride);
   });
 
-  it("keeps the seed container git-only: no prompts mount", () => {
+  /**
+   * The old carrier retires with this change: the Job no longer renders the
+   * `remote-agent-prompts` ConfigMap, so k8s no longer requires that object to
+   * exist. This is the assertion that keeps the dead weight from creeping back.
+   */
+  it("drops the legacy prompts ConfigMap volume and mount entirely", () => {
+    const job = manifest();
+    expect(job.podTemplate.volumes.map((volume) => volume.name)).not.toContain("prompts");
+    expect(job.podTemplate.volumes.some((volume) => volume.configMap?.name === "remote-agent-prompts")).toBe(false);
+    expect(job.podTemplate.containers[0]!.volumeMounts!.some((mount) => mount.name === "prompts")).toBe(false);
+  });
+
+  it("keeps the seed container git-only: no prompts-override mount", () => {
     const seedMounts = manifest().podTemplate.initContainers[0]!.volumeMounts!;
-    expect(seedMounts.map((mount) => mount.name)).not.toContain("prompts");
+    expect(seedMounts.map((mount) => mount.name)).not.toContain("prompts-override");
   });
 });
 

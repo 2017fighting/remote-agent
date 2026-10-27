@@ -13,12 +13,13 @@ export const VOLUME_PATHS = {
 /** Mounts that are not part of the Ticket PVC. */
 export const JOB_MOUNT_PATHS = {
   /**
-   * The legacy prompt ConfigMap `remote-agent-prompts`, one file per key.
-   *
-   * The runner no longer reads it: prompts ship inside the Job image (ADR-0020).
-   * The mount stays until the incident override hatch is wired to it (#75).
+   * The optional prompt override ConfigMap `remote-agent-prompts-override`
+   * (ADR-0020), one file per key. The Job template mounts it with
+   * `optional: true` and points `PROMPTS_DIR` at it; when the ConfigMap does not
+   * exist the directory is empty and the runner falls back to the image's
+   * templates, so the hatch adds no required object.
    */
-  prompts: "/mnt/prompts",
+  promptsOverride: "/mnt/prompts-override",
   /** The per-Job installation token, mounted as a file (ADR-0009): never in env, never in a URL. */
   token: "/mnt/credentials/token",
 } as const;

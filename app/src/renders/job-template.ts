@@ -54,12 +54,17 @@ export const JOB_ONLY_ENV_KEYS = {
 export const TOKEN_MOUNT_PATH = JOB_MOUNT_PATHS.token;
 
 /**
- * The legacy prompt ConfigMap (ADR-0020 / docs/deployment.md §8). The Job image
- * carries the prompt templates and the runner reads them from there, so this
- * volume is **inert** today: it is kept mounted only until the incident override
- * hatch (#75) points `PROMPTS_DIR` at it.
+ * The incident prompt-override ConfigMap (ADR-0020 / docs/deployment.md §8).
+ * The Job image carries the prompt templates and the runner reads them from
+ * there, so this volume is **optional and normally absent**: an operator creates
+ * it by hand to hot-edit a key without a release, and deletes it afterwards.
+ * `optional: true` is what makes its absence an empty directory rather than a
+ * pod that never starts.
  */
-export const PROMPTS_CONFIGMAP_NAME = "remote-agent-prompts";
+export const PROMPTS_OVERRIDE_CONFIGMAP_NAME = "remote-agent-prompts-override";
+
+/** The volume name the override ConfigMap is mounted under. */
+export const PROMPTS_OVERRIDE_VOLUME_NAME = "prompts-override";
 
 /** The single key inside the per-Job token Secret, mounted as the token file. */
 export const TOKEN_SECRET_KEY = "token";
@@ -149,15 +154,19 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
       containers: [renderAgentContainer(input)],
       // These three volumes are exactly the three surfaces the Job image reads:
       // the Ticket PVC at /mnt/agent (repo/state/home), the token Secret mounted
-      // as the directory holding its one file, and the legacy prompt ConfigMap at
-      // JOB_MOUNT_PATHS.prompts. The prompt mount is inert since prompts ship in
-      // the image (ADR-0020); it stays until the override hatch is wired (#75).
+      // as the directory holding its one file, and the optional prompt-override
+      // ConfigMap at JOB_MOUNT_PATHS.promptsOverride. The override volume is
+      // `optional: true`, so the normal world (no such ConfigMap) mounts an empty
+      // directory and every prompt key falls back to the image (ADR-0020).
       // Adding a volume here without a matching reader in the image (or the
       // reverse) is the drift the kind e2e exists to catch.
       volumes: [
         { name: "ticket", persistentVolumeClaim: { claimName: name } },
         { name: "token", secret: { secretName: secretName(targetRepo, issueNumber) } },
-        { name: "prompts", configMap: { name: PROMPTS_CONFIGMAP_NAME } },
+        {
+          name: PROMPTS_OVERRIDE_VOLUME_NAME,
+          configMap: { name: PROMPTS_OVERRIDE_CONFIGMAP_NAME, optional: true },
+        },
       ],
     },
   };
@@ -193,10 +202,10 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     name: AGENT_CONTAINER_NAME,
     image: JOB_IMAGE,
     env: renderJobEnv(input),
-    // The prompt mount is kept on the runner only (seed is git only, ADR-0009).
-    // The runner no longer reads it — prompts ship in the image (ADR-0020) — but
-    // the mount stays until the override hatch (#75) points PROMPTS_DIR here.
-    volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount(), promptsVolumeMount()],
+    // The prompt-override mount is kept on the runner only (seed is git only,
+    // ADR-0009). It is an empty directory unless an operator created the
+    // ConfigMap; `PROMPTS_DIR` points the runner's per-key fallback at it.
+    volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount(), promptsOverrideVolumeMount()],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
 }
@@ -231,13 +240,13 @@ function tokenVolumeMount(): K8sVolumeMount {
 }
 
 /**
- * The legacy prompt ConfigMap, one file per key at `JOB_MOUNT_PATHS.prompts`
- * (ADR-0020). The runner reads prompts from the image, so this mount is inert
- * today; it is the directory the override hatch (#75) will point `PROMPTS_DIR`
- * at, and the path is imported so the two cannot drift.
+ * The optional prompt-override ConfigMap, one file per key at
+ * `JOB_MOUNT_PATHS.promptsOverride` (ADR-0020). `optional: true` on the volume
+ * means an absent object mounts as an empty directory, so the mount is always
+ * safe and the runner falls back to the image for every key.
  */
-function promptsVolumeMount(): K8sVolumeMount {
-  return { name: "prompts", mountPath: JOB_MOUNT_PATHS.prompts, readOnly: true };
+function promptsOverrideVolumeMount(): K8sVolumeMount {
+  return { name: PROMPTS_OVERRIDE_VOLUME_NAME, mountPath: JOB_MOUNT_PATHS.promptsOverride, readOnly: true };
 }
 
 function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
@@ -261,6 +270,10 @@ function renderJobEnv(input: JobTemplateInput): K8sEnvVar[] {
       name: JOB_ENV_KEYS.omniRouteApiKey,
       secretKeyRef: { name: OMNIROUTE_API_KEY_SECRET, key: JOB_ENV_KEYS.omniRouteApiKey },
     },
+    // The incident override directory (ADR-0020): the runner tries it first and
+    // falls back to the image per key. The mount is optional, so this path is an
+    // empty directory in the normal world.
+    { name: JOB_ENV_KEYS.promptsDir, value: JOB_MOUNT_PATHS.promptsOverride },
     // The runner writes its run result on its own Job (ADR-0007), so it needs
     // both identifiers. They come from different sources on purpose:
     //

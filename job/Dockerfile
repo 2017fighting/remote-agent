@@ -9,8 +9,8 @@
 #
 # The image carries the prompt templates (ADR-0020): `prompts/` is copied to
 # IMAGE_PROMPTS_DIR and the runner reads them from there. An operator can still
-# override a single key through `PROMPTS_DIR`; that hatch is wired by a later
-# ticket of #75.
+# override a single key through `PROMPTS_DIR`; the Job template mounts the
+# optional override ConfigMap at that path.
 
 # --- build: compile the two entrypoints into self-contained bundles -------------
 FROM node:22.19-bookworm-slim AS build

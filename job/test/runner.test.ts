@@ -221,8 +221,7 @@ describe("runner: one run to a Result tool", () => {
    * ADR-0020. The runner resolves the whole prompt key surface from the image and
    * records each key's source, so one run's log names where every key came from —
    * the only evidence that a forgotten hot-edit is (not) living in the override
-   * directory. The old ConfigMap mount at `/mnt/prompts` is not read: every key
-   * here is `:image`.
+   * directory. With no override directory set, every key here is `:image`.
    */
   it("logs prompt-source=<key>:image for every key in one run", async () => {
     fixture = await runnerFixture();

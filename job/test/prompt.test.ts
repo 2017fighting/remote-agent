@@ -71,6 +71,27 @@ describe("prompt resolution (ADR-0020)", () => {
   });
 
   /**
+   * The override hatch's acceptance case (#77): an operator creates the override
+   * directory with only `_common`, and every other key still comes from the image.
+   * `_common` is the one key every role reads, so this is the shape a real
+   * incident edit takes.
+   */
+  it("uses `_common` from the override and every other key from the image", async () => {
+    await writeAll(image, (key) => `image:${key}`);
+    await writeKey(override, "_common", "hot-edited common");
+    const log: string[] = [];
+
+    const templates = await resolvePromptTemplates(sources(log, override));
+
+    expect(templates["_common"]).toBe("hot-edited common");
+    expect(log).toContain("prompt-source=_common:override");
+    for (const key of KEYS.filter((key) => key !== "_common")) {
+      expect(templates[key]).toBe(`image:${key}`);
+      expect(log).toContain(`prompt-source=${key}:image`);
+    }
+  });
+
+  /**
    * The review-axis templates and the role templates go through the same
    * `readPromptFile` fallback: overriding a review key behaves exactly like
    * overriding a role key, and there is no second rule to drift.

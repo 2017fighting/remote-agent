@@ -67,7 +67,7 @@ describe("work item contract", () => {
 
 describe("job mounts and env keys added by the runner", () => {
   it("separates the prompt and token mounts from the Ticket PVC", () => {
-    expect(JOB_MOUNT_PATHS.prompts).toBe("/mnt/prompts");
+    expect(JOB_MOUNT_PATHS.promptsOverride).toBe("/mnt/prompts-override");
     expect(JOB_MOUNT_PATHS.token).toBe("/mnt/credentials/token");
     expect(VOLUME_PATHS.sessionDatabase).toBe("/mnt/agent/state/session.sqlite");
   });
@@ -76,5 +76,6 @@ describe("job mounts and env keys added by the runner", () => {
     expect(JOB_ENV_KEYS.jobName).toBe("JOB_NAME");
     expect(JOB_ENV_KEYS.jobNamespace).toBe("JOB_NAMESPACE");
     expect(JOB_ENV_KEYS.githubAppId).toBe("GITHUB_APP_ID");
+    expect(JOB_ENV_KEYS.promptsDir).toBe("PROMPTS_DIR");
   });
 });

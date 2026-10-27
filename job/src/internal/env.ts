@@ -43,13 +43,11 @@ export type AgentRole = "implement-ticket" | "implement-spec";
 
 /**
  * The incident override directory for prompt templates (ADR-0020). The runner
- * reads a key from here when the file exists, and from the image otherwise.
- *
- * Not in `JOB_ENV_KEYS`: the App does not emit it yet — the override hatch is
- * wired in a later ticket of #75. Until then it is unset in production and every
- * key comes from the image (`prompt-source=<key>:image`).
+ * reads a key from here when the file exists, and from the image otherwise. The
+ * Job template always emits it now (`JOB_ENV_KEYS.promptsDir`); an empty value
+ * means no override, which is the shape when the optional ConfigMap is absent.
  */
-export const PROMPTS_DIR_ENV_KEY = "PROMPTS_DIR";
+export const PROMPTS_DIR_ENV_KEY = JOB_ENV_KEYS.promptsDir;
 
 export interface SeedEnv {
   /** `owner/name`. */
