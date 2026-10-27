@@ -51,4 +51,4 @@
 - **为什么这次反转是诚实的**：ADR-0004 的两条收益里，只有一条与载体有关。**「同一份镜像被多个 Agent role 复用」与 prompt 进不进镜像无关**——五个 key 本来就一起发布，所以一份镜像仍然带全部五个 key、被两个 role 与 reviewer 共用（[ADR-0005](0005-self-built-job-image.md)）；而「改 prompt 不必重建镜像」被它自己的 drift 检查封死了（副本是 verbatim 的、按 pin 逐字比对）。于是这不是推翻一个还在生效的决定，而是承认它已经在事实上被推翻。**副本不要再加回来**：把它抄进 home-ops 是本仓唯一的例外，而那个例外的收益已经归零。
 - **模板要自包含那条结论原样留下**：它与 prompt 住在哪里无关。
 - **Seed 容器的挂载与行为一字未变**（[ADR-0009](0009-ticket-volume-seeding.md)）：seed 只做 git，从不读 prompt。
-- **旧 ConfigMap 与它的挂载在 T2 之前仍是必需的**：Job 模板挂着它，k8s 要求被挂的 ConfigMap 存在，所以 home-ops 里的 `remote-agent-prompts` 暂时不能删——但它对 runner 已经没有意义。
+- **旧 ConfigMap 在 home-ops 的 pin bump 落地前仍然被需要**：集群里跑着的旧 App 还在渲染那个卷，k8s 要求被挂的 ConfigMap 存在，所以 `remote-agent-prompts` 不能先删——它得与 pin bump 同一个 PR 一起走（见上）。对 runner 它已经没有意义。
