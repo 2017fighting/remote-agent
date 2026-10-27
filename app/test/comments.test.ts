@@ -177,3 +177,60 @@ describe("evidence template (T6b–e)", () => {
     expect(body).not.toMatch(/[一-龥]/);
   });
 });
+
+/**
+ * The re-entry note (ticket #61). The order is the whole content: the old Job object
+ * blocks the next round (ADR-0013), and a PVC delete hangs on the finished pod that
+ * the Job owns — so the natural sequence (volume first, Job second) is the one that
+ * appears to hang. Read the other way round, the old note told the human to relabel
+ * first and wait, which is what made the App's rewrite of that relabel look like the
+ * human's own edit coming undone.
+ */
+describe("re-entry note", () => {
+  const evidence = {
+    jobName: JOB,
+    reason: "no-result" as const,
+    jobExists: true,
+    podName: `${JOB}-abcde`,
+    podPhase: "Succeeded",
+    containerEvidence: [],
+    jobEvidence: [],
+    logTail: null,
+    pvcName: JOB,
+    expiresAt: "2025-03-31T12:00:00.000Z",
+  };
+
+  const relabel = (body: string) => body.indexOf("Only then relabel");
+
+  it("names the Job deletion first and the relabel last, and says why the order matters", () => {
+    const body = renderEvidenceComment(evidence);
+
+    expect(body).toContain("wait out its retention window");
+    expect(body.indexOf(`kubectl delete job ${JOB}`)).toBeLessThan(relabel(body));
+    // The relabel is respected; what it cannot do is start a round while the object
+    // is still there. The note has to say that much, not "relabelling is useless".
+    expect(body).toContain("waits for its absence");
+  });
+
+  it("puts the volume step between the two, and only when the failure lives on it", () => {
+    const onVolume = renderEvidenceComment({ ...evidence, reason: "unrecoverable" });
+    expect(onVolume.indexOf(`kubectl delete pvc ${JOB}`)).toBeGreaterThan(onVolume.indexOf(`kubectl delete job ${JOB}`));
+    expect(onVolume.indexOf(`kubectl delete pvc ${JOB}`)).toBeLessThan(relabel(onVolume));
+    // The hang the incident hit: the volume is held by the Job's finished pod.
+    expect(onVolume).toContain("Terminating");
+    expect(onVolume).toContain("pod");
+
+    const elsewhere = renderEvidenceComment(evidence);
+    expect(elsewhere).not.toContain("kubectl delete pvc");
+  });
+
+  it("carries the same ordered advice on the blocked and error templates", () => {
+    const blocked = renderBlockedComment({ jobName: JOB, result: { v: 1, outcome: "blocked", summary: "s" } });
+    const error = renderErrorComment({ jobName: JOB, reason: "app-judged", summary: "s" });
+
+    for (const body of [blocked, error]) {
+      expect(body.indexOf(`kubectl delete job ${JOB}`)).toBeGreaterThan(-1);
+      expect(body.indexOf(`kubectl delete job ${JOB}`)).toBeLessThan(relabel(body));
+    }
+  });
+});

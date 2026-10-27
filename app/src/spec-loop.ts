@@ -15,7 +15,12 @@ import {
   type SpecStep,
 } from "./planners/spec-loop.js";
 import { createFollowUp } from "./outcome.js";
-import { migrateLabels, postFailureComment, setExpiresAtIfAbsent } from "./outcome-effects.js";
+import {
+  migrateLabels,
+  postFailureComment,
+  setExpiresAtIfAbsent,
+  type LabelMigration,
+} from "./outcome-effects.js";
 
 /**
  * The spec loop's write side (spec #33 §2 steps 4 and 5, docs/architecture.md
@@ -51,8 +56,18 @@ import { migrateLabels, postFailureComment, setExpiresAtIfAbsent } from "./outco
  *   the spec (ticket #49). It is written here, before the first create, and
  *   cleared when the next closeout Job starts; the k8s half of the Claim-gate
  *   keeps the old object from being re-judged in the meantime.
- * - **S2 → S4 / S5** the label migration takes the spec out of the gate and the
- *   comment dedupes on its marker — the same two carriers a ticket uses.
+ * - **S2 → S4 / S5** the comment dedupes on its marker, and it is posted *before*
+ *   the label migration (ticket #61): the human's entry point has to be durable
+ *   before the spec leaves the gate. A crash in between re-judges and dedupes on
+ *   the marker instead of leaving an exit label with no comment to explain it.
+ * - **Every consumed outcome marks the spec** with `closeout-consumed` (ticket
+ *   #61). The exit migration alone was the carrier for S3–S5, and a human
+ *   re-entry is precisely the action that undoes it: the next pass then judged the
+ *   same terminal Job again, reached the same verdict, and put the exit labels
+ *   back — silently, because the comment dedupes on its marker. The marker is what
+ *   survives the relabel. For S3–S5 it rides the same label edit as the exit
+ *   migration, so the two cannot be half-applied; S3N stays the one branch that
+ *   writes it on its own, first.
  *
  * Two windows have no carrier, and the marker changes what they cost rather than
  * closing them:
@@ -175,12 +190,13 @@ export async function applySpecStep(
       await createFollowUpTickets(deps, spec, step.newTickets);
       return;
     case "closeout-blocked":
-      await migrateLabels(deps.github, spec, SPEC_BLOCKED_LABELS);
+      // Comment first, then the state change (ticket #61): the human's entry point
+      // is durable before the spec leaves the gate.
       await postFailureComment(deps, spec, job, pods, { outcome: "blocked", result: step.result }, judgedAt);
       await setExpiresAtIfAbsent(deps, spec, "blocked", judgedAt);
+      await migrateLabels(deps.github, spec, consumed(SPEC_BLOCKED_LABELS));
       return;
     case "closeout-error":
-      await migrateLabels(deps.github, spec, SPEC_ERROR_LABELS);
       await postFailureComment(
         deps,
         spec,
@@ -189,7 +205,10 @@ export async function applySpecStep(
         { outcome: "error", reason: step.reason, summary: step.summary },
         judgedAt,
       );
+      // The volume clock goes on before the spec leaves the gate: a crash between
+      // the two would otherwise leave a volume nothing ever reclaims.
       await setExpiresAtIfAbsent(deps, spec, "error", judgedAt);
+      await migrateLabels(deps.github, spec, consumed(SPEC_ERROR_LABELS));
       return;
     case "advance":
     case "idle":
@@ -221,10 +240,23 @@ async function openCloseoutPullRequest(
       baseBranch: CLOSEOUT_PR_BASE_BRANCH,
     });
   }
-  // The label migration is the spec's "outcome consumed" marker: dropping
-  // `ready-for-agent` is what takes it out of the gate (§4.2).
-  await migrateLabels(deps.github, spec, SPEC_DONE_LABELS);
+  // The label migration is what takes the spec out of the gate (§4.2), and it
+  // carries the consumed marker with it (ticket #61).
   await setExpiresAtIfAbsent(deps, spec, "done", judgedAt);
+  await migrateLabels(deps.github, spec, consumed(SPEC_DONE_LABELS));
+}
+
+/**
+ * An exit migration that also carries the consumed marker, in one label edit
+ * (ticket #61).
+ *
+ * The two are one state transition — "this outcome was acted on, and the spec
+ * left the gate" — so writing them together is what makes the marker unlosable:
+ * no crash can leave the exit labels without it. S3N is the one branch that needs
+ * the marker *without* an exit migration, and writes it on its own, first.
+ */
+function consumed(migration: LabelMigration): LabelMigration {
+  return { add: [...migration.add, LABEL_CLOSEOUT_CONSUMED], remove: migration.remove };
 }
 
 /**

@@ -30,7 +30,7 @@ Webhook URL: https://remote-agent.raenzo.com/webhook
 - `agent:in-progress`: App 已 Claim 这个 ticket（此刻有 Job 占着它）；**只出现在 ticket 上，spec 从不带它**
 - `agent:error`: Job 非正常退出 / 读不到 run result / label 与 Job 漂移，由 App 设置；**没有自动重试**，人改 label 是唯一重入方式
 - `agent:blocked`: agent 自述没做完、需要人做决定，由 App 按 run result 设置
-- `closeout-consumed`: **只在 spec 上**，App 加/摘。表示「这块收尾 Job 的 outcome 已经落地」，挡住同一批 `newTickets` 被再建一遍；不是 exit 标记，不进 `Loop`（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）
+- `closeout-consumed`: **只在 spec 上**，App 加/摘。表示「这块收尾 Job 的 outcome 已经落地」：挡住同一批 `newTickets` 被再建一遍，也是人重入之后唯一活下来的「判过了」的载体（人重入时**不要动它**）；不是 exit 标记，不进 `Loop`（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)、[ADR-0018](docs/adr/0018-re-entry-survives-the-old-closeout-job.md)）
 
 ## implement整体流程
 
@@ -71,6 +71,8 @@ list then open children，keep only those passing the Gate（`open` ∧ no open 
 直到所有 `ready-for-agent` 的 sub-issue 都做完。**spec 下再无 open sub-issue 时**，App 起一个收尾 Job（`implement-spec`）做最后的工作：干完就开 PR 到 main（`Closes` 由 App 写进 PR body）；判断还有活没干完就在 spec 下新建 sub-issue、**不开 PR**——新票只带 `ready-for-agent`（或 `ready-for-human`），但授权是沿 spec 继承来的，所以 **`ready-for-agent` 的新票下一轮就进 Frontier、就被 Claim**，不需要人在票上补 `agent:implement`；`ready-for-human` 的留在门外等人。票上的 label 走的是普通票那条链：`ready-for-agent`（App 建票时写）→ 继承授权 → `agent:in-progress`，`agent:implement` 全程不出现。
 
 S3N 的 outcome **只消费一次**：这块分支判完还留在门内，而它唯一的「已消费」载体原本是它建出来的票——票全部关闭之后载体就没了，旧收尾 Job 却还在 30 分钟保留窗里，同一批 `newTickets` 会被再建一遍。所以 S3N 在 spec 上加一个 `closeout-consumed` label（判定那一次写、起下一块收尾 Job 那一次清）：新票全关之后 spec 停在这儿等旧 Job 的 `DELETED`，然后起一块**新的**收尾 Job 重新判断还剩什么（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）。
+
+**每个判过的收尾 outcome 都写这个标记，不只是 S3N**（[ADR-0018](docs/adr/0018-re-entry-survives-the-old-closeout-job.md)，[#61](https://github.com/2017fighting/remote-agent/issues/61)）。S3–S5 判完就带着它移出门，而移出门靠的是那次 label 迁移——**人重入抹掉的正是那次迁移**。少了标记，重入之后的第一次 reconcile 又会读到同一块终态 Job、判出同一个 verdict、把退出 label 原样写回去：人看到自己的编辑被撤销，而且没有新评论解释（判决评论按 marker 去重）。有了标记，重入的 spec 停在既有的 `closeout-consumed` 支上——不改 label、不评论、不建 Job，等旧对象被删掉之后**下一轮自己起跑**，不需要人再贴一次。S3–S5 的标记与退出迁移是**同一次 label edit**（不可能只写一半）；S3N 仍然单独先写。
 
 **收尾的每一轮都在一块新卷上开始**（[ADR-0016](docs/adr/0016-closeout-round-starts-on-a-fresh-volume.md)，[#60](https://github.com/2017fighting/remote-agent/issues/60)）：收尾 role 的 conversation 报过一次就是终态的，同一块卷上的第二轮只会 `seed-skip` + `already-complete` + 不写 annotation，App 只能判 `no-result`——所以起收尾 Job 时先删掉上一轮那块卷与它的同名 Secret，再建新的。代价明写：上一轮的对话全文在下一轮开始时消失，App 在 GitHub 上的那条评论成为唯一记录（`blocked` / `error` 的 30 天保留期只在**没有下一轮**时有效，想读全文要在重入前读）。runner 侧另有一道守卫：打开卷发现 conversation 已完成、而自己 Job 上没有 `run-result` annotation（新 Job 跑在一块 Spent volume 上）就 exit 78 → `unrecoverable`，评论里现成的指引直接叫人删卷。
 
@@ -161,11 +163,11 @@ Claim-gate(issue)  ⟺ Gate ∧ 确定性 Job 名下无未删的 Job 对象（k8
 | 场景（Job 终态 · annotation） | ticket 的 label | spec 的 label |
 |---|---|---|
 | —（Claim：Job 非终态，含 pod 重启自环） | `open` · `[ready-for-agent, agent:implement, agent:in-progress]` | `[ready-for-agent, agent:implement]`（不变，spec 不写 `agent:in-progress`） |
-| `Complete` · `done` | `closed` · `[ready-for-agent, agent:implement]` | `[ready-for-human, agent:implement]` + 已开 PR |
+| `Complete` · `done` | `closed` · `[ready-for-agent, agent:implement]` | `[ready-for-human, agent:implement, closeout-consumed]` + 已开 PR |
 | `Complete` · `done` + `newTickets` | 同 `done`（但 ticket 的 `finish_ticket` 没有 `newTickets` 参数，所以这个形状只有 spec 收尾能产出） | `[ready-for-agent, agent:implement, closeout-consumed]`（**不开 PR**，新 sub-issue 已建；新票只带 `ready-for-agent`，但授权继承自 spec，所以下一轮就进 Frontier。第三个 label 是「这块 outcome 已消费」的记号，见 [ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)） |
-| `Complete` · `blocked` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | 同左 |
-| 任何 `error`（自述 / backoffLimit / DeadlineExceeded / no-result / no-job） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | 同左 |
-| 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent` | 同左 |
+| `Complete` · `blocked` | `open` · `[ready-for-human, agent:implement, agent:blocked]` + 评论 | 同左，再加 `closeout-consumed` |
+| 任何 `error`（自述 / backoffLimit / DeadlineExceeded / no-result / no-job） | `open` · `[ready-for-human, agent:implement, agent:error]` + 评论 | 同左，再加 `closeout-consumed` |
+| 人重入 | 摘 `agent:blocked`/`agent:error`、`ready-for-human` → `ready-for-agent`；旧 Job 对象还在时这只是把下一轮准备好，起跑要等它被删掉（等不及 `kubectl delete job <名>`） | 同左，且 `closeout-consumed` **不要动**（它不是 exit 标记） |
 | 额度满 · Defer | 一字不变 | 一字不变 |
 
 表里 ticket 侧的 `agent:implement` 一律读作「**仅当人把它写在票上**」：靠继承进门的票没有这个 label，其余一字不差——App 从不写、也不删它。

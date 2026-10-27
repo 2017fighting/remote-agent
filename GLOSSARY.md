@@ -33,7 +33,7 @@ App 给一张 ticket 加上 `agent:in-progress` 的那一次 label edit，表示
 _Avoid_: lock, lease, 认领标记
 
 **Re-entry**:
-人把一张 `blocked` / `error` 的票送回 Frontier 的唯一动作：摘 `agent:blocked` / `agent:error`，把 `ready-for-human` 换回 `ready-for-agent`；`agent:implement` 不动。
+人把一张 `blocked` / `error` 的票送回 Frontier 的唯一动作：摘 `agent:blocked` / `agent:error`，把 `ready-for-human` 换回 `ready-for-agent`；`agent:implement` 不动。**这一步只是把下一轮准备好**：旧 Job 对象还在保留窗里时，下一轮要等它被删掉（或人 `kubectl delete job`）才起跑——`ready-for-agent` 回到票上不等于 Job 起来（[ADR-0013](docs/adr/0013-claim-gates-on-job-absence.md)）。spec 侧同理，而且 spec 上的 `closeout-consumed` 要留着：它不在这个动作的清单里（[ADR-0018](docs/adr/0018-re-entry-survives-the-old-closeout-job.md)）。
 _Avoid_: retry, 重新触发, 恢复
 
 **Target repo**:
@@ -196,7 +196,11 @@ App 加上，表示这次运行没有可用结论：Job 非正常退出（backof
 Agent 自述没做完、需要人做决定，由 App 按 run result 加上（同时摘 `ready-for-agent`、加 `ready-for-human`、转写评论）。
 
 **closeout-consumed**:
-App 加在 **spec** 上的记号，表示「这块收尾 Job 的 outcome 已经落地」；S3N（收尾 Job 报 `newTickets`）判完那一次写一次，起下一块收尾 Job 那一次清一次（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)）。**不是 exit 标记**：它不进 `Loop`，也不挡授权继承，只挡「同一块收尾 Job 被重判一次」。S3N 是唯一判完还留在门内的 spec 分支，而它建出来的新票会全部关闭——那个载体一死，没有这个 label 就会把同一批 `newTickets` 再建一遍。
+App 加在 **spec** 上的记号，表示「这块收尾 Job 的 outcome 已经落地」；**每个判过的收尾 outcome 都写一次**（S3 / S3N / S4 / S5），起下一块收尾 Job 那一次清一次（[ADR-0015](docs/adr/0015-closeout-outcome-consumed-once.md)、[ADR-0018](docs/adr/0018-re-entry-survives-the-old-closeout-job.md)）。**不是 exit 标记**：它不进 `Loop`，也不挡授权继承，只挡「同一块收尾 Job 被重判一次」。S3N 判完还留在门内，S3–S5 判完就带着它移出门——两条路上它都是人重入时**唯一活下来的**「这块 outcome 判过了」的载体：人重入抹掉的正是那次退出迁移，抹不掉它。
 
-带标记的 spec 这一轮什么都不做（不建 Job、不改 label、不评论），等那块 Job 对象被 `DELETED`；它在 pass 日志里计进 `closeout-consumed=<n>`，与 `Defer` / `Idle` / 等待 `DELETED` 的 Claim 同形。
+带标记的 spec 这一轮什么都不做（不建 Job、不改 label、不评论），等那块 Job 对象被 `DELETED`；它在 pass 日志里计进 `closeout-consumed=<n>`，与 `Defer` / `Idle` / 等待 `DELETED` 的 Claim 同形。人重入之后的 spec 也停在这一支上，所以那个「relabel 贴了却没动静」的窗口就是一个可数的数。
+
+**Exit marker**:
+`agent:*` 里表示「这次运行结束了、该谁接手」的那两个：`agent:blocked` / `agent:error`（由 App 写，同时摘 `ready-for-agent`、加 `ready-for-human`）。与它相邻的两个概念各自不同：`agent:in-progress` 说的是「此刻在跑」，不是 exit；`closeout-consumed` 说的是「这块 outcome 已落地」，既不是 exit 也不进 `Loop`。exit marker 是 issue 自己的事实，不沿继承传递。
+_Avoid_: 终态标记, 结果标记, status
 _Avoid_: 已收尾, consumed flag, 幂等键
