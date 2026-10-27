@@ -7,7 +7,7 @@ import {
   type TaskId,
 } from "@earendil-works/pi-durable";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { renderReviewPrompt, type ReviewAxis } from "./prompt.js";
+import { renderReviewPrompt, type PromptTemplates, type ReviewAxis } from "./prompt.js";
 import { reviewerExtension } from "./reviewer-tools.js";
 import { findStandardsFiles } from "./standards-files.js";
 import type { ReviewReports } from "./code-review.js";
@@ -19,7 +19,8 @@ export interface ReviewerDeps {
   harness: HarnessHandle;
   /** The working copy all three cwds live in (spec #33 §5). */
   repo: string;
-  promptsDir: string;
+  /** The key surface resolved once by the run (ADR-0020). */
+  templates: PromptTemplates;
   /** `owner/repo#<spec>`: the Spec axis' comparison surface. */
   specRef: string;
   /** The spec body; empty when the work item carries none. */
@@ -80,12 +81,12 @@ async function runAxis(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string)
 
 /** The axis template, rendered with the values the tool injects and nothing else. */
 async function axisPrompt(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string): Promise<string> {
-  const rendered = await renderReviewPrompt({
+  const rendered = renderReviewPrompt({
     axis,
     fixedPoint,
     specRef: deps.specRef,
     specBody: deps.specBody,
-    promptsDir: deps.promptsDir,
+    templates: deps.templates,
   });
   if (axis !== "standards") return rendered;
   // The standards list is not a template value: the runner scans the working copy

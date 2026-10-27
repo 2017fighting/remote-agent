@@ -12,11 +12,25 @@ export const VOLUME_PATHS = {
 
 /** Mounts that are not part of the Ticket PVC. */
 export const JOB_MOUNT_PATHS = {
-  /** The prompt ConfigMap `remote-agent-prompts`, one file per key (ADR-0004). */
+  /**
+   * The legacy prompt ConfigMap `remote-agent-prompts`, one file per key.
+   *
+   * The runner no longer reads it: prompts ship inside the Job image (ADR-0020).
+   * The mount stays until the incident override hatch is wired to it (#75).
+   */
   prompts: "/mnt/prompts",
   /** The per-Job installation token, mounted as a file (ADR-0009): never in env, never in a URL. */
   token: "/mnt/credentials/token",
 } as const;
+
+/**
+ * The canonical prompt directory baked into the Job image (ADR-0020).
+ *
+ * `job/Dockerfile` copies the repo's `prompts/` here, and the runner reads it
+ * when no override directory (`PROMPTS_DIR`) carries the key. The Dockerfile
+ * spells the path out; `job/test/result-tools.test.ts` pins the two together.
+ */
+export const IMAGE_PROMPTS_DIR = "/opt/remote-agent/prompts";
 
 /** Marker inside App-posted GitHub comments: `<!-- remote-agent:<kind>:<job-name> -->`. */
 export const COMMENT_MARKER_PREFIX = "remote-agent:";

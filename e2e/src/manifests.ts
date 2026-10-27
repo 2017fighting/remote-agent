@@ -8,7 +8,9 @@ import { join } from "node:path";
  * the deployed *contract* — the namespace, the two ServiceAccounts with exactly
  * the permissions the docs grant, the guardrail quota, and the prompt ConfigMap
  * built from `prompts/` — so the e2e exercises the same permission surface the
- * real deployment has. A missing RBAC verb here fails the same way it would in
+ * real deployment has. The prompt ConfigMap is now the legacy, inert carrier
+ * (ADR-0020): the Job template still mounts it, so it must exist, but the runner
+ * reads the templates baked into the image. A missing RBAC verb here fails the same way it would in
  * production, which is what makes the gate meaningful.
  *
  * Everything the harness adds beyond the docs is e2e-only and stays in this
@@ -22,10 +24,14 @@ export const PROMPTS_CONFIGMAP = "remote-agent-prompts";
 /** The one sops-equivalent Secret (docs/deployment.md §3); the App and the Job both read it. */
 export const APP_SECRET = "remote-agent-secret";
 
-/** docs/deployment.md §8 / ADR-0004: the five keys, verbatim from `prompts/`. */
+/** docs/deployment.md §8 / ADR-0020: the five keys, verbatim from `prompts/`. */
 export const PROMPT_KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"] as const;
 
-/** The prompt ConfigMap, one key per file in `prompts/` (ADR-0004). */
+/**
+ * The legacy prompt ConfigMap, one key per file in `prompts/` (ADR-0020). The Job
+ * template still mounts it, so it has to exist, but the runner no longer reads
+ * it; this is what keeps the harness's contract matching the template's mount.
+ */
 export async function renderPromptsConfigMap(promptsDir: string): Promise<Record<string, unknown>> {
   const data: Record<string, string> = {};
   for (const key of PROMPT_KEYS) {

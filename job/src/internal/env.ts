@@ -2,6 +2,7 @@ import {
   JOB_ENV_KEYS,
   VOLUME_PATHS,
   JOB_MOUNT_PATHS,
+  IMAGE_PROMPTS_DIR,
   jobName,
   specBranch,
   parseWorkItem,
@@ -40,6 +41,16 @@ export const REQUIRED_RUNNER_ENV_KEYS = [
 
 export type AgentRole = "implement-ticket" | "implement-spec";
 
+/**
+ * The incident override directory for prompt templates (ADR-0020). The runner
+ * reads a key from here when the file exists, and from the image otherwise.
+ *
+ * Not in `JOB_ENV_KEYS`: the App does not emit it yet — the override hatch is
+ * wired in a later ticket of #75. Until then it is unset in production and every
+ * key comes from the image (`prompt-source=<key>:image`).
+ */
+export const PROMPTS_DIR_ENV_KEY = "PROMPTS_DIR";
+
 export interface SeedEnv {
   /** `owner/name`. */
   repo: string;
@@ -64,6 +75,8 @@ export interface RunnerEnv extends SeedEnv {
   /** The Job whose `remote-agent/run-result` annotation this run writes. */
   jobName: string;
   jobNamespace: string;
+  /** `PROMPTS_DIR`: an incident override directory, when the Job sets one (ADR-0020). */
+  promptsDir?: string;
 }
 
 const ROLES: readonly string[] = ["implement-ticket", "implement-spec"];
@@ -139,6 +152,7 @@ export function readRunnerEnv(env: EnvSource, namespace: string): RunnerEnv {
   }
   const jobNamespace = (env[JOB_ENV_KEYS.jobNamespace] ?? "").trim() || namespace;
   if (jobNamespace === "") throw new StartupError("the Job namespace is neither in env nor in the ServiceAccount mount");
+  const promptsDir = (env[PROMPTS_DIR_ENV_KEY] ?? "").trim();
   return {
     ...seed,
     role: role as AgentRole,
@@ -152,10 +166,14 @@ export function readRunnerEnv(env: EnvSource, namespace: string): RunnerEnv {
     },
     jobName: deriveJobName(env, seed.repo, role === "implement-spec" ? seed.specNumber : workItem.number),
     jobNamespace,
+    ...(promptsDir === "" ? {} : { promptsDir }),
   };
 }
 
-/** Where the Job reads and writes on the Ticket PVC, plus the two non-PVC mounts. */
+/**
+ * Where the Job reads and writes on the Ticket PVC, the non-PVC mounts, and the
+ * image's canonical prompt directory (ADR-0020).
+ */
 export interface JobPaths {
   repo: string;
   state: string;
@@ -163,7 +181,8 @@ export interface JobPaths {
   seedMarker: string;
   seedError: string;
   sessionDatabase: string;
-  prompts: string;
+  /** The canonical prompt directory baked into the Job image (ADR-0020). */
+  imagePrompts: string;
   token: string;
 }
 
@@ -175,7 +194,7 @@ export function jobPaths(overrides: Partial<JobPaths> = {}): JobPaths {
     seedMarker: VOLUME_PATHS.seedMarker,
     seedError: VOLUME_PATHS.seedError,
     sessionDatabase: VOLUME_PATHS.sessionDatabase,
-    prompts: JOB_MOUNT_PATHS.prompts,
+    imagePrompts: IMAGE_PROMPTS_DIR,
     token: JOB_MOUNT_PATHS.token,
     ...overrides,
   };

@@ -284,14 +284,13 @@ describe("job template: volumes and mounts", () => {
   });
 
   /**
-   * The runner reads `_common` + its role template from `JOB_MOUNT_PATHS.prompts`
-   * and throws if they are absent (job/src/internal/prompt.ts). Without this
-   * volume and mount every real Job would die before its first model call, and
-   * the Job-entry seam would not see it because it builds its own prompts
-   * directory. The mount path is imported, not spelled, so a change to the
-   * constant cannot silently break the pairing.
+   * The legacy prompt ConfigMap mount. The runner no longer reads it — prompts
+   * ship in the Job image (ADR-0020) — but the mount stays until the override
+   * hatch (#75) points `PROMPTS_DIR` at it, so the volume must still be present
+   * and mounted at the imported constant. This is what keeps the hatch from
+   * silently losing its directory when it is finally wired.
    */
-  it("mounts the prompts ConfigMap on the runner at the path the runner reads", () => {
+  it("keeps the legacy prompts ConfigMap mount on the runner", () => {
     const job = manifest();
     expect(job.podTemplate.volumes).toContainEqual({
       name: "prompts",
@@ -302,7 +301,7 @@ describe("job template: volumes and mounts", () => {
       mountPath: JOB_MOUNT_PATHS.prompts,
       readOnly: true,
     });
-    // The constant the runner resolves is the one the template mounts.
+    // The constant the template mounts is the one the hatch will point at.
     expect(JOB_MOUNT_PATHS.prompts).toBe("/mnt/prompts");
   });
 

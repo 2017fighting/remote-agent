@@ -114,14 +114,14 @@ describe("harness manifests: quota, storage class, prompts", () => {
     expect(storageClass.provisioner).not.toBe("");
   });
 
-  it("builds the prompts ConfigMap with exactly the five keys from prompts/", async () => {
+  it("builds the legacy prompts ConfigMap with exactly the five keys from prompts/", async () => {
     const configMap = (await renderPromptsConfigMap(join(repoRoot, "prompts"))) as {
       metadata: { name: string };
       data: Record<string, string>;
     };
     expect(configMap.metadata.name).toBe(PROMPTS_CONFIGMAP);
     expect(Object.keys(configMap.data).sort()).toEqual([...PROMPT_KEYS].sort());
-    // Verbatim from the repo, not a fixture copy (ADR-0004: text is the ConfigMap's).
+    // Verbatim from the repo, not a fixture copy (ADR-0020: the same text also ships in the image).
     for (const key of PROMPT_KEYS) {
       const onDisk = await readFile(join(repoRoot, "prompts", key), "utf8");
       expect(configMap.data[key]).toBe(onDisk);

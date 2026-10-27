@@ -57,7 +57,7 @@ import {
  *
  *   1. bring up a kind cluster and build + load both images;
  *   2. apply the namespace contract from docs/deployment.md §4/§5/§7/§8 (RBAC,
- *      guardrail quota, prompt ConfigMap from `prompts/`) plus a storage class
+ *      guardrail quota, legacy prompt ConfigMap from `prompts/`) plus a storage class
  *      of the name the App's template requires;
  *   3. start the two stub services as Deployments, with a real bare git
  *      repository behind stub-github;

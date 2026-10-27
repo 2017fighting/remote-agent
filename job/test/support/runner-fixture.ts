@@ -16,6 +16,7 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { reviewerExtension } from "../../src/internal/reviewer-tools.js";
 import { buildRegistry, type RunDeps } from "../../src/internal/runner.js";
+import { resolvePromptTemplates, type PromptTemplates } from "../../src/internal/prompt.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { RunResultV1, WorkItemTicket, WorkItemV1 } from "@remote-agent/shared";
 import { jobPaths, type JobPaths, type RunnerEnv } from "../../src/internal/env.js";
@@ -81,6 +82,8 @@ export interface RunnerFixture {
   paths: JobPaths;
   env: RunnerEnv;
   models: Models;
+  /** The image key surface resolved once, for read-backs that rebuild the registry. */
+  promptTemplates: PromptTemplates;
   /** Scripted model responses; empty means any model request fails the test. */
   script(responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]): void;
   pendingResponses(): number;
@@ -90,7 +93,7 @@ export interface RunnerFixture {
 
 /**
  * A volume-shaped tree (repo/state/home) with a real worktree, a real bare
- * remote, a prompt ConfigMap and a mounted token file. No network anywhere.
+ * remote, an image prompt directory and a mounted token file. No network anywhere.
  */
 export async function runnerFixture(): Promise<RunnerFixture> {
   const root = await mkdtemp(join(tmpdir(), "remote-agent-runner-"));
@@ -117,15 +120,15 @@ export async function runnerFixture(): Promise<RunnerFixture> {
     seedMarker: join(volume, "state", "seeded.json"),
     seedError: join(volume, "state", "seed-error.json"),
     sessionDatabase: join(volume, "state", "session.sqlite"),
-    prompts: join(root, "prompts"),
+    imagePrompts: join(root, "image-prompts"),
     token: join(root, "token"),
   });
   await mkdir(paths.state, { recursive: true });
   await mkdir(paths.home, { recursive: true });
-  await mkdir(paths.prompts, { recursive: true });
+  await mkdir(paths.imagePrompts, { recursive: true });
   await writeFile(paths.token, "ghs_test_token\n");
   await writeFile(
-    join(paths.prompts, "_common"),
+    join(paths.imagePrompts, "_common"),
     [
       "# Who you are",
       "You are an unattended agent working on {{work_ref}}.",
@@ -137,15 +140,15 @@ export async function runnerFixture(): Promise<RunnerFixture> {
     ].join("\n"),
   );
   await writeFile(
-    join(paths.prompts, "implement-spec"),
+    join(paths.imagePrompts, "implement-spec"),
     ["# Role: implement-spec", "This run closes out spec #{{spec_number}} from {{fixed_point}}.", ""].join("\n"),
   );
   await writeFile(
-    join(paths.prompts, "implement-ticket"),
+    join(paths.imagePrompts, "implement-ticket"),
     ["# Role: implement-ticket", "This run implements ticket #{{ticket_number}} of spec #{{spec_number}}.", ""].join("\n"),
   );
   await writeFile(
-    join(paths.prompts, "review-spec"),
+    join(paths.imagePrompts, "review-spec"),
     [
       "# Spec axis",
       "Fixed point {{fixed_point}}; spec {{spec_ref}}:",
@@ -154,7 +157,7 @@ export async function runnerFixture(): Promise<RunnerFixture> {
     ].join("\n"),
   );
   await writeFile(
-    join(paths.prompts, "review-standards"),
+    join(paths.imagePrompts, "review-standards"),
     ["# Standards axis", "Fixed point {{fixed_point}}.", ""].join("\n"),
   );
 
@@ -179,6 +182,8 @@ export async function runnerFixture(): Promise<RunnerFixture> {
     jobNamespace: "remote-agent",
   };
 
+  const promptTemplates = await resolvePromptTemplates({ imageDir: paths.imagePrompts, log: () => {} });
+
   return {
     root,
     remote,
@@ -186,6 +191,7 @@ export async function runnerFixture(): Promise<RunnerFixture> {
     paths,
     env,
     models,
+    promptTemplates,
     script: (responses) => faux.setResponses(responses),
     pendingResponses: () => faux.getPendingResponseCount(),
   };
@@ -317,7 +323,7 @@ export async function reviewerConversations(
  * tool table the conversation really had. The harness handle is absent here: no
  * tool runs in these read-backs.
  */
-function runRegistry(fixture: RunnerFixture, env: RunnerEnv = fixture.env) {
+function runRegistry(fixture: RunnerFixture, env: RunnerEnv = fixture.env, templates: PromptTemplates = fixture.promptTemplates) {
   return buildRegistry(
     {
       env,
@@ -326,6 +332,7 @@ function runRegistry(fixture: RunnerFixture, env: RunnerEnv = fixture.env) {
       ...(fixture.standardsFiles === undefined ? {} : { standardsFiles: fixture.standardsFiles }),
     },
     [],
+    templates,
   );
 }
 

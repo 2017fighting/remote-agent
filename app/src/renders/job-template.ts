@@ -54,9 +54,10 @@ export const JOB_ONLY_ENV_KEYS = {
 export const TOKEN_MOUNT_PATH = JOB_MOUNT_PATHS.token;
 
 /**
- * The prompt ConfigMap (ADR-0004 / docs/deployment.md §8). The Job image carries
- * no prompt: the runner reads `_common` + its role template from this volume, so
- * changing wording never rebuilds an image.
+ * The legacy prompt ConfigMap (ADR-0020 / docs/deployment.md §8). The Job image
+ * carries the prompt templates and the runner reads them from there, so this
+ * volume is **inert** today: it is kept mounted only until the incident override
+ * hatch (#75) points `PROMPTS_DIR` at it.
  */
 export const PROMPTS_CONFIGMAP_NAME = "remote-agent-prompts";
 
@@ -148,9 +149,11 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
       containers: [renderAgentContainer(input)],
       // These three volumes are exactly the three surfaces the Job image reads:
       // the Ticket PVC at /mnt/agent (repo/state/home), the token Secret mounted
-      // as the directory holding its one file, and the prompt ConfigMap at
-      // JOB_MOUNT_PATHS.prompts. Adding a volume here without a matching reader in
-      // the image (or the reverse) is the drift the kind e2e exists to catch.
+      // as the directory holding its one file, and the legacy prompt ConfigMap at
+      // JOB_MOUNT_PATHS.prompts. The prompt mount is inert since prompts ship in
+      // the image (ADR-0020); it stays until the override hatch is wired (#75).
+      // Adding a volume here without a matching reader in the image (or the
+      // reverse) is the drift the kind e2e exists to catch.
       volumes: [
         { name: "ticket", persistentVolumeClaim: { claimName: name } },
         { name: "token", secret: { secretName: secretName(targetRepo, issueNumber) } },
@@ -190,8 +193,9 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     name: AGENT_CONTAINER_NAME,
     image: JOB_IMAGE,
     env: renderJobEnv(input),
-    // The runner reads the prompt templates from the ConfigMap, so it — and not
-    // seed — carries the prompts mount (seed is git only, ADR-0009).
+    // The prompt mount is kept on the runner only (seed is git only, ADR-0009).
+    // The runner no longer reads it — prompts ship in the image (ADR-0020) — but
+    // the mount stays until the override hatch (#75) points PROMPTS_DIR here.
     volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount(), promptsVolumeMount()],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
@@ -227,10 +231,10 @@ function tokenVolumeMount(): K8sVolumeMount {
 }
 
 /**
- * The prompt ConfigMap, one file per key at `JOB_MOUNT_PATHS.prompts` (ADR-0004).
- * The runner's `readPromptFile()` opens `<promptsDir>/<key>`, so the path must be
- * the same constant the Job image reads — importing it is what keeps the two
- * from drifting.
+ * The legacy prompt ConfigMap, one file per key at `JOB_MOUNT_PATHS.prompts`
+ * (ADR-0020). The runner reads prompts from the image, so this mount is inert
+ * today; it is the directory the override hatch (#75) will point `PROMPTS_DIR`
+ * at, and the path is imported so the two cannot drift.
  */
 function promptsVolumeMount(): K8sVolumeMount {
   return { name: "prompts", mountPath: JOB_MOUNT_PATHS.prompts, readOnly: true };
