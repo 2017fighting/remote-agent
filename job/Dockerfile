@@ -62,8 +62,8 @@ WORKDIR /mnt/agent/repo
 
 COPY --from=build /build/dist/seed.mjs /opt/remote-agent/seed.mjs
 COPY --from=build /build/dist/runner.mjs /opt/remote-agent/runner.mjs
-# The prompt key surface travels with the image (ADR-0020). The path is
-# IMAGE_PROMPTS_DIR in shared/src/paths.ts; a unit test pins the two together.
+# The prompt key surface travels with the image (ADR-0020). The target path is
+# IMAGE_PROMPTS_DIR in shared/src/paths.ts; a unit test asserts this COPY stays.
 COPY prompts /opt/remote-agent/prompts
 RUN chown -R 1000:1000 /opt/remote-agent
 

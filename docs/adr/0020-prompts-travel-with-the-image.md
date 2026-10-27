@@ -32,7 +32,7 @@
 ### 发布与切换
 
 - **T1（镜像内 prompt）与 T2（可选覆盖卷）分两次 release**：#76 是 T1——镜像开始带 prompt、runner 开始从镜像读并逐 key 记来源，而 Job 模板仍挂着旧的 ConfigMap，它对 runner 已经**惰性**，`prompt-source=<key>:image` 就是这一点的证据。T2 才把 `prompts-override` 卷与 `PROMPTS_DIR` 接进模板、并摘掉旧 ConfigMap。每步单独可回滚。
-- 删 home-ops 的 ConfigMap 副本必须与「含 T1+T2 的 pin bump」同一个 PR：旧 App 仍在渲染那个卷，ConfigMap 先没则 Job 起不来。删之前确认 `kubectl get jobs -n remote-agent` 为空——prompt 是**每轮惰性读取**的，在跑的 Job 会被打断。
+- 删 home-ops 的 ConfigMap 副本必须与「含 T1+T2 的 pin bump」同一个 PR：旧 App 仍在渲染那个卷，ConfigMap 先没则 Job 起不来。删之前确认 `kubectl get jobs -n remote-agent` 为空——旧 App 渲染的 Job 在 pod 启动时就要那个卷存在，否则起不来。
 
 ## Considered Options
 

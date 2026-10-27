@@ -20,19 +20,22 @@ export const PROMPT_TEMPLATE_KEYS = [
 
 export const COMMON_PROMPT_KEY = "_common";
 
+/** One key of the image's prompt key surface. */
+export type PromptTemplateKey = (typeof PROMPT_TEMPLATE_KEYS)[number];
+
 /** The reviewer conversation's two axes: each reads its own template. */
 export type ReviewAxis = "spec" | "standards";
 
-const REVIEW_TEMPLATE_KEYS: Record<ReviewAxis, string> = {
+const REVIEW_TEMPLATE_KEYS: Record<ReviewAxis, PromptTemplateKey> = {
   spec: "review-spec",
   standards: "review-standards",
 };
 
-export function roleTemplateKey(role: AgentRole): string {
+export function roleTemplateKey(role: AgentRole): PromptTemplateKey {
   return role;
 }
 
-export function reviewTemplateKey(axis: ReviewAxis): string {
+export function reviewTemplateKey(axis: ReviewAxis): PromptTemplateKey {
   return REVIEW_TEMPLATE_KEYS[axis];
 }
 
@@ -47,7 +50,7 @@ export interface PromptSources {
 }
 
 /** The whole key surface resolved for one run: template key -> template text. */
-export type PromptTemplates = Record<string, string>;
+export type PromptTemplates = Record<PromptTemplateKey, string>;
 
 /**
  * Resolve every prompt key for this run, logging each key's source.
@@ -62,11 +65,10 @@ export type PromptTemplates = Record<string, string>;
  * there is one fallback rule rather than two.
  */
 export async function resolvePromptTemplates(sources: PromptSources): Promise<PromptTemplates> {
-  const templates: PromptTemplates = {};
-  for (const key of PROMPT_TEMPLATE_KEYS) {
-    templates[key] = await readPromptFile(sources, key);
-  }
-  return templates;
+  const templates: Partial<PromptTemplates> = {};
+  for (const key of PROMPT_TEMPLATE_KEYS) templates[key] = await readPromptFile(sources, key);
+  // The loop above fills every key in `PROMPT_TEMPLATE_KEYS`.
+  return templates as PromptTemplates;
 }
 
 /**
@@ -75,7 +77,7 @@ export async function resolvePromptTemplates(sources: PromptSources): Promise<Pr
  * the error names both directories, because the operator has to know where to
  * put the file.
  */
-export async function readPromptFile(sources: PromptSources, key: string): Promise<string> {
+export async function readPromptFile(sources: PromptSources, key: PromptTemplateKey): Promise<string> {
   if (sources.overrideDir !== undefined) {
     const override = await readIfPresent(join(sources.overrideDir, key));
     if (override !== undefined) {
@@ -104,12 +106,6 @@ async function readIfPresent(path: string): Promise<string | undefined> {
   }
 }
 
-function templateFor(templates: PromptTemplates, key: string): string {
-  const text = templates[key];
-  if (text === undefined) throw new Error(`prompt template ${key} was not resolved for this run`);
-  return text;
-}
-
 export interface RenderPromptInput {
   role: AgentRole;
   workItem: WorkItemV1;
@@ -125,8 +121,8 @@ export interface RenderPromptInput {
  * reader never has to open another file (spec #33 §7).
  */
 export function renderPrompt(input: RenderPromptInput): string {
-  const common = templateFor(input.templates, COMMON_PROMPT_KEY);
-  const role = templateFor(input.templates, roleTemplateKey(input.role));
+  const common = input.templates[COMMON_PROMPT_KEY];
+  const role = input.templates[roleTemplateKey(input.role)];
   const template = `${common.trimEnd()}\n\n${role.trimEnd()}\n`;
   return substitutePlaceholders(template, placeholderValues(input));
 }
@@ -145,7 +141,7 @@ export interface RenderReviewPromptInput {
 
 /** The axis template as the reviewer conversation's system prompt, every placeholder substituted. */
 export function renderReviewPrompt(input: RenderReviewPromptInput): string {
-  const template = templateFor(input.templates, reviewTemplateKey(input.axis));
+  const template = input.templates[reviewTemplateKey(input.axis)];
   return substitutePlaceholders(template, {
     fixed_point: input.fixedPoint,
     spec_ref: input.specRef,

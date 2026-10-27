@@ -28,7 +28,7 @@ export const JOB_MOUNT_PATHS = {
  *
  * `job/Dockerfile` copies the repo's `prompts/` here, and the runner reads it
  * when no override directory (`PROMPTS_DIR`) carries the key. The Dockerfile
- * spells the path out; `job/test/result-tools.test.ts` pins the two together.
+ * spells the path out; `job/test/result-tools.test.ts` asserts the COPY stays.
  */
 export const IMAGE_PROMPTS_DIR = "/opt/remote-agent/prompts";
 

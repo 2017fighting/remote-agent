@@ -174,7 +174,7 @@ prompt 模板**随 Job 镜像发布**（[ADR-0020](adr/0020-prompts-travel-with-
 2. 等下一轮 Job 起来，看它的日志：那个 key 是 `prompt-source=<key>:override`，其余仍是 `:image`。
 3. **用完删掉**：`kubectl delete configmap remote-agent-prompts-override -n remote-agent`。忘记删就会一直生效，而这是唯一的线索来源。
 
-（prompt 是**每轮惰性读取**的：删 ConfigMap 之前确认 `kubectl get jobs -n remote-agent` 为空，否则在跑的一轮会读不到模板。）
+（runner 在**每一轮开始时**一次性解析整个 key 面；删覆盖 ConfigMap 只影响之后才起跑的那些轮——它们读回镜像里的模板，在跑的 Job 已经读过，不受影响。）
 
 渲染顺序已定：runner 先读 `_common`、再读 role 模板，拼起来后一次把 `{{...}}` 全部替掉（未知占位符直接报错，不把字面值交给模型）。
 

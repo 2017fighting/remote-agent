@@ -484,6 +484,17 @@ describe("#40/#76 prompt carrier", () => {
   });
 
   /**
+   * The image must actually carry `prompts/` (ADR-0020). The source test above
+   * cannot see a dropped COPY, so a missing `COPY prompts` is caught here at
+   * unit-test stage instead of as a runtime ENOENT. The target path is an
+   * implementation detail and is deliberately not asserted.
+   */
+  it("keeps the prompts/ COPY in the image build", async () => {
+    const dockerfile = await readFile(join(REPO_ROOT, "job", "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/^COPY prompts\b/m);
+  });
+
+  /**
    * Every Agent role and review axis must map to a key that is really in the
    * image's key surface. Together with the exact-set assertion above, this is
    * where a dropped key is caught at unit-test stage instead of as a runtime
