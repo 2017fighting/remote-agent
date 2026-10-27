@@ -289,7 +289,7 @@ flowchart TD
 3. **收尾 Job 报 `newTickets` 时不开 PR**（S3N）：它在说「还有活没干完」，此时开 PR 等于宣称 spec 完整。旧 README 第 12 条只说了要建 sub-issue，没说清 PR 这一半。
 4. **新票自己跑，不再等人点火**（ticket #48）。S3N 建出的 `ready-for-agent` 票在下一轮就是 Frontier、就被 Claim——它只带 `ready-for-agent`，授权是沿 spec 继承来的（[§4.2](#42-frontier-与-gate)）。旧语义里那条「有 open sub-issue 但 Frontier 空 → idle，等人补 `agent:implement`」是**逐票授权**的产物，随继承一起作废：在一个已授权的 spec 下，idle 只出现在票真的不该跑时（`agent:blocked` / `agent:error` / `ready-for-human` / 正被一个 Job 占着），而 `idle-spec` 的原因行会说是哪一个。代价是轮数无上限，见 [§3](#3-spec-循环)。
 5. **S3N 的 outcome 有一个显式的消费标记**（ticket #49，[ADR-0015](adr/0015-closeout-outcome-consumed-once.md)）。S3N 是唯一判完还留在门内的分支，而它原来唯一的「已消费」载体是它建出来的票——票全关掉之后载体就没了，旧收尾 Job 却还在保留窗里，同一批 `newTickets` 会被再建一遍。现在 spec 上多一个 `closeout-consumed` label：判定那一次写、起下一块收尾 Job 那一次清。它不进 `Loop`，所以 S3N 之后 spec 的 label 集是 `[ready-for-agent, agent:implement, closeout-consumed]`——前两个照旧，第三个只是记号；它也不挡授权继承。
-6. **收尾的每一轮都在新卷上开始**（[#60](https://github.com/2017fighting/remote-agent/issues/60)，[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md)）。收尾 role 的 conversation 是终态的，上一轮那块卷上的第二轮只能 no-op，所以 S1 → S2 先删掉上一轮的卷 + Secret、再建新的。代价：上一轮的对话全文在下一轮开始时消失，`blocked` / `error` 的 30 天保留期只在**没有下一轮**时有效。
+6. **收尾的每一轮都在新卷上开始**（[#60](https://github.com/2017fighting/remote-agent/issues/60)，[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md)）。收尾 role 的 conversation 是终态的，上一轮那块卷上的第二轮只能 no-op，所以 S1 → S2 先删掉上一轮的卷 + Secret、再建新的。代价：上一轮的对话全文在下一轮开始时消失，`blocked` / `error` 的 30 天保留期只在**没有下一轮**时有效。**（[#65](https://github.com/2017fighting/remote-agent/issues/65)）** 所以收尾的每一轮能读到的「上一轮发生了什么」只剩 spec 上的评论——S4 / S5 那条 App 自己发的失败评论也在里面——它们现在和票一样渲进 `{{work_body}}`（正文 → `## Comments` → ticket map）。此前 spec 自己的评论一条都到不了模型。
 
 ### 4.6 每个 error / blocked 终态都留一条评论
 
@@ -420,6 +420,8 @@ flowchart LR
 ### 缺口 C：重开一张 `done` 票不会真的再跑一轮（[#62](https://github.com/2017fighting/remote-agent/issues/62)）——**已解决**
 
 > **已解决（[ADR-0017](adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）**：runner 在「新 Job + 已报过结论的票卷」上就地重置这一轮的五个 per-run 文档、把票的评论渲进 `{{work_body}}`、前置一段 round 头，在同一块卷、同一条 conversation 上开新的一轮；收尾 role 照旧拒绝（[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md) 的守卫收窄为它的守卫）。行为见 [§4.3](#43-ticket) 末段与 [§6](#6-卷与回收)。下面这段是**改动前**的行为，保留作背景。
+>
+> 同一类缺口还有高一层的那一处——**spec role 自己**的评论也到不了模型——已由 [#65](https://github.com/2017fighting/remote-agent/issues/65) 修好：`{{work_body}}` 现在对两个 role 都是「正文 + `## Comments`」，spec role 的 ticket map 接在评论之后。
 
 现状（改动前）：`done`（T4）关票时只摘 `agent:in-progress`，`ready-for-agent` 留着（[§4.3](#43-ticket)），所以重开一张票就把它送回 `Gate`；旧 Job 对象一过 30 分钟保留窗，Claim 就再占上它，而 Claim 复用的正是上一轮那块卷（[ADR-0011](adr/0011-ticket-pvc-recycling.md)）。卷上 `state/session.sqlite` 带着 `remote-agent.run-completed`，runner 的 open 路径于是直接 `already-complete=true` + exit 0、**不写 annotation** → Job `Complete` 而无 annotation → App 判 `no-result` → `agent:error`。人的新评论模型一眼没看，一轮 Job 的额度先没了。
 

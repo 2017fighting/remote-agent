@@ -103,22 +103,26 @@ export function placeholderValues(input: RenderPromptInput): Record<string, stri
 /**
  * The body the prompt shows.
  *
- * The ticket role gets its own body **and its own comments**: the body is the
- * acceptance surface, but the comments are where a human writes a correction —
- * including the one that made them reopen the ticket (ADR-0017). The spec role
- * keeps its ticket map and nothing else; its own comments are a separate gap
- * ([#65](https://github.com/2017fighting/remote-agent/issues/65)).
+ * Every role gets its own body **and its own comments**: the body is the acceptance
+ * surface, but the comments are where a human writes a correction — the one that made
+ * them reopen the ticket (ADR-0017), or the one only a spec-level run can act on
+ * ("don't open the PR yet", "the acceptance surface changed: drop ticket X", #65).
  *
- * `prompts/implement-spec` calls the ticket map "rendered above", so it has to
- * arrive inside the body section — the templates themselves are verbatim and never
- * change.
+ * The closeout role has no continuity channel besides them: its every round starts on
+ * a **fresh volume** (ADR-0016), so the comments — the App's own failure comment from
+ * the round before included — are the whole record of what happened.
+ *
+ * The spec role's ticket map comes last, after the comments: `prompts/implement-spec`
+ * calls it "rendered above", so it has to arrive inside the body section — the
+ * templates themselves are verbatim and never change.
  */
 export function workBody(workItem: WorkItemV1, role: AgentRole): string {
+  const body = withComments(workItem.body, workItem.comments);
   if (role === "implement-spec") {
     const tickets = workItem.tickets;
-    return tickets === undefined ? workItem.body : `${workItem.body}\n\n${renderTicketMap(tickets)}`;
+    return tickets === undefined ? body : `${body}\n\n${renderTicketMap(tickets)}`;
   }
-  return withComments(workItem.body, workItem.comments);
+  return body;
 }
 
 /**
@@ -164,8 +168,8 @@ export function roundHeader(context: RoundContext): string {
 }
 
 /**
- * A ticket's comments under the body, oldest first, in the same format the ticket
- * map uses for a sub-issue's comments — one reader learns one shape. A ticket with
+ * A work item's comments under the body, oldest first, in the same format the ticket
+ * map uses for a sub-issue's comments — one reader learns one shape. A work item with
  * no comments gets no empty heading.
  */
 function withComments(body: string, comments: WorkItemComment[]): string {

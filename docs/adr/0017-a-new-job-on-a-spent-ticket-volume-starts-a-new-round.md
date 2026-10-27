@@ -48,4 +48,4 @@
 - **代价：一轮的起点是上一轮的 tip，不是远端的最新 tip。** 与崩溃续跑同形；远端已前进时由 push 路径收口，冲突走 Conflict hand-off，最多多付一轮解冲突的 token。
 - **[ADR-0011](0011-ticket-pvc-recycling.md) 就地改**：回收表与「重开一张 `done` 票」那条后果改写——卷被复用，新一轮由 runner 在同一块卷上开，App 不需要往工作项正文里写任何东西（评论由 runner 渲进 prompt）。
 - **[ADR-0016](0016-closeout-round-starts-on-a-fresh-volume.md) 就地改**：守卫那一条标注为收尾 role 的守卫并指向本文；它的 Consequences 里「[#62] 明写为未解决」改为已由本文解决。
-- **不在本文范围**：收尾 role 的每一轮仍在新卷上开始（ADR-0016 不变）；[#61](https://github.com/2017fighting/remote-agent/issues/61)（人重入的 label 被旧 Job 的判决改回去）；spec role **自己**的评论同样到不了模型（`workBody` 只渲正文与 ticket map，不渲 spec 自己的评论）——那是同一类缺口，另开一张票。
+- **不在本文范围**：收尾 role 的每一轮仍在新卷上开始（ADR-0016 不变）；[#61](https://github.com/2017fighting/remote-agent/issues/61)（人重入的 label 被旧 Job 的判决改回去）；spec role **自己**的评论同样到不了模型（`workBody` 只渲正文与 ticket map，不渲 spec 自己的评论）——那是同一类缺口，另开一张票。**（2026-10-26，[#65](https://github.com/2017fighting/remote-agent/issues/65) 已修）**：`{{work_body}}` 现在对两个 role 都是「正文 + `## Comments`」，spec role 的 ticket map 接在评论之后（正文 → 评论 → ticket map）；收尾 role 不加 round 头——它每一轮都在**新卷**上开始，没有历史可校正，而 spec 上那条 App 自己发的失败评论就是上一轮的记录。

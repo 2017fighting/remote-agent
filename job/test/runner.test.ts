@@ -374,18 +374,122 @@ describe("runner: one run to a Result tool", () => {
     expect((await submittedPrompts(fixture))[2]).toContain("# Round 3 of this ticket");
   });
 
-  it("leaves the spec role's body without a comment section", async () => {
+  /**
+   * #65. The spec issue is where a human writes the correction only a spec-level run
+   * can act on — "don't open the PR yet", "the acceptance surface changed: drop
+   * ticket X". The closeout role is also the one role with no continuity channel:
+   * every closeout round starts on a fresh volume (ADR-0016), so the comments —
+   * including the App's own failure comment from the round before — are the whole
+   * record of what happened. They reached the model nowhere. Same shape as the
+   * ticket role's own comments, one level up.
+   */
+  it("renders the spec's own comments into the body, after the body and before the ticket map", async () => {
     fixture = await runnerFixture();
     const recorded: Recorded = { events: [], results: [] };
-    const env: RunnerEnv = { ...fixture.env, role: "implement-spec", workItem: { ...WORK_ITEM, number: 33 } };
+    const env: RunnerEnv = {
+      ...fixture.env,
+      role: "implement-spec",
+      workItem: {
+        ...WORK_ITEM,
+        number: 33,
+        body: "SPEC BODY TEXT",
+        comments: [
+          { author: "maintainer", body: "first correction", createdAt: "2026-10-26T05:44:00.000Z" },
+          { author: "maintainer", body: "don't open the PR yet", createdAt: "2026-10-26T06:00:00.000Z" },
+        ],
+        tickets: [
+          {
+            number: 39,
+            title: "seed + runner",
+            body: "TICKET BODY TEXT",
+            comments: [{ author: "human", body: "ticket comment", createdAt: "2026-10-26T06:10:00.000Z" }],
+          },
+        ],
+      },
+    };
     fixture.script([finishSpecCall({ prBody: "p" })]);
     await run(depsFor(fixture, recorded, { env }));
 
-    // The ticket role's own comments are this change; a spec's own comments are a
-    // separate gap (#65), so the spec role's body must not grow one here.
     const prompt = await submittedPrompt(fixture);
-    expect(prompt).not.toContain("## Comments");
-    expect(prompt).toContain(WORK_ITEM.body);
+    expect(prompt).toContain("**maintainer** (2026-10-26T05:44:00.000Z):");
+    expect(prompt).toContain("don't open the PR yet");
+    // Body, then the spec's own comments oldest first, then the ticket map. The
+    // level-2 heading is what tells the spec's section from the map's `####`.
+    const body = prompt.indexOf("SPEC BODY TEXT");
+    const own = prompt.indexOf("\n## Comments\n");
+    const first = prompt.indexOf("first correction");
+    const second = prompt.indexOf("don't open the PR yet");
+    const map = prompt.indexOf("## Ticket map");
+    expect(body).toBeGreaterThanOrEqual(0);
+    expect(own).toBeGreaterThan(body);
+    expect(first).toBeGreaterThan(own);
+    expect(second).toBeGreaterThan(first);
+    expect(map).toBeGreaterThan(second);
+    // The ticket map keeps rendering every sub-issue with its own comments.
+    expect(prompt).toContain("### #39 — seed + runner");
+    expect(prompt).toContain("TICKET BODY TEXT");
+    expect(prompt).toContain("#### Comments");
+    expect(prompt).toContain("ticket comment");
+  });
+
+  it("renders no comment section for a spec with no comments of its own", async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    const env: RunnerEnv = {
+      ...fixture.env,
+      role: "implement-spec",
+      workItem: {
+        ...WORK_ITEM,
+        number: 33,
+        comments: [],
+        tickets: [
+          {
+            number: 39,
+            title: "seed + runner",
+            body: "TICKET BODY TEXT",
+            comments: [{ author: "human", body: "ticket comment", createdAt: "2026-10-26T06:10:00.000Z" }],
+          },
+        ],
+      },
+    };
+    fixture.script([finishSpecCall({ prBody: "p" })]);
+    await run(depsFor(fixture, recorded, { env }));
+
+    const prompt = await submittedPrompt(fixture);
+    expect(prompt).not.toContain("\n## Comments\n");
+    // Not vacuous: the ticket map's own `#### Comments` is still there.
+    expect(prompt).toContain("#### Comments");
+    expect(prompt).toContain("ticket comment");
+  });
+
+  it("renders a truncated spec comment list with its pointer line first", async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    const env: RunnerEnv = {
+      ...fixture.env,
+      role: "implement-spec",
+      workItem: {
+        ...WORK_ITEM,
+        number: 33,
+        // What the App's byte budget leaves behind: the pointer the reader needs to
+        // know the history above it was dropped (work item budget, 512 KB).
+        comments: [
+          { author: "remote-agent", body: "… earlier comments omitted, see GitHub", createdAt: "" },
+          { author: "maintainer", body: "the newest kept comment", createdAt: "2026-10-26T06:00:00.000Z" },
+        ],
+        tickets: [],
+      },
+    };
+    fixture.script([finishSpecCall({ prBody: "p" })]);
+    await run(depsFor(fixture, recorded, { env }));
+
+    const prompt = await submittedPrompt(fixture);
+    const own = prompt.indexOf("\n## Comments\n");
+    expect(own).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf("… earlier comments omitted, see GitHub")).toBeGreaterThan(own);
+    expect(prompt.indexOf("… earlier comments omitted, see GitHub")).toBeLessThan(
+      prompt.indexOf("the newest kept comment"),
+    );
   });
 
   /**
