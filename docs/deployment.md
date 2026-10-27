@@ -69,7 +69,7 @@ Job 名是动态生成的，RBAC 收窄不到 `resourceNames`，所以这是 nam
 ## 6. Job 模板与镜像
 
 - **pod 模板由 App 代码构造**（TypeScript + `@kubernetes/client-node`）：镜像、env、卷、`activeDeadlineSeconds`、SA、label 都在代码里（`app/src/renders/job-template.ts`），与 run result 契约、env 名、确定性命名同源，能进假客户端单测。home-ops 不存 Job YAML。
-- **镜像**：App 是 `ghcr.io/2017fighting/remote-agent`，Job 是 `ghcr.io/2017fighting/remote-agent-job`；两者同仓、同一个 Actions 工作流发布到 GHCR（[#5](https://github.com/2017fighting/remote-agent/issues/5)）。**Job 镜像的 tag 在构建时烧进 App 镜像**（Dockerfile `ARG` → 编译常量），home-ops 只在 `apps/remote-agent/helmrelease.yaml` 的 `image.tag` 一处写 tag。
+- **镜像**：App 是 `ghcr.io/2017fighting/remote-agent`，Job 是 `ghcr.io/2017fighting/remote-agent-job`；两者同仓、同一个 Actions 工作流发布到 GHCR（[#5](https://github.com/2017fighting/remote-agent/issues/5)）。**Job 镜像的 tag 在构建时烧进 App 镜像**（Dockerfile `ARG` → 编译常量），home-ops 只在 `apps/remote-agent/helmrelease.yaml` 的 `image.tag` 一处写 tag。**tag 从哪来、什么时候有**见 §10。
 - **Kyverno `registry-proxy-cache`** 会把 `ghcr.io/...` 无条件改写成 Harbor 代理 → 新 namespace 自动吃到，不需要白名单或 pull secret。
 - **网络**：集群里没有任何 NetworkPolicy（默认全通）；`profile: proxy` 就是出网。Job 要能到 GitHub、GHCR 与集群内的 OmniRoute（§9）。
 
@@ -207,6 +207,25 @@ models.setProvider(createProvider({
 
 combo 的兜底会静默换上游模型，但**不需要新机制**：durable 的 session entry 里有 `AssistantMessage`，其 `responseModel` 就是 provider 上报的实际模型，从 Ticket PVC 上的 storage 可复原。
 
-## 10. 本文件不覆盖
+## 10. 发版（release-please）
+
+版本号、tag 与 GitHub Release 由 release-please 拥有（[ADR-0019](adr/0019-release-please-owns-the-version-and-the-tag.md)）。人只做两件事：合并功能 PR，以及「攒够了之后手动派发一次 `release-please` workflow」。
+
+| 步 | 触发 | 产物 |
+| --- | --- | --- |
+| 1 | 合并任意 PR 到 `main` | release-please 在 main 上更新/创建那条 release PR（`chore(main): release <next>`，label `autorelease: pending`），下一个版本随时可见 |
+| 2 | 手动 `workflow_dispatch` 跑 `release-please` | 那一次 run squash 合并 release PR（`--squash --delete-branch`） |
+| 3 | 合并产生的 push `main` | release-please 的**下一次** run 创建 tag `v<version>` + GitHub Release（CHANGELOG 已随 release PR 合入） |
+| 4 | tag `v*` 的 push | `ci.yml` 完整链路（typecheck/unit → 两个镜像 → kind e2e → 推 GHCR），镜像 tag 就是这个版本号 |
+
+要点：
+
+- **tag 必须由 PAT（`secrets.RELEASE_PLEASE_TOKEN`）创建**：`GITHUB_TOKEN` 创建的 tag 不触发 `on: push: tags`，镜像就不会发。这个 secret 是发版的前置，缺了它第 3 步会红。
+- **不要手打 tag，也不要手改版本号**：`.release-please-manifest.json` 与 root `package.json` 的 `version` 是 release-please 的输入。
+- **0.x 规则**：fix → patch、feat → minor、BREAKING → minor（[ADR-0019](adr/0019-release-please-owns-the-version-and-the-tag.md)）。
+- **release PR 只跑 typecheck + unit**（`ci.yml` 按 `autorelease: pending` label 跳过镜像构建与 kind e2e，分支前缀 `release-please--` 是兜底）；镜像的门禁是第 3、4 步那两次完整运行。
+- home-ops 侧的 `image.tag` 仍由人写（§2、§6）：发版只负责让那个 tag 在 GHCR 上存在。
+
+## 11. 本文件不覆盖
 
 App 与 runner 的**内部结构**（模块划分、durable 的 task/phase、工具集、prompt section 拼接）、观测性、探针与 Service 细节不在这里：读 `app/src/`、`job/src/` 的模块注释，入口是 `app/src/main.ts` 与 `job/src/runner.ts`。Ticket PVC 的容量与回收见 [ADR-0010](adr/0010-job-resource-budget.md) / [ADR-0011](adr/0011-ticket-pvc-recycling.md)；状态机见 [architecture.md §4](architecture.md#4-状态机)。

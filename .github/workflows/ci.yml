@@ -10,6 +10,10 @@ on:
 # gate: typecheck + unit → build both images → kind e2e → push to GHCR. The Job
 # image tag is computed once and baked into the App image as a compile constant,
 # so the two images can never disagree about which runner the App starts.
+#
+# Release PRs (release-please) run typecheck + unit only: they change the
+# version, the lockfile and the changelog, and they are merged immediately, so
+# building the images there is spent work (ADR-0019).
 
 permissions:
   contents: read
@@ -34,6 +38,15 @@ jobs:
 
   build-images:
     needs: typecheck-and-unit
+    # Skipped for release PRs, which are identified by release-please's label or
+    # by its branch prefix (the label is the primary signal; the prefix is the
+    # fallback in case the label ever fails to be applied). This is also what
+    # skips kind-e2e, which needs this job. The gate that matters is the push to
+    # main that merging the release PR makes, and the tag push after it — both
+    # run the whole chain, kind e2e included (ADR-0019).
+    if: >-
+      !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') &&
+      !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -88,6 +101,8 @@ jobs:
   # the exact class of bug that unit tests cannot see, because each side is green
   # on its own.
   kind-e2e:
+    # Skipped for release PRs: it needs build-images, which is skipped there
+    # (ADR-0019). On main pushes and on tag pushes this job always runs.
     needs: build-images
     runs-on: ubuntu-latest
     # Long enough for a cold kind cluster plus four image builds; the assertions

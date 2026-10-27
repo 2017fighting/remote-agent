@@ -1,0 +1,52 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# release-please owns the version number, the tag and the GitHub Release
+# (ADR-0019, docs/deployment.md §10). The two triggers mean two different
+# things:
+#
+#   push main         → keep the release PR in sync with what has landed, so
+#                       "what would the next version be" is always visible
+#   workflow_dispatch → "release what has piled up": merge that release PR
+#
+# The tag is created by the *next* run — the one this merge's push to main
+# triggers — and that tag is what makes ci.yml publish the images. No step here
+# pushes a tag by hand, and nothing here needs a checkout.
+
+# The PAT below carries the write permissions (contents + pull requests). The
+# workflow's own GITHUB_TOKEN is not used for anything.
+permissions:
+  contents: read
+
+# Two runs must never groom the same release PR at once (two branches, two PRs).
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          # NOT the default GITHUB_TOKEN: a tag created with GITHUB_TOKEN does
+          # not trigger `on: push: tags` in ci.yml, so the release would produce
+          # no images at all. The PAT makes the tag look like a human's push.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # The only human action in a release: dispatch this workflow. `pr` is the
+      # release PR as JSON, empty when there is nothing to release — so an
+      # accidental dispatch on a quiet main is a no-op, not a failure.
+      - name: Merge the release PR
+        if: github.event_name == 'workflow_dispatch' && steps.release.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh pr merge "${{ fromJSON(steps.release.outputs.pr).number }}" --squash --delete-branch
