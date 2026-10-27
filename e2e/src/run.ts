@@ -866,8 +866,10 @@ async function waitForPromptSource(
 
 /**
  * Delete the incident override so later runs fall back to the image (ADR-0020).
- * A forgotten override is the failure this hatch exists to make visible, so the
- * harness deletes it exactly the way the runbook tells an operator to.
+ * A forgotten override is the failure this hatch exists to make visible. The
+ * harness deletes it here — while the first run is still going, but only after
+ * that run has read it — because the eager per-round resolution makes that safe
+ * and it is the one point that precedes the next Job's creation.
  */
 async function deletePromptsOverride(runner: Runner, context: string): Promise<void> {
   await runner.run("kubectl", [
