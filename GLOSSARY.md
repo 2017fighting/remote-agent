@@ -88,6 +88,10 @@ _Avoid_: 轮次前缀, round note, preamble
 镜像里烧的 TypeScript 程序：打开 Ticket PVC 上的 durable storage、注入 prompt 与模型、跑一个 agent role、在真正终态时把 run result 写进自己 Job 的 annotation。它是 Job 里唯一的 k8s writer。
 _Avoid_: wrapper, entrypoint, pi 命令
 
+**Prompt override**:
+事故里唯一的热改口子：Job 常驻一个 `optional: true` 的 ConfigMap 卷 `prompts-override`（`remote-agent-prompts-override`）挂在 `PROMPTS_DIR`（`/mnt/prompts-override`）。runner 在每一轮开始时解析整个 key 面，某 key 在该目录里有文件就用它，否则回落镜像内 canonical 目录，逐 key 打一行 `prompt-source=<key>:<image|override>`；对象不存在时卷是空目录，默认路径不受影响。用完要删，否则静默生效而日志是唯一的线索（[ADR-0020](docs/adr/0020-prompts-travel-with-the-image.md)）。
+_Avoid_: 热改, hot-patch, 覆盖 ConfigMap
+
 **Submission key**:
 runner 提交这次 run 时用的去重键，形如 `remote-agent:<repo>#<n>:<role>`；崩溃后新 pod 靠它找回同一条未结算的 submission 续跑（ADR-0008）。**已结算的 submission 不可续跑**——同一个键再提交只会立刻拿回那个旧终态——所以这张 conversation 已有结算过的输入 submission 时（模型报错、被 abort），新一次尝试的键会带一个递增的 `#retry-<n>` 后缀，真正开一次新 run。计数只算 `type: "input"` 的结算记录，compaction 那种 `write` 不算一次尝试（[#52](https://github.com/2017fighting/remote-agent/issues/52)）。一段 conversation 可以有**两个键族**：run 自己的 `…:<role>`，与冲突交接那一轮的 `…:<role>#conflict`——各自的 `#retry-<n>` 从自己的基键数起，否则两族会互相占用序号（[#58](https://github.com/2017fighting/remote-agent/issues/58)）。
 _Avoid_: requestId（那是 durable 的字段名）, 幂等键

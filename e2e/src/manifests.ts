@@ -6,12 +6,13 @@ import { join } from "node:path";
  *
  * These are the harness's own copies, not home-ops': the point is to reproduce
  * the deployed *contract* — the namespace, the two ServiceAccounts with exactly
- * the permissions the docs grant, the guardrail quota, and the prompt ConfigMap
- * built from `prompts/` — so the e2e exercises the same permission surface the
- * real deployment has. The prompt ConfigMap is now the legacy, inert carrier
- * (ADR-0020): the Job template still mounts it, so it must exist, but the runner
- * reads the templates baked into the image. A missing RBAC verb here fails the same way it would in
- * production, which is what makes the gate meaningful.
+ * the permissions the docs grant, the guardrail quota, and the optional prompt
+ * override ConfigMap — so the e2e exercises the same permission surface the real
+ * deployment has. The prompt override is the incident hatch (ADR-0020): the
+ * harness creates it with only `_common`, and the run must log
+ * `prompt-source=_common:override` with every other key `:image`. A missing RBAC
+ * verb here fails the same way it would in production, which is what makes the
+ * gate meaningful.
  *
  * Everything the harness adds beyond the docs is e2e-only and stays in this
  * file: the stub services and their Service, and the App's env pointing at them.
@@ -20,28 +21,23 @@ import { join } from "node:path";
 export const NAMESPACE = "remote-agent";
 export const APP_SERVICE_ACCOUNT = "remote-agent";
 export const JOB_SERVICE_ACCOUNT = "agent-job";
-export const PROMPTS_CONFIGMAP = "remote-agent-prompts";
+/** The optional incident override ConfigMap the Job template mounts (ADR-0020). */
+export const PROMPTS_OVERRIDE_CONFIGMAP = "remote-agent-prompts-override";
 /** The one sops-equivalent Secret (docs/deployment.md §3); the App and the Job both read it. */
 export const APP_SECRET = "remote-agent-secret";
 
-/** docs/deployment.md §8 / ADR-0020: the five keys, verbatim from `prompts/`. */
-export const PROMPT_KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"] as const;
-
 /**
- * The legacy prompt ConfigMap, one key per file in `prompts/` (ADR-0020). The Job
- * template still mounts it, so it has to exist, but the runner no longer reads
- * it; this is what keeps the harness's contract matching the template's mount.
+ * The prompt override ConfigMap, with only `_common` (ADR-0020). An operator
+ * creates this by hand in an incident; the harness does the same so the wired
+ * hatch is exercised end to end. `_common` is verbatim from `prompts/`, so the
+ * evidence is the run's `prompt-source=_common:override` line, not the content.
  */
-export async function renderPromptsConfigMap(promptsDir: string): Promise<Record<string, unknown>> {
-  const data: Record<string, string> = {};
-  for (const key of PROMPT_KEYS) {
-    data[key] = await readFile(join(promptsDir, key), "utf8");
-  }
+export async function renderPromptsOverrideConfigMap(promptsDir: string): Promise<Record<string, unknown>> {
   return {
     apiVersion: "v1",
     kind: "ConfigMap",
-    metadata: { name: PROMPTS_CONFIGMAP, namespace: NAMESPACE },
-    data,
+    metadata: { name: PROMPTS_OVERRIDE_CONFIGMAP, namespace: NAMESPACE },
+    data: { _common: await readFile(join(promptsDir, "_common"), "utf8") },
   };
 }
 

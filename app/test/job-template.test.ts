@@ -9,6 +9,7 @@ import {
   AGENT_CONTAINER_NAME,
   JOB_ONLY_ENV_KEYS,
   PROMPTS_OVERRIDE_CONFIGMAP_NAME,
+  PROMPTS_OVERRIDE_VOLUME_NAME,
   SEED_CONTAINER_NAME,
   SEED_ENTRYPOINT,
   TOKEN_SECRET_KEY,
@@ -296,12 +297,12 @@ describe("job template: volumes and mounts", () => {
   it("mounts an optional prompts-override ConfigMap and points PROMPTS_DIR at it", () => {
     const job = manifest();
     expect(job.podTemplate.volumes).toContainEqual({
-      name: "prompts-override",
+      name: PROMPTS_OVERRIDE_VOLUME_NAME,
       configMap: { name: PROMPTS_OVERRIDE_CONFIGMAP_NAME, optional: true },
     });
     expect(PROMPTS_OVERRIDE_CONFIGMAP_NAME).toBe("remote-agent-prompts-override");
     expect(job.podTemplate.containers[0]!.volumeMounts).toContainEqual({
-      name: "prompts-override",
+      name: PROMPTS_OVERRIDE_VOLUME_NAME,
       mountPath: JOB_MOUNT_PATHS.promptsOverride,
       readOnly: true,
     });

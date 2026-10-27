@@ -77,7 +77,7 @@ kind delete cluster --name ra-e2e
 | --- | --- | --- |
 | stub GitHub | `stub-github/` | REST limited to the `GitHubPort` endpoints, plus **real** git over `git http-backend` |
 | stub model | `stub-model/` | OpenAI-compatible streaming `/v1/chat/completions`, scripted per scenario |
-| namespace contract | `src/manifests.ts` | namespace, both ServiceAccounts + Roles, guardrail quota, prompts ConfigMap, storage class |
+| namespace contract | `src/manifests.ts` | namespace, both ServiceAccounts + Roles, guardrail quota, prompt override ConfigMap, storage class |
 | scenario | `src/scenario.ts` | the world (spec + 2 tickets) and the scripted model turns |
 | driver | `src/run.ts` | bring-up, scenario, assertions, diagnostics |
 | assertions | `src/assertions.ts` | bounded polling; no fixed sleeps |

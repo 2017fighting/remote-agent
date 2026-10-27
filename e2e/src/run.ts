@@ -19,7 +19,7 @@ import {
   renderJobRbac,
   renderNamespace,
   renderAppSecret,
-  renderPromptsConfigMap,
+  renderPromptsOverrideConfigMap,
   renderResourceQuota,
   renderStubService,
   renderTicketStorageClass,
@@ -57,8 +57,8 @@ import {
  *
  *   1. bring up a kind cluster and build + load both images;
  *   2. apply the namespace contract from docs/deployment.md §4/§5/§7/§8 (RBAC,
- *      guardrail quota, legacy prompt ConfigMap from `prompts/`) plus a storage class
- *      of the name the App's template requires;
+ *      guardrail quota, the optional prompt override ConfigMap) plus a storage
+ *      class of the name the App's template requires;
  *   3. start the two stub services as Deployments, with a real bare git
  *      repository behind stub-github;
  *   4. start the App as a Deployment, pointed at the stubs by env only;
@@ -192,7 +192,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       ...renderAppRbac(),
       ...renderJobRbac(),
       renderResourceQuota(),
-      await renderPromptsConfigMap(join(repoRoot, "prompts")),
+      await renderPromptsOverrideConfigMap(join(repoRoot, "prompts")),
       renderAppSecret({
         privateKey: APP_PRIVATE_KEY,
         webhookSecret: WEBHOOK_SECRET,
@@ -775,8 +775,44 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
       until: (value) => value?.metadata.annotations?.["remote-agent/run-result"] !== undefined,
       describe: (value) => JSON.stringify(Object.keys(value?.metadata.annotations ?? {})),
     });
+    await assertPromptOverrideExercised(runner, context, jobName);
   }
   return observed;
+}
+
+/**
+ * The override hatch exercised end to end (ADR-0020 / ticket #77).
+ *
+ * The harness applies a ConfigMap `remote-agent-prompts-override` holding only
+ * `_common`. A ticket run must resolve that key from the override and every
+ * other key from the image, which the runner states per key in its own log. If
+ * the optional volume, `PROMPTS_DIR` or the per-key fallback regressed, this is
+ * the only assertion that would notice.
+ */
+async function assertPromptOverrideExercised(runner: Runner, context: string, jobName: string): Promise<void> {
+  const logs = await runner.run(
+    "kubectl",
+    ["--context", context, "-n", NAMESPACE, "logs", `job/${jobName}`, "-c", "runner"],
+    { allowFailure: true },
+  );
+  if (logs.exitCode !== 0) {
+    throw new Error(`could not read ${jobName}'s runner logs to check the prompt override: ${logs.stderr.trim()}`);
+  }
+  const lines = new Set(logs.stdout.split("\n").map((line) => line.trim()));
+  const expected = [
+    "prompt-source=_common:override",
+    "prompt-source=implement-ticket:image",
+    "prompt-source=implement-spec:image",
+    "prompt-source=review-standards:image",
+    "prompt-source=review-spec:image",
+  ];
+  const missing = expected.filter((line) => !lines.has(line));
+  if (missing.length > 0) {
+    throw new Error(
+      `${jobName}'s runner logs are missing ${missing.join(", ")}; the prompt override hatch did not resolve per key`,
+    );
+  }
+  runner.note(`${jobName}: prompt override exercised (_common:override, rest :image)`);
 }
 
 /** The final world (ticket #41 acceptance criteria). */

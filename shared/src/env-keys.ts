@@ -41,8 +41,8 @@ export const JOB_ENV_KEYS = {
   /**
    * The incident prompt-override directory the template mounts at
    * `JOB_MOUNT_PATHS.promptsOverride` (ADR-0020). The runner reads a key from
-   * here when the file exists and from the image otherwise; unset means
-   * image-only, which is the shape with no override ConfigMap.
+   * here when the file exists and from the image otherwise; an empty value means
+   * image-only, which only the runner tests produce.
    */
   promptsDir: "PROMPTS_DIR",
 } as const;

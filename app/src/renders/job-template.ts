@@ -155,11 +155,9 @@ export function renderJobManifest(input: JobTemplateInput): K8sJobManifest {
       // These three volumes are exactly the three surfaces the Job image reads:
       // the Ticket PVC at /mnt/agent (repo/state/home), the token Secret mounted
       // as the directory holding its one file, and the optional prompt-override
-      // ConfigMap at JOB_MOUNT_PATHS.promptsOverride. The override volume is
-      // `optional: true`, so the normal world (no such ConfigMap) mounts an empty
-      // directory and every prompt key falls back to the image (ADR-0020).
-      // Adding a volume here without a matching reader in the image (or the
-      // reverse) is the drift the kind e2e exists to catch.
+      // ConfigMap at JOB_MOUNT_PATHS.promptsOverride (ADR-0020). Adding a volume
+      // here without a matching reader in the image (or the reverse) is the drift
+      // the kind e2e exists to catch.
       volumes: [
         { name: "ticket", persistentVolumeClaim: { claimName: name } },
         { name: "token", secret: { secretName: secretName(targetRepo, issueNumber) } },
@@ -203,8 +201,7 @@ function renderAgentContainer(input: JobTemplateInput): K8sContainer {
     image: JOB_IMAGE,
     env: renderJobEnv(input),
     // The prompt-override mount is kept on the runner only (seed is git only,
-    // ADR-0009). It is an empty directory unless an operator created the
-    // ConfigMap; `PROMPTS_DIR` points the runner's per-key fallback at it.
+    // ADR-0009); `PROMPTS_DIR` points the runner's per-key fallback at it.
     volumeMounts: [...ticketVolumeMounts(), tokenVolumeMount(), promptsOverrideVolumeMount()],
     resources: { requests: AGENT_REQUESTS, limits: AGENT_LIMITS },
   };
@@ -242,8 +239,7 @@ function tokenVolumeMount(): K8sVolumeMount {
 /**
  * The optional prompt-override ConfigMap, one file per key at
  * `JOB_MOUNT_PATHS.promptsOverride` (ADR-0020). `optional: true` on the volume
- * means an absent object mounts as an empty directory, so the mount is always
- * safe and the runner falls back to the image for every key.
+ * means an absent object mounts as an empty directory.
  */
 function promptsOverrideVolumeMount(): K8sVolumeMount {
   return { name: PROMPTS_OVERRIDE_VOLUME_NAME, mountPath: JOB_MOUNT_PATHS.promptsOverride, readOnly: true };

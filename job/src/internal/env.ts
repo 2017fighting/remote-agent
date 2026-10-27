@@ -41,14 +41,6 @@ export const REQUIRED_RUNNER_ENV_KEYS = [
 
 export type AgentRole = "implement-ticket" | "implement-spec";
 
-/**
- * The incident override directory for prompt templates (ADR-0020). The runner
- * reads a key from here when the file exists, and from the image otherwise. The
- * Job template always emits it now (`JOB_ENV_KEYS.promptsDir`); an empty value
- * means no override, which is the shape when the optional ConfigMap is absent.
- */
-export const PROMPTS_DIR_ENV_KEY = JOB_ENV_KEYS.promptsDir;
-
 export interface SeedEnv {
   /** `owner/name`. */
   repo: string;
@@ -73,7 +65,10 @@ export interface RunnerEnv extends SeedEnv {
   /** The Job whose `remote-agent/run-result` annotation this run writes. */
   jobName: string;
   jobNamespace: string;
-  /** `PROMPTS_DIR`: an incident override directory, when the Job sets one (ADR-0020). */
+  /**
+   * `PROMPTS_DIR`: an incident override directory (ADR-0020). The template always
+   * emits it; an empty value means image-only, which the runner tests use.
+   */
   promptsDir?: string;
 }
 
@@ -150,7 +145,7 @@ export function readRunnerEnv(env: EnvSource, namespace: string): RunnerEnv {
   }
   const jobNamespace = (env[JOB_ENV_KEYS.jobNamespace] ?? "").trim() || namespace;
   if (jobNamespace === "") throw new StartupError("the Job namespace is neither in env nor in the ServiceAccount mount");
-  const promptsDir = (env[PROMPTS_DIR_ENV_KEY] ?? "").trim();
+  const promptsDir = (env[JOB_ENV_KEYS.promptsDir] ?? "").trim();
   return {
     ...seed,
     role: role as AgentRole,
