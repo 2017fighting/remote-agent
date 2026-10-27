@@ -41,17 +41,19 @@ import { judgeJob, type AppErrorReason } from "./outcome.js";
  *
  * - **A spec never carries `agent:in-progress`.** Its "running" is expressed by
  *   being inside the label gate with an empty or non-empty Frontier, so the
- *   label keeps exactly one meaning: a Job currently occupies this ticket. For
- *   S3–S5 the spec's "this outcome was already consumed" marker is the label
- *   migration below (all three leave the gate); S3N needs a carrier of its own,
- *   the next bullet. That is also why the k8s half of the Claim-gate still has
- *   to apply to the closeout Job.
+ *   label keeps exactly one meaning: a Job currently occupies this ticket. Every
+ *   consumed closeout outcome instead leaves `closeout-consumed` behind — the
+ *   carrier a human re-entry cannot undo (ticket #61), because re-entry removes
+ *   the exit labels by definition. That is also why the k8s half of the
+ *   Claim-gate still has to apply to the closeout Job.
  * - **The closeout Job object is the S2 state.** While it exists — running,
  *   finished, or inside its retention window — S1 starts no second one, and the
  *   outcome is judged on the pass that migrates the spec's labels.
- * - **S3N needs a carrier of its own** (`closeout-consumed`, ticket #49): S3N
- *   stays in the gate, and its only other carrier — the created follow-ups —
- *   dies when they all close. See `LABEL_CLOSEOUT_CONSUMED` below.
+ * - **`closeout-consumed` is written by every branch that consumed an outcome**
+ *   (ticket #49 for S3N, ticket #61 for S3–S5): the created follow-ups die when
+ *   they all close, and the exit labels die at the next human re-entry, so the
+ *   marker is the only carrier both branches can rely on. See
+ *   `LABEL_CLOSEOUT_CONSUMED` below.
  */
 
 export type SpecStep =
@@ -86,15 +88,22 @@ export function closeoutJobName(ownerRepo: string, specNumber: number): string {
 }
 
 /**
- * S3N's "this outcome is consumed" marker on the spec (ticket #49).
+ * The "this outcome is consumed" marker on the spec: written by every closeout
+ * outcome that was acted on (ticket #49 for S3N, ticket #61 for S3–S5), cleared
+ * by the pass that starts the next closeout Job.
  *
- * S3 / S4 / S5 do not need one: their label migration takes the spec out of the
- * gate, so the next pass has nothing to judge. S3N deliberately stays in the
- * gate ("there is still work left" must not look like "the spec is complete"),
- * and the follow-ups it creates were the only thing that said "already done" —
- * a carrier that dies as soon as every follow-up closes, while the closeout Job
- * object is still inside its 30-minute retention window. The outcome would then
- * be judged a second time and the same `newTickets` created again.
+ * S3N was the branch that forced it into existence: S3N stays in the gate ("there
+ * is still work left" must not look like "the spec is complete"), and the
+ * follow-ups it creates were the only thing that said "already done" — a carrier
+ * that dies as soon as every follow-up closes, while the closeout Job object is
+ * still inside its 30-minute retention window. The outcome would then be judged a
+ * second time and the same `newTickets` created again.
+ *
+ * S3–S5 have the mirror-image hole (ticket #61): their exit-label migration does
+ * take them out of the gate, but a human re-entry is exactly the action that
+ * undoes that migration, and the pass after it judged the same terminal Job again
+ * and put the exit labels back. For them the marker rides the same label edit as
+ * the exit migration, so the two cannot be half-applied.
  *
  * So the marker is an explicit label on the spec, with the same life cycle as a
  * Ticket PVC's `expires-at`: written in the pass that consumed the outcome,

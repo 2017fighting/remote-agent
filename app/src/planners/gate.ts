@@ -50,9 +50,10 @@ export const LABEL_AGENT_ERROR = "agent:error";
 // — `LABEL_CLOSEOUT_CONSUMED` in planners/spec-loop.ts (ticket #49).
 
 /**
- * Every `agent:*` label other than `agent:implement` is an exit marker
- * (in-progress / error / blocked) — none of them belongs on a claimable issue.
- * `agent:implement` is the authorization itself, so it is excluded here.
+ * Every `agent:*` label other than `agent:implement` is either an exit marker
+ * (`agent:blocked` / `agent:error`) or the run marker `agent:in-progress` — none
+ * of them belongs on a claimable issue. `agent:implement` is the authorization
+ * itself, so it is excluded here.
  */
 const AGENT_LABEL_PREFIX = "agent:";
 

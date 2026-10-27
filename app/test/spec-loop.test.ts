@@ -368,9 +368,30 @@ describe("S2 → S3: closeout done without newTickets opens the PR", () => {
     await run({ github, k8s });
 
     const labels = await specLabels(github);
-    expect(labels).toEqual(["agent:implement", "ready-for-human"]);
+    expect(labels).toEqual(["agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-human"]);
     expect(labels).not.toContain("ready-for-agent");
     expect(labels).not.toContain("agent:in-progress");
+  });
+
+  /**
+   * Ticket #61: the consumed marker is written by every consumed outcome, not only
+   * by S3N. Without it, S3–S5's carrier was the exit migration itself, and a human
+   * re-entry — the one action that undoes that migration — put the spec back in
+   * front of the same terminal Job.
+   */
+  it("carries the consumed marker, and a replay writes nothing", async () => {
+    const { github, k8s } = doneWorld();
+
+    await run({ github, k8s });
+
+    expect(await specLabels(github)).toContain(LABEL_CLOSEOUT_CONSUMED);
+    github.writeLog.length = 0;
+    k8s.writeLog.length = 0;
+
+    await run({ github, k8s });
+
+    expect(github.writeLog).toEqual([]);
+    expect(k8s.writeLog).toEqual([]);
   });
 
   it("does not duplicate the Closes line when the agent's prBody already carries it", async () => {
@@ -410,23 +431,24 @@ describe("S2 → S3: closeout done without newTickets opens the PR", () => {
 
     expect(github.pullRequests).toHaveLength(1);
     expect(github.writeLog).not.toContain(`createPullRequest ${REPO} ${specBranch(SPEC)}`);
-    // The label migration still happens: it is the spec's "consumed" marker.
-    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-human"]);
+    // The label migration still happens, and it carries the consumed marker: the
+    // PR is the outcome, the labels are the state (ticket #61).
+    expect(await specLabels(github)).toEqual(["agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-human"]);
   });
 
   it("the same branch triggered twice still yields one PR and one Closes line", async () => {
     const { github, k8s } = doneWorld();
 
     await run({ github, k8s });
-    // The world as a crash after the PR but before the label edit would leave
-    // it: the spec is still inside the gate, so the next pass takes S3 again.
+    // The world as a crash after the PR but before the label edit would leave it:
+    // the spec is still inside the gate, unmarked, so the next pass takes S3 again.
     (await github.getIssue(REPO, SPEC))!.labels = [...GATE_LABELS];
 
     await run({ github, k8s });
 
     expect(github.pullRequests).toHaveLength(1);
     expect(github.pullRequests[0]!.body.match(/^Closes #33$/gm)).toHaveLength(1);
-    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-human"]);
+    expect(await specLabels(github)).toEqual(["agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-human"]);
   });
 
   /**
@@ -625,7 +647,7 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
 
   it("tolerates a spent volume whose Secret is already gone, and mints a fresh credential", async () => {
     // The reclaim deletes both objects, but only the volume is guaranteed to be
-    // there (a human may have removed the Secret by hand, and `volumeResetLine`
+    // there (a human may have removed the Secret by hand, and `volumeResetStep`
     // tells them to). Deleting an absent object is success, as in reclamation.
     const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
     const k8s = new FakeK8s({ pvcs: [ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" })] });
@@ -717,24 +739,6 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     k8s.deleteJob(CLOSEOUT);
     await run({ github, k8s });
     expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
-  });
-
-  it("a spec whose closeout never reported newTickets carries no marker, so a replay stays write-free", async () => {
-    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
-    const k8s = new FakeK8s({
-      jobs: [
-        closeoutJob(REPO, SPEC, {
-          finished: true,
-          annotation: runResult({ v: 1, outcome: "done", summary: "s", prBody: "p" }),
-        }),
-      ],
-    });
-    await run({ github, k8s });
-
-    expect(github.writeLog.filter((write) => write.includes(LABEL_CLOSEOUT_CONSUMED))).toEqual([]);
-    github.writeLog.length = 0;
-    await run({ github, k8s });
-    expect(github.writeLog).toEqual([]);
   });
 });
 
@@ -868,7 +872,7 @@ describe("S2 → S4 / S5: a failed closeout migrates the spec's labels and comme
 
       await run({ github, k8s });
 
-      expect(await specLabels(github)).toEqual([c.label, "agent:implement", "ready-for-human"].sort());
+      expect(await specLabels(github)).toEqual([c.label, "agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-human"].sort());
       expect(github.pullRequests).toEqual([]);
       expect(github.comments).toHaveLength(1);
       expect(github.comments[0]!.body).toContain(`<!-- remote-agent:${c.marker}:${CLOSEOUT} -->`);
@@ -886,12 +890,15 @@ describe("S2 → S4 / S5: a failed closeout migrates the spec's labels and comme
       const k8s = new FakeK8s({ jobs: [c.job()] });
 
       await run({ github, k8s });
-      // The world as a crashed pass would leave it: comment posted, label not moved.
+      // The world as a crashed pass would leave it: comment posted, labels not
+      // moved — and therefore no consumed marker either, since the two ride the
+      // same edit (ticket #61).
       (await github.getIssue(REPO, SPEC))!.labels = [...GATE_LABELS];
 
       await run({ github, k8s });
 
       expect(github.comments).toHaveLength(1);
+      expect(await specLabels(github)).toContain(LABEL_CLOSEOUT_CONSUMED);
     });
   }
 
@@ -903,6 +910,186 @@ describe("S2 → S4 / S5: a failed closeout migrates the spec's labels and comme
       expect(await specLabels(github)).not.toContain("agent:in-progress");
       for (const write of github.writeLog) expect(write, c.name).not.toContain("agent:in-progress");
     }
+  });
+
+  it("posts the verdict comment before it migrates the labels (ticket #61)", async () => {
+    // The order is the crash-window choice: the human's only entry point has to be
+    // durable before the spec leaves the gate. The reverse order left an exit label
+    // with no comment at all whenever the pass died in between — and nothing ever
+    // retried it, because the spec was already outside the gate.
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({ jobs: [closeoutJob(REPO, SPEC, { finished: true })] });
+
+    await run({ github, k8s });
+
+    const comment = github.writeLog.findIndex((write) => write.startsWith("addComment"));
+    const labels = github.writeLog.findIndex((write) => write.startsWith("editLabels"));
+    expect(comment).toBeGreaterThanOrEqual(0);
+    expect(labels).toBeGreaterThan(comment);
+  });
+});
+
+describe("S6: a human re-entry survives the old closeout Job object (ticket #61)", () => {
+  /**
+   * The incident this closes: the spec role's "this outcome was consumed" carrier
+   * used to be the exit-label migration itself (S3–S5), and a human re-entry is
+   * precisely the action that undoes that migration. So the pass after a re-entry
+   * judged the same terminal Job again, reached the same verdict, and put the exit
+   * labels back — silently, because the verdict comment dedupes on its marker. The
+   * spec then sat outside the gate until the object's TTL removed it, and the human
+   * had to relabel a second time.
+   *
+   * The fix is ADR-0015's marker, now written by every consumed outcome: a
+   * re-entered spec parks on `closeout-consumed` instead, and the next round starts
+   * by itself once the object is gone. The ticket role needs none of this — its
+   * judge only runs for `agent:in-progress`, which the exit migration removes.
+   */
+  const terminal = () => closeoutJob(REPO, SPEC, { finished: true });
+
+  /**
+   * The human's documented re-entry (GLOSSARY `Re-entry`): drop the `agent:*` exit
+   * label, switch the triage label back, touch nothing else. What that leaves alone
+   * is the point — `closeout-consumed` is neither an exit label nor a triage label,
+   * so it is still on the spec afterwards, and it is what the App reads.
+   */
+  function reenter(github: FakeGitHub) {
+    const spec = github.issues.find((i) => i.number === SPEC)!;
+    spec.labels = [...GATE_LABELS, ...spec.labels.filter((label) => label === LABEL_CLOSEOUT_CONSUMED)];
+  }
+
+  it("keeps the relabel, writes nothing, and counts the wait", async () => {
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({ jobs: [terminal()], pvcs: [ticketPvc(REPO, SPEC)] });
+
+    await run({ github, k8s }); // S5: the App's own verdict on a run that produced nothing.
+    expect(await specLabels(github)).toEqual([
+      "agent:error",
+      "agent:implement",
+      LABEL_CLOSEOUT_CONSUMED,
+      "ready-for-human",
+    ]);
+
+    // S6: the human drops the exit label and switches the triage label back.
+    reenter(github);
+    github.writeLog.length = 0;
+    k8s.writeLog.length = 0;
+
+    const second = await run({ github, k8s });
+
+    expect(await specLabels(github), "the relabel is not undone").toEqual([
+      "agent:implement",
+      LABEL_CLOSEOUT_CONSUMED,
+      "ready-for-agent",
+    ]);
+    expect(github.writeLog).toEqual([]);
+    expect(k8s.writeLog).toEqual([]);
+    expect(github.comments, "no second verdict comment").toHaveLength(1);
+    expect(second.closeoutConsumed).toBe(1);
+  });
+
+  it("starts the next round by itself once the object is gone — no second relabel", async () => {
+    const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+    const k8s = new FakeK8s({ jobs: [terminal()], pvcs: [ticketPvc(REPO, SPEC)] });
+    await run({ github, k8s });
+    reenter(github);
+    await run({ github, k8s });
+
+    k8s.deleteJob(CLOSEOUT); // the TTL, or the human's `kubectl delete job`.
+    k8s.writeLog.length = 0;
+
+    await run({ github, k8s });
+
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+    // The next round starts on a **fresh** volume, not the spent one (#60). The
+    // secret was never minted (this Job was already there), so only the volume is
+    // reclaimed; the fresh one carries no retention clock.
+    expect(k8s.writeLog).toEqual([
+      `deletePvc ${CLOSEOUT}`,
+      `createPvc ${CLOSEOUT}`,
+      `createSecret ${tokenSecretName(CLOSEOUT)}`,
+      `createJob ${CLOSEOUT}`,
+    ]);
+    expect(k8s.pvcs.map((pvc) => pvc.annotations)).toEqual([
+      expect.not.objectContaining({ [ANNOTATIONS.expiresAt]: expect.anything() }),
+    ]);
+    // The marker belonged to the consumed round: the fresh closeout starts unmarked.
+    expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
+  });
+
+  /**
+   * The carrier has to hold for every terminal shape, not just the `no-result`
+   * one the incident happened to hit: S3 and S4 leave the gate the same way, and
+   * their own carriers (the PR, the comment) are the outcome, not the state.
+   */
+  const reentries: Array<{ name: string; job: () => ReturnType<typeof closeoutJob>; prs: number }> = [
+    {
+      name: "S3 done",
+      job: () =>
+        closeoutJob(REPO, SPEC, {
+          finished: true,
+          annotation: runResult({ v: 1, outcome: "done", summary: "s", prBody: "p" }),
+        }),
+      prs: 1,
+    },
+    {
+      name: "S4 blocked",
+      job: () =>
+        closeoutJob(REPO, SPEC, {
+          finished: true,
+          annotation: runResult({ v: 1, outcome: "blocked", summary: "s", commentBody: "c" }),
+        }),
+      prs: 0,
+    },
+    { name: "S5 error", job: terminal, prs: 0 },
+  ];
+
+  for (const c of reentries) {
+    it(`${c.name}: the consumed marker is the carrier, so the relabel holds`, async () => {
+      const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
+      const k8s = new FakeK8s({ jobs: [c.job()], pvcs: [ticketPvc(REPO, SPEC)] });
+
+      await run({ github, k8s });
+      expect(await specLabels(github), "the outcome is consumed").toContain(LABEL_CLOSEOUT_CONSUMED);
+
+      reenter(github);
+      github.writeLog.length = 0;
+
+      const second = await run({ github, k8s });
+
+      expect(await specLabels(github)).toEqual(["agent:implement", LABEL_CLOSEOUT_CONSUMED, "ready-for-agent"]);
+      expect(github.writeLog).toEqual([]);
+      expect(second.closeoutConsumed).toBe(1);
+      // The outcome itself is not repeated either: one PR at most, one comment.
+      expect(github.pullRequests).toHaveLength(c.prs);
+      expect(github.comments.length).toBeLessThanOrEqual(1);
+    });
+  }
+
+  it("the ticket role needs no carrier: a relabelled ticket only waits", async () => {
+    // The asymmetry is the point. A ticket's judge is gated on `agent:in-progress`,
+    // which T4–T6 remove, so a re-entered ticket cannot be re-judged at all; its
+    // old Job object is held by the k8s half of the Claim-gate instead. This is the
+    // control that says the fix stayed in the spec role.
+    const TICKET = 34;
+    const github = new FakeGitHub({
+      issues: [issue(SPEC, GATE_LABELS), issue(TICKET, ["ready-for-human", "agent:implement", "agent:error"])],
+      subIssues: [{ ownerRepo: REPO, specNumber: SPEC, issueNumbers: [TICKET] }],
+    });
+    const k8s = new FakeK8s({
+      jobs: [managedJob(REPO, TICKET, { finished: true })],
+      pvcs: [ticketPvc(REPO, TICKET)],
+    });
+
+    // T8: the human's re-entry, with the old Job object still inside its window.
+    (await github.getIssue(REPO, TICKET))!.labels = [...GATE_LABELS];
+    github.writeLog.length = 0;
+
+    const result = await run({ github, k8s });
+
+    expect(await labelsOf(github, TICKET)).toEqual(["agent:implement", "ready-for-agent"]);
+    expect(github.writeLog).toEqual([]);
+    expect(github.comments, "no second evidence comment").toEqual([]);
+    expect(result.waiting).toBe(1);
   });
 });
 

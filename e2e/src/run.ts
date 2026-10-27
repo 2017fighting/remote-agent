@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
   applyManifests,
   createRunner,
@@ -32,7 +34,9 @@ import {
 } from "./scenario.js";
 import {
   AssertionTimeout,
+  clearFailFast,
   delay,
+  failRunFast,
   isJobFinished,
   AppReportedFailure,
   jobTerminalReason,
@@ -160,6 +164,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const runner = createRunner({ verbose: options.verbose });
   const scratch = await workDir(options.keep);
   let currentSection: Section = "cluster";
+  let stopStubWatch: (() => void) | null = null;
   const markSection = (name: Section): void => {
     currentSection = name;
   };
@@ -247,6 +252,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     // once the pod is up: the harness copies the real repository in.
     await waitForDeployment(runner, context, "stub-github", options.timeoutMs);
     await waitForDeployment(runner, context, "stub-model", options.timeoutMs);
+    // From here on the world the run asserts against lives in the stub's memory,
+    // so a restart has to end the run instead of silently rolling it back.
+    stopStubWatch = watchStubGitHubPod(context);
     await seedStubGitHubRepo(runner, context, projectRoot);
 
     markSection("app");
@@ -297,6 +305,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     }
     return { ok: false, sections: sectionsOf(runner), failure: message };
   } finally {
+    stopStubWatch?.();
+    clearFailFast();
     await scratch.cleanup();
   }
 }
@@ -399,8 +409,11 @@ async function loadImages(runner: Runner, clusterName: string): Promise<void> {
   // sees — which is exactly the false alarm this guard produced on its first run.
   const imageTag = await readBakedJobImage(runner);
   if (imageTag === null) {
-    runner.note("could not read the App image's baked Job image reference; skipping the mismatch check");
-    return;
+    throw new Error(
+      "could not read the App image's baked Job image reference from its bundle: " +
+        "the guard that turns a tag mismatch into an ImagePullBackOff would be skipped. " +
+        "Fix the reader in readBakedJobImage() rather than letting it fall through.",
+    );
   }
   if (imageTag !== JOB_IMAGE) {
     throw new Error(
@@ -410,22 +423,130 @@ async function loadImages(runner: Runner, clusterName: string): Promise<void> {
   }
 }
 
-/** The Job image reference compiled into the App image, or null when unreadable. */
+/**
+ * The Job image reference compiled into the App image, or null when the bundle
+ * does not carry it.
+ *
+ * The image ships the bundle only — `app/Dockerfile` copies `dist/main.mjs` and
+ * nothing else — so there is no `build-info.mjs` module to import. The reference
+ * is read from the two constants the build baked into that bundle: the
+ * repository (a source constant) and the tag (rewritten by
+ * `scripts/bake-build-info.mjs` from the Docker build `ARG`).
+ *
+ * Reading the *artifact* rather than `app/src/build-info.ts` is the point: the
+ * source file holds the development default (`0.0.0-dev`), which no cluster ever
+ * sees. This used to be a `node -e` script whose top-level `await` was a
+ * SyntaxError under `node -e`'s CommonJS default — and the guard swallowed that
+ * error and skipped itself on every run, which is the one outcome a guard must
+ * never have.
+ */
 async function readBakedJobImage(runner: Runner): Promise<string | null> {
-  const script = [
-    'const m = await import("file:///app/build-info.mjs").catch(() => null);',
-    'if (m && m.JOB_IMAGE) { process.stdout.write(m.JOB_IMAGE); process.exit(0); }',
-    'const src = await import("node:fs/promises").then((fs) => fs.readFile("/app/main.mjs", "utf8")).catch(() => "");',
-    'const hit = /(ghcr\.io\/[A-Za-z0-9._\/-]+):([A-Za-z0-9._-]+)/.exec(src);',
-    'if (hit) process.stdout.write(`${hit[1]}:${hit[2]}`);',
-  ].join("\n");
+  // `grep`, not `cat`: the bundle is ~6 MB and `--verbose` prints a command's
+  // stdout into the CI log, so only the two declaration lines leave the image.
   const result = await runner.run(
     "docker",
-    ["run", "--rm", "--entrypoint", "node", APP_IMAGE, "-e", script],
+    [
+      "run",
+      "--rm",
+      "--entrypoint",
+      "grep",
+      APP_IMAGE,
+      "-E",
+      "^var JOB_IMAGE_(REPOSITORY|TAG) = ",
+      "/app/main.mjs",
+    ],
     { allowFailure: true },
   );
-  const value = result.stdout.trim();
-  return result.exitCode === 0 && value !== "" ? value : null;
+  return result.exitCode === 0 ? bakedJobImageFromDeclarations(result.stdout) : null;
+}
+
+/**
+ * `repository:tag` from the two baked declaration lines the bundle carries
+ * (exported so the reader's fragile half — the shape of esbuild's output — is
+ * pinned by a unit test instead of only by a 45-minute kind run).
+ */
+export function bakedJobImageFromDeclarations(lines: string): string | null {
+  const repository = /^var JOB_IMAGE_REPOSITORY = "([^"]+)";$/m.exec(lines);
+  const tag = /^var JOB_IMAGE_TAG = "([^"]+)";$/m.exec(lines);
+  if (repository === null || tag === null) return null;
+  return `${repository[1]}:${tag[1]}`;
+}
+
+// --- stub liveness ---------------------------------------------------------
+
+const exec = promisify(execFile);
+
+/** The bits of a pod the stub watcher compares between polls. */
+interface StubPodIdentity {
+  pod: string;
+  restarts: number;
+}
+
+interface StubPodList {
+  items: Array<{
+    metadata: { name: string };
+    status?: { containerStatuses?: Array<{ restartCount?: number }> };
+  }>;
+}
+
+/**
+ * Watch the stub-github pod for a restart or a replacement, and end the run when
+ * it happens.
+ *
+ * The stub's world lives in memory (`stub-github/server.ts` builds one
+ * `StubWorld` at startup), so a restarted container re-initialises it from the
+ * scenario: every label, comment and PR the App wrote is gone, while the Jobs it
+ * created are still in k8s. The App only judges a run whose ticket still carries
+ * `agent:in-progress`, so it can never catch up — it waits out the Job objects'
+ * retention window instead. Nothing downstream can be asserted, and the symptom
+ * is a five-minute timeout that names the App (ticket #69).
+ *
+ * Only stub-github is watched: stub-model replays a script from a ConfigMap and
+ * holds nothing the assertions read back.
+ *
+ * Deliberately not routed through the runner: this fires every two seconds, and
+ * every `kubectl` the runner sees is echoed into the log.
+ */
+function watchStubGitHubPod(context: string, intervalMs = 2000): () => void {
+  let seen: StubPodIdentity | null = null;
+  const timer = setInterval(() => {
+    void readStubPodIdentity(context)
+      .then((current) => {
+        if (current === null) return;
+        if (seen === null) {
+          seen = current;
+          return;
+        }
+        if (current.pod === seen.pod && current.restarts === seen.restarts) return;
+        failRunFast(
+          new Error(
+            `stub-github restarted (${seen.pod} restarts=${seen.restarts} → ${current.pod} restarts=${current.restarts}): ` +
+              "its world is in memory, so every write the App made was rolled back and nothing " +
+              "downstream can be asserted. Fix the stub's crash — this run says nothing about the App.",
+          ),
+        );
+      })
+      .catch(() => {
+        // The cluster may be going away mid-run; the run's own reads will speak up.
+      });
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
+/** The stub pod's name and restart count, or null when it cannot be read. */
+async function readStubPodIdentity(context: string): Promise<StubPodIdentity | null> {
+  try {
+    const { stdout } = await exec(
+      "kubectl",
+      ["--context", context, "-n", NAMESPACE, "get", "pod", "-l", "app=stub-github", "-o", "json"],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+    const pod = (JSON.parse(stdout) as StubPodList).items[0];
+    if (pod === undefined) return null;
+    return { pod: pod.metadata.name, restarts: pod.status?.containerStatuses?.[0]?.restartCount ?? 0 };
+  } catch {
+    return null;
+  }
 }
 
 async function waitForDeployment(
@@ -701,7 +822,21 @@ async function assertFinalWorld(runner: Runner, context: string, options: RunOpt
   //    criteria name explicitly — both tickets closed, the spec moved out of the
   //    gate, one ready PR on the spec branch whose body carries `Closes #<spec>`
   //    — and it can only be asserted against the stub's own world.
-  const state = await readStubState(runner, context);
+  //
+  //    Polled, not read once. The App reaches this state in a pass of its own,
+  //    *after* the pass that lets the closeout Job finish, and S3 writes the PR
+  //    before the labels (ADR-0018). A one-shot read lands between those two
+  //    writes often enough to matter — the observed world then holds a PR whose
+  //    spec is still in the gate, which reads as an App bug but is a harness
+  //    race. Steps 1 and 2 wait on k8s; nothing before this waits on GitHub.
+  const state = await poll<StubState>({
+    description: "the GitHub side reaches its end state (spec out of the gate, one ready PR)",
+    timeoutMs: options.timeoutMs,
+    intervalMs: 2000,
+    observe: () => readStubState(runner, context),
+    until: githubSideIsFinal,
+    describe: describeGithubSide,
+  });
   for (const ticketNumber of TICKET_NUMBERS) {
     const ticket = state.issues.find((issue) => issue.number === ticketNumber);
     if (ticket === undefined) throw new Error(`ticket #${ticketNumber} is missing from the world`);
@@ -730,13 +865,12 @@ async function assertFinalWorld(runner: Runner, context: string, options: RunOpt
     throw new Error(`spec #${SPEC_NUMBER} carries agent:in-progress; a spec never gets that label`);
   }
 
-  const specBranch = `agent/spec-${SPEC_NUMBER}`;
-  const prs = state.pullRequests.filter((pr) => pr.headBranch === specBranch);
+  const prs = state.pullRequests.filter((pr) => pr.headBranch === SPEC_BRANCH);
   if (prs.length !== 1) {
-    throw new Error(`expected exactly one PR on ${specBranch}, found ${prs.length}`);
+    throw new Error(`expected exactly one PR on ${SPEC_BRANCH}, found ${prs.length}`);
   }
   const pr = prs[0]!;
-  if (pr.draft) throw new Error(`the PR on ${specBranch} is a draft; the contract says ready (spec §0)`);
+  if (pr.draft) throw new Error(`the PR on ${SPEC_BRANCH} is a draft; the contract says ready (spec §0)`);
   if (pr.baseBranch !== "main") throw new Error(`the PR targets ${pr.baseBranch}, expected main`);
   const closesCount = pr.body.match(new RegExp(`Closes #${SPEC_NUMBER}\\b`, "g"))?.length ?? 0;
   if (closesCount !== 1) {
@@ -761,7 +895,41 @@ async function assertFinalWorld(runner: Runner, context: string, options: RunOpt
   );
 }
 
-interface StubState {
+/** The branch the closeout opens its PR from. */
+const SPEC_BRANCH = `agent/spec-${SPEC_NUMBER}`;
+
+/**
+ * Whether the App has settled into the GitHub-side end state (ticket #41's
+ * acceptance criteria). This is what `assertFinalWorld` polls for; the detailed
+ * assertions below then run on a snapshot that already satisfies it, so they
+ * only speak up when something is genuinely wrong (a draft PR, a wrong base, a
+ * second `Closes #`, a mocked git) rather than when the App is merely mid-write.
+ */
+export function githubSideIsFinal(state: StubState): boolean {
+  const spec = state.issues.find((issue) => issue.number === SPEC_NUMBER);
+  if (spec === undefined) return false;
+  if (!spec.labels.includes("ready-for-human")) return false;
+  if (spec.labels.includes("ready-for-agent") || spec.labels.includes("agent:in-progress")) return false;
+  const ticketsSettled = TICKET_NUMBERS.every((ticketNumber) => {
+    const ticket = state.issues.find((issue) => issue.number === ticketNumber);
+    return ticket !== undefined && ticket.state === "closed" && !ticket.labels.includes("agent:in-progress");
+  });
+  if (!ticketsSettled) return false;
+  return state.pullRequests.filter((pr) => pr.headBranch === SPEC_BRANCH).length === 1;
+}
+
+/** What the poll reports when the end state never arrives. */
+export function describeGithubSide(state: StubState): string {
+  const spec = state.issues.find((issue) => issue.number === SPEC_NUMBER);
+  const tickets = TICKET_NUMBERS.map((ticketNumber) => {
+    const ticket = state.issues.find((issue) => issue.number === ticketNumber);
+    return `${ticketNumber}:${ticket?.state ?? "missing"}`;
+  });
+  const prs = state.pullRequests.filter((pr) => pr.headBranch === SPEC_BRANCH).length;
+  return `spec labels ${JSON.stringify(spec?.labels ?? null)}; tickets ${tickets.join(", ")}; PRs on ${SPEC_BRANCH}: ${prs}`;
+}
+
+export interface StubState {
   issues: Array<{ number: number; state: string; labels: string[]; comments: string[] }>;
   pullRequests: Array<{ number: number; state: string; draft: boolean; headBranch: string; baseBranch: string; body: string }>;
   gitOperations: Array<{ service: string; exitCode: number }>;

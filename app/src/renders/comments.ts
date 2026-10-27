@@ -64,7 +64,7 @@ export function renderBlockedComment(input: BlockedCommentInput): string {
   const { jobName, result } = input;
   const body = result.commentBody?.trim()
     ? result.commentBody
-    : ["## Agent is blocked", "", result.summary, "", reentryLine(jobName)].join("\n");
+    : ["## Agent is blocked", "", result.summary, "", reentryNote(jobName, null)].join("\n");
   return [commentMarker("blocked", jobName), body].join("\n");
 }
 
@@ -84,7 +84,7 @@ export function renderErrorComment(input: ErrorCommentInput): string {
     `\`outcome=error\` — App-judged reason: **${input.reason}**.`,
   ];
   if (input.summary !== null) lines.push("", input.summary);
-  lines.push("", `- Job: \`${input.jobName}\``, "", reentryLine(input.jobName));
+  lines.push("", `- Job: \`${input.jobName}\``, "", reentryNote(input.jobName, null));
   return lines.join("\n");
 }
 
@@ -141,25 +141,38 @@ export function renderEvidenceComment(input: EvidenceCommentInput): string {
     `- Retention: this volume is kept until **${input.expiresAt}** (\`remote-agent/expires-at\`).`,
     "- The volume may hold commits that were never pushed: on the `backoffLimit` / `DeadlineExceeded` / `no-result` paths the runner may have died before pushing, so this volume is the only copy of that work.",
     "",
-    reentryLine(input.jobName),
+    // A failure that is a condition of the volume needs the volume discarded, or the
+    // next run resumes to the same state and fails the same way. `unrecoverable` is
+    // exactly that class: a push the runner could not reconcile, or a credential it
+    // could not read.
+    reentryNote(input.jobName, input.reason === "unrecoverable" ? input.pvcName : null),
   );
-
-  // A failure that is a condition of the volume needs the volume discarded, or the
-  // next run resumes to the same state and fails the same way. `unrecoverable` is
-  // exactly that class: a push the runner could not reconcile, or a credential it
-  // could not read.
-  if (input.reason === "unrecoverable") lines.push("", volumeResetLine(input.pvcName));
 
   return lines.join("\n");
 }
 
-/** The ADR-0013 re-entry note, shared by the blocked / error / evidence templates. */
-function reentryLine(jobName: string): string {
-  return [
-    "Re-entry: remove the `agent:*` exit label and switch `ready-for-human` back to `ready-for-agent`.",
-    "If the old Job is still inside its retention window, the new run starts within ~30 minutes at the latest;",
-    `to skip the wait, \`kubectl delete job ${jobName}\` — the delete event wakes Claim immediately.`,
-  ].join(" ");
+/**
+ * The ADR-0013 re-entry note, shared by the blocked / error / evidence templates:
+ * an ordered block, because the order is the content (ticket #61).
+ *
+ * The old Job object blocks the next round (ADR-0013), so a relabel inside the
+ * retention window only sets that round up — it cannot start it. The reverse
+ * reading ("relabel now and wait") is what made the App's re-application of the
+ * exit labels look like the human's own edit coming undone.
+ */
+function reentryNote(jobName: string, pvcName: string | null): string {
+  const steps = [
+    [
+      `Delete the Job object: \`kubectl delete job ${jobName}\` — or wait out its retention window (~30 minutes).`,
+      "Nothing starts while it is still there: the next round waits for its absence,",
+      "and the delete event is also what wakes the App immediately.",
+    ].join(" "),
+  ];
+  if (pvcName !== null) steps.push(volumeResetStep(pvcName));
+  steps.push(
+    "Only then relabel: remove the `agent:*` exit label and switch `ready-for-human` back to `ready-for-agent`.",
+  );
+  return ["Re-entry, in this order:", "", ...steps.map((step, index) => `${index + 1}. ${step}`)].join("\n");
 }
 
 /**
@@ -172,14 +185,19 @@ function reentryLine(jobName: string): string {
  * identically. Re-labelling alone would burn another `backoffLimit` for nothing,
  * so the human has to discard the volume and its credential as well.
  *
+ * It sits between the other two steps because of the hang the incident hit
+ * (ticket #61): the volume stays in `Terminating` while the Job's finished pod
+ * still holds the `ReadWriteOncePod` attachment, so deleting the Job first is what
+ * releases it.
+ *
  * `blocked` is the agent's own verdict and never needs this: it is a report, not a
  * stuck state.
  */
-function volumeResetLine(pvcName: string): string {
+function volumeResetStep(pvcName: string): string {
   return [
-    "**This failure lives on the volume, so re-labelling alone will fail the same way.**",
-    `Discard it first: \`kubectl delete pvc ${pvcName}\` and`,
+    `Discard the volume, because this failure lives on it: \`kubectl delete pvc ${pvcName}\` and`,
     `\`kubectl delete secret ${pvcName}-token\` (Claim mints a new credential only when the Secret is absent).`,
+    "It can sit in `Terminating` until the Job's finished pod releases it — deleting the Job in step 1 is what unblocks it.",
     "The volume is the only copy of any commits that were never pushed, so check that before deleting.",
   ].join(" ");
 }

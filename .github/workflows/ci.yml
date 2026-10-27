@@ -125,6 +125,12 @@ jobs:
           kubectl --context kind-ra-e2e -n remote-agent logs deploy/remote-agent --tail 200 || true
           kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-github --tail 100 || true
           kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-model --tail 100 || true
+          # `logs` shows the container that is running now. A container that
+          # restarted took its own log with it — and for stub-github that is the
+          # whole failure: its world is in memory, so the restart rolled the run
+          # back (ticket #69).
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/stub-github --previous --tail 100 || true
+          kubectl --context kind-ra-e2e -n remote-agent logs deploy/remote-agent --previous --tail 200 || true
 
   push-images:
     # Nothing is published before the closed loop is green on kind (spec #33 §9).

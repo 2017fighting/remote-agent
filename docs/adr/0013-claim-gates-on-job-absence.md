@@ -11,7 +11,7 @@
 - **Claim 的写序：先 create-if-absent Job，后写 `agent:in-progress`**。App 在两写之间崩掉留下「Job 在跑 + 票在门内」，被 k8s 半边天然收掉：Job 终态 → TTL → `DELETED` → 重新 Claim，同卷按 [ADR-0011](0011-ticket-pvc-recycling.md) 接续，不产生假 `error`。GitHub 持久失败时的代价是白跑一轮（工作在卷上不丢），比假 error 安静且诚实。反序的崩窗是「`in-progress` + 无 Job」→ 假 T6e，会把 T6e 的成因混进高频崩窗、信号变脏。
 - **非终态旧 Job 同规则**：人在 Job 跑动中手滑摘了 `agent:*`，或上一次 Claim 的崩窗残留，都走等待——它最迟 `activeDeadlineSeconds`（3h）进终态，再 30 分钟被删，上界 ~3.5h、罕见、自动恢复，不新增状态机路径。annotation 无人消费是正确行为：工作已在 Ticket PVC 上，新一轮同卷接续。
 - **spec 收尾 Job 同规则**：`implement-spec` 的确定性名下对象还在就不起收尾 Job，同扇门不区分 role。
-- **等待的可见性**：error / blocked 的证据评论模板加一行「重入后最迟到旧 Job 保留窗结束（30 分钟内）起跑；等不及可手动 `kubectl delete job <名>`，删除事件立即唤醒 Claim」，App 在等待时打一行日志。**逃逸口**（手动删 Job）写进 `docs/architecture.md` §4.2——人手里的 kubectl 本来就是 v1 的运维面。
+- **等待的可见性**：error / blocked 的证据评论模板加一段**有序**的重入步骤——先删 Job 对象（或等满保留窗，~30 分钟；`kubectl delete job <名>` 的删除事件立即唤醒 Claim），最后才 relabel；失败长在卷上时（`unrecoverable`）卷那一步夹在中间，并写明 PVC 的删除会停在 `Terminating` 直到 Job 那个已完成的 pod 放开卷。**（2026-10-26，[ADR-0018](0018-re-entry-survives-the-old-closeout-job.md) 重排了这段文本，[#61](https://github.com/2017fighting/remote-agent/issues/61)）**：本 ADR 写下的版本把 relabel 放在最前、把删 Job 写成「等不及可以」，读起来像「先 relabel，等待只关乎 Claim」——而 spec 侧的重入在那段窗口里会被旧 Job 的判决改回去。App 在等待时打一行日志。**逃逸口**（手动删 Job）写进 `docs/architecture.md` §4.2——人手里的 kubectl 本来就是 v1 的运维面。
 - T3 的进入条件由此完整：`T2 ∧ Slot 够 ∧ 名下无未删旧 Job`；首次创建与重跑走同一扇门，k8s 半边对两者不加区分。
 
 ## Considered Options

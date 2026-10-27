@@ -36,6 +36,24 @@ export interface PollOptions<T> {
 }
 
 /**
+ * A background watcher's verdict, latched so the next poll reports it instead of
+ * whatever it happened to be waiting for. Reserved for failures that invalidate
+ * the whole run — a restarted stub whose world is in memory — where the
+ * alternative is a five-minute timeout naming a downstream effect.
+ */
+let fatal: Error | null = null;
+
+/** Record a failure that ends the run: the next `poll` throws it, untouched. */
+export function failRunFast(error: Error): void {
+  fatal ??= error;
+}
+
+/** Forget a latched failure (teardown, and tests that latch one on purpose). */
+export function clearFailFast(): void {
+  fatal = null;
+}
+
+/**
  * Thrown when the App reports its own failure while we wait for a downstream
  * effect. Polling a timeout after the App has already said why it failed wastes
  * minutes and buries the cause, so this short-circuits with the App's words.
@@ -56,6 +74,9 @@ export async function poll<T>(options: PollOptions<T>): Promise<T> {
   let lastError: unknown;
 
   for (;;) {
+    // A latched failure outranks this assertion: whatever it is waiting for
+    // cannot become true, and its timeout would name the wrong thing.
+    if (fatal !== null) throw fatal;
     try {
       last = await options.observe();
       lastText = options.describe?.(last) ?? JSON.stringify(last);
