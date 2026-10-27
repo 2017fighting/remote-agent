@@ -11,7 +11,7 @@
 - **每个判过的收尾 outcome 都写 `closeout-consumed`**（S3 / S3N / S4 / S5），不再只有 S3N。重入的 spec 于是命中既有的短路支：不改 label、不评论、不建 Job、不读 annotation，计进既有的 `closeout-consumed=<n>`，等对象被删掉后**下一轮自己起跑**——不需要人贴第二次 label。ADR-0015 当初说「S3–S5 不需要这个标记，因为 label 迁移把它们移出了门」，那句话的前提正是人不会重入；#61 把它证伪了。
 - **S3–S5 的标记与退出迁移合并成一次 label edit**（`consumed()`）。两者是**同一个状态转移**——「这块 outcome 已落地，spec 出门」——所以写在一起才让标记不可能丢：没有任何崩窗能留下「退出 label 在了、标记没在」。**S3N 保持它自己的「先写标记、再建票」**（ADR-0015 的写序理由不变：崩在批次中间宁可丢一次 outcome，不可重复建票）。
 - **写序：评论 → 卷的 `expires-at` → label 迁移 + 标记**（S3 是 PR → `expires-at` → label 迁移 + 标记）。评论**先于** label 迁移，因为它是人唯一的入口：反序的崩窗会留下一个「有退出 label、没有评论」的 spec，而 spec 已经出门，谁都不会再补——今天就是这个形状。`expires-at` 也提到 label 迁移之前：它写在 label 之前才不会有「spec 出门了、卷却没有回收时钟」的窗口。
-- **重入提示改成一条有序步骤**（`reentryLine`）：**1. 先删 Job 对象**（或等满保留窗，~30 分钟；`kubectl delete job` 同时是立即唤醒）；**2. 只有失败长在卷上时才删卷**（`unrecoverable`）——并写明 `kubectl delete pvc` 会停在 `Terminating` 直到 Job 那个已完成的 pod 放开卷，所以第 1 步正是解开它的动作；**3. 最后才 relabel**。卷那一步（原 `volumeResetLine`）**并入同一条序列**，不再追加在末尾——否则渲染出来的顺序是「Job → relabel → 卷」，正好把要讲的那件事讲反。提示文本不再说「relabel 早了没用」：修好之后 relabel 是被尊重的，它只是**起不了跑**。
+- **重入提示改成一条有序步骤**（`reentryNote`）：**1. 先删 Job 对象**（或等满保留窗，~30 分钟；`kubectl delete job` 同时是立即唤醒）；**2. 只有失败长在卷上时才删卷**（`unrecoverable`）——并写明 `kubectl delete pvc` 会停在 `Terminating` 直到 Job 那个已完成的 pod 放开卷，所以第 1 步正是解开它的动作；**3. 最后才 relabel**。卷那一步（原 `volumeResetLine`）**并入同一条序列**（`volumeResetStep`），不再追加在末尾——否则渲染出来的顺序是「Job → relabel → 卷」，正好把要讲的那件事讲反。提示文本不再说「relabel 早了没用」：修好之后 relabel 是被尊重的，它只是**起不了跑**。
 - **票侧一字不改**：judge 的 `agent:in-progress` 前提、Claim-gate 的 k8s 半边、`waiting` 计数全部照旧。控制用例（重入的票 + 旧 Job 对象在）钉在 App seam 上，防的是有人日后把 judge 放宽到「门内即判」。
 
 ## Considered Options

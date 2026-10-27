@@ -191,7 +191,7 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 
 等待与 Defer 同形：不改 label、不建 Job、不评论，只打一行日志；不吃 Slot（终态 Job 名下没有未到终态的 pod）。它顺带收掉两个崩窗：人在 Job 跑动中手滑摘了 `agent:*`（门内 ∧ Job 活着，最迟 3h deadline + 30min TTL 后被删，下一次唤醒重新 Claim，同卷接续）；上一次 Claim 在「建 Job」与「写 label」之间崩掉的残留（写序因此定为先建 Job 后写 label）。spec 收尾 Job（S2）同规则：`implement-spec` 名下对象还在就不起。
 
-**逃逸口**：等不及的人可以 `kubectl delete job <名>`——Job 一没，下一轮 pass（watch 已接上时是删除事件，现在最迟是下一个 tick）就能重新 Claim，不用等满 30 分钟保留窗。**这也意味着 relabel 本身起不了跑**：`ready-for-agent` 回到票上、旧对象还在时，本轮只是等（票）或停（spec）。所以评论里的重入步骤把它写成第一步（[§4.6](#46-每个-error--blocked-终态都留一条评论)、[ADR-0018](adr/0018-re-entry-survives-the-old-closeout-job.md)）。
+**逃逸口**：等不及的人可以 `kubectl delete job <名>`——Job 一没，下一轮 pass（watch 已接上时是删除事件，现在最迟是下一个 tick）就能重新 Claim，不用等满 30 分钟保留窗。**反过来说，relabel 本身不会让下一轮起跑**：`ready-for-agent` 回到票上、旧对象还在时，本轮只是等（票）或停（spec）——relabel 是被尊重的，它只是起不了跑。所以评论里的重入步骤把它写成第一步（[§4.6](#46-每个-error--blocked-终态都留一条评论)、[ADR-0018](adr/0018-re-entry-survives-the-old-closeout-job.md)）。
 
 ### 4.3 Ticket
 

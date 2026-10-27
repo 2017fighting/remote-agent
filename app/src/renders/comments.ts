@@ -64,7 +64,7 @@ export function renderBlockedComment(input: BlockedCommentInput): string {
   const { jobName, result } = input;
   const body = result.commentBody?.trim()
     ? result.commentBody
-    : ["## Agent is blocked", "", result.summary, "", reentryLine(jobName, null)].join("\n");
+    : ["## Agent is blocked", "", result.summary, "", reentryNote(jobName, null)].join("\n");
   return [commentMarker("blocked", jobName), body].join("\n");
 }
 
@@ -84,7 +84,7 @@ export function renderErrorComment(input: ErrorCommentInput): string {
     `\`outcome=error\` — App-judged reason: **${input.reason}**.`,
   ];
   if (input.summary !== null) lines.push("", input.summary);
-  lines.push("", `- Job: \`${input.jobName}\``, "", reentryLine(input.jobName, null));
+  lines.push("", `- Job: \`${input.jobName}\``, "", reentryNote(input.jobName, null));
   return lines.join("\n");
 }
 
@@ -145,14 +145,22 @@ export function renderEvidenceComment(input: EvidenceCommentInput): string {
     // next run resumes to the same state and fails the same way. `unrecoverable` is
     // exactly that class: a push the runner could not reconcile, or a credential it
     // could not read.
-    reentryLine(input.jobName, input.reason === "unrecoverable" ? input.pvcName : null),
+    reentryNote(input.jobName, input.reason === "unrecoverable" ? input.pvcName : null),
   );
 
   return lines.join("\n");
 }
 
-/** The ADR-0013 re-entry note, shared by the blocked / error / evidence templates. */
-function reentryLine(jobName: string, pvcName: string | null): string {
+/**
+ * The ADR-0013 re-entry note, shared by the blocked / error / evidence templates:
+ * an ordered block, because the order is the content (ticket #61).
+ *
+ * The old Job object blocks the next round (ADR-0013), so a relabel inside the
+ * retention window only sets that round up — it cannot start it. The reverse
+ * reading ("relabel now and wait") is what made the App's re-application of the
+ * exit labels look like the human's own edit coming undone.
+ */
+function reentryNote(jobName: string, pvcName: string | null): string {
   const steps = [
     [
       `Delete the Job object: \`kubectl delete job ${jobName}\` — or wait out its retention window (~30 minutes).`,

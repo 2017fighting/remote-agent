@@ -647,7 +647,7 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
 
   it("tolerates a spent volume whose Secret is already gone, and mints a fresh credential", async () => {
     // The reclaim deletes both objects, but only the volume is guaranteed to be
-    // there (a human may have removed the Secret by hand, and `volumeResetLine`
+    // there (a human may have removed the Secret by hand, and `volumeResetStep`
     // tells them to). Deleting an absent object is success, as in reclamation.
     const github = closedOutSpecWorld({ specNumber: SPEC, subIssueNumbers: [34] });
     const k8s = new FakeK8s({ pvcs: [ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" })] });
@@ -995,10 +995,23 @@ describe("S6: a human re-entry survives the old closeout Job object (ticket #61)
     await run({ github, k8s });
 
     k8s.deleteJob(CLOSEOUT); // the TTL, or the human's `kubectl delete job`.
+    k8s.writeLog.length = 0;
 
     await run({ github, k8s });
 
     expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+    // The next round starts on a **fresh** volume, not the spent one (#60). The
+    // secret was never minted (this Job was already there), so only the volume is
+    // reclaimed; the fresh one carries no retention clock.
+    expect(k8s.writeLog).toEqual([
+      `deletePvc ${CLOSEOUT}`,
+      `createPvc ${CLOSEOUT}`,
+      `createSecret ${tokenSecretName(CLOSEOUT)}`,
+      `createJob ${CLOSEOUT}`,
+    ]);
+    expect(k8s.pvcs.map((pvc) => pvc.annotations)).toEqual([
+      expect.not.objectContaining({ [ANNOTATIONS.expiresAt]: expect.anything() }),
+    ]);
     // The marker belonged to the consumed round: the fresh closeout starts unmarked.
     expect(await specLabels(github)).toEqual(["agent:implement", "ready-for-agent"]);
   });
