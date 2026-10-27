@@ -23,21 +23,29 @@ export const APP_SERVICE_ACCOUNT = "remote-agent";
 export const JOB_SERVICE_ACCOUNT = "agent-job";
 /** The optional incident override ConfigMap the Job template mounts (ADR-0020). */
 export const PROMPTS_OVERRIDE_CONFIGMAP = "remote-agent-prompts-override";
+/**
+ * The one key the harness's incident override carries (ADR-0020). One key is
+ * enough: the point is the per-key *source* the run logs, so the run must report
+ * `_common:override` and fall back to the image for the other four. This is the
+ * single spelling the fixture and the log assertion share.
+ */
+export const PROMPTS_OVERRIDE_KEY = "_common";
 /** The one sops-equivalent Secret (docs/deployment.md §3); the App and the Job both read it. */
 export const APP_SECRET = "remote-agent-secret";
 
 /**
  * The prompt override ConfigMap, with only `_common` (ADR-0020). An operator
  * creates this by hand in an incident; the harness does the same so the wired
- * hatch is exercised end to end. `_common` is verbatim from `prompts/`, so the
- * evidence is the run's `prompt-source=_common:override` line, not the content.
+ * hatch is exercised end to end. Its content is an operator's hot-edit, so the
+ * evidence is the run's `prompt-source=_common:override` line, not a comparison
+ * against `prompts/` (that comparison lives once, in the Job's unit tests).
  */
 export async function renderPromptsOverrideConfigMap(promptsDir: string): Promise<Record<string, unknown>> {
   return {
     apiVersion: "v1",
     kind: "ConfigMap",
     metadata: { name: PROMPTS_OVERRIDE_CONFIGMAP, namespace: NAMESPACE },
-    data: { _common: await readFile(join(promptsDir, "_common"), "utf8") },
+    data: { [PROMPTS_OVERRIDE_KEY]: await readFile(join(promptsDir, PROMPTS_OVERRIDE_KEY), "utf8") },
   };
 }
 

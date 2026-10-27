@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -9,6 +8,7 @@ import {
   JOB_SERVICE_ACCOUNT,
   NAMESPACE,
   PROMPTS_OVERRIDE_CONFIGMAP,
+  PROMPTS_OVERRIDE_KEY,
   renderAppDeployment,
   renderAppRbac,
   renderAppSecret,
@@ -113,17 +113,18 @@ describe("harness manifests: quota, storage class, prompts", () => {
     expect(storageClass.provisioner).not.toBe("");
   });
 
-  it("builds the prompt override ConfigMap with only `_common` from prompts/ (ADR-0020)", async () => {
+  it("builds the prompt override ConfigMap with only `_common` (ADR-0020)", async () => {
     const configMap = (await renderPromptsOverrideConfigMap(join(repoRoot, "prompts"))) as {
       metadata: { name: string };
       data: Record<string, string>;
     };
     expect(configMap.metadata.name).toBe(PROMPTS_OVERRIDE_CONFIGMAP);
-    // Only `_common`, so the run must fall back to the image for every other key.
-    expect(Object.keys(configMap.data)).toEqual(["_common"]);
-    // Verbatim from the repo, not a fixture copy.
-    const onDisk = await readFile(join(repoRoot, "prompts", "_common"), "utf8");
-    expect(configMap.data["_common"]).toBe(onDisk);
+    // Exactly the one key, so the run must fall back to the image for the other
+    // four. The content is deliberately not compared against `prompts/`: that
+    // the image and the repo carry the same text is asserted once, by the Job's
+    // unit tests, and a second expression here is the one this ticket retires.
+    expect(Object.keys(configMap.data)).toEqual([PROMPTS_OVERRIDE_KEY]);
+    expect(configMap.data[PROMPTS_OVERRIDE_KEY]).not.toBe("");
   });
 });
 

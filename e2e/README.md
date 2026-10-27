@@ -92,6 +92,17 @@ served operation with its service (`upload-pack` / `receive-pack`) and exit code
 the scenario asserts on that, which is how "the git work was real, not mocked
 objects" is evidenced rather than claimed.
 
+### Why the prompt override runs for one ticket and not the next
+
+The harness applies the incident override ConfigMap (`remote-agent-prompts-override`,
+holding only `_common`) before the scenario, so the first ticket's Job resolves
+`prompt-source=_common:override` and falls back to the image for the other four
+keys. Once that run has read the override, the harness deletes the ConfigMap, so
+the second ticket is a real image-only run and every key logs
+`prompt-source=<key>:image`. Both halves of ADR-0020's hatch are therefore
+exercised in one pass, and a forgotten override would show up as `:override` on a
+run that should be image-only.
+
 ### Why the storage class exists
 
 `app/src/renders/job-template.ts` hardcodes `truenas-iscsi-delete` (ADR-0010).

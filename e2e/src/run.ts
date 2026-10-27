@@ -14,6 +14,8 @@ import {
 } from "./harness.js";
 import {
   NAMESPACE,
+  PROMPTS_OVERRIDE_CONFIGMAP,
+  PROMPTS_OVERRIDE_KEY,
   renderAppDeployment,
   renderAppRbac,
   renderJobRbac,
@@ -62,8 +64,9 @@ import {
  *   3. start the two stub services as Deployments, with a real bare git
  *      repository behind stub-github;
  *   4. start the App as a Deployment, pointed at the stubs by env only;
- *   5. drive the scenario: signed webhooks, two sequential claims, two Job runs,
- *      the closeout, the PR;
+ *   5. drive the scenario: signed webhooks, two sequential claims, two Job runs
+ *      (the first with the incident prompt override present, the second after it
+ *      is deleted), the closeout, the PR;
  *   6. assert the final world and print a sectioned log.
  *
  * The only difference between this and production is the three base URLs. There
@@ -731,14 +734,22 @@ async function sendWebhooks(
 
 /**
  * Both tickets are claimed, one after the other, and both claims are observed:
- * the second ticket's Job only appears once the first ticket's Job object is
- * gone (the k8s half of the Claim-gate, ADR-0013). So the assertion is that the
- * two Jobs appear in order and both reach Complete.
+ * the second ticket's Job only appears once the first ticket has closed (the spec
+ * loop advances one Frontier at a time). So the assertion is that the two Jobs
+ * appear in order and both reach Complete.
+ *
+ * This is also where the prompt override hatch is exercised end to end (ADR-0020).
+ * The harness applies `remote-agent-prompts-override` with only `_common`; the
+ * first ticket runs with it, and once that run has resolved its key surface the
+ * harness deletes the ConfigMap so the second ticket is a real image-only run.
+ * One pass therefore asserts both halves: `_common:override` + the rest `:image`,
+ * then every key `:image`.
  */
 async function observeSequentialClaims(runner: Runner, context: string, options: RunOptions): Promise<string[]> {
   const observed: string[] = [];
-  for (const ticketNumber of TICKET_NUMBERS) {
+  for (const [index, ticketNumber] of TICKET_NUMBERS.entries()) {
     const jobName = `agent-2017fighting-remote-agent-${ticketNumber}`;
+    const overrideKey = index === 0 ? PROMPTS_OVERRIDE_KEY : null;
     // If the App has already reported a pass failure, the Job will never appear:
     // report the App's own line now instead of timing out on "Job absent".
     await abortOnAppFailure(runner, context, `claim of ticket #${ticketNumber}`);
@@ -751,6 +762,16 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
       describe: (job) => (job === null ? "absent" : "present"),
     });
     observed.push(jobName);
+
+    // Remove the override while the first run is still going, once its runner has
+    // resolved the key surface. The next Job is created only after this ticket
+    // closes, so it mounts an empty override directory and must fall back to the
+    // image for every key — the absent case, for real rather than as a second
+    // assertion on the same world.
+    if (overrideKey !== null) {
+      await waitForPromptSource(runner, context, jobName, promptSourceLine(overrideKey, "override"), options.timeoutMs);
+      await deletePromptsOverride(runner, context);
+    }
 
     // The ticket must show `agent:in-progress` while its Job is running: this is
     // the label half of the claim being observable on GitHub, not just in k8s.
@@ -775,44 +796,123 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
       until: (value) => value?.metadata.annotations?.["remote-agent/run-result"] !== undefined,
       describe: (value) => JSON.stringify(Object.keys(value?.metadata.annotations ?? {})),
     });
-    await assertPromptOverrideExercised(runner, context, jobName);
+    await assertPromptSources(runner, context, jobName, overrideKey);
   }
   return observed;
 }
 
 /**
- * The override hatch exercised end to end (ADR-0020 / ticket #77).
- *
- * The harness applies a ConfigMap `remote-agent-prompts-override` holding only
- * `_common`. A ticket run must resolve that key from the override and every
- * other key from the image, which the runner states per key in its own log. If
- * the optional volume, `PROMPTS_DIR` or the per-key fallback regressed, this is
- * the only assertion that would notice.
+ * The runner's whole prompt key surface (ADR-0020), in resolution order. The
+ * harness only needs the five spellings to read a run's per-key source line out
+ * of its log; the product owns the surface itself (`PROMPT_TEMPLATE_KEYS`).
  */
-async function assertPromptOverrideExercised(runner: Runner, context: string, jobName: string): Promise<void> {
-  const logs = await runner.run(
+const PROMPT_KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"] as const;
+
+/** `prompt-source=<key>:<image|override>` — one line per resolved key (ADR-0020). */
+function promptSourceLine(key: string, source: "image" | "override"): string {
+  return `prompt-source=${key}:${source}`;
+}
+
+/** The lines a run must carry: `override` for the one key the fixture holds, `image` for the rest. */
+function expectedPromptSources(overrideKey: string | null): string[] {
+  return PROMPT_KEYS.map((key) => promptSourceLine(key, key === overrideKey ? "override" : "image"));
+}
+
+/** The runner container's log text, or null when the pod is not up yet or the read failed. */
+async function readRunnerLogs(runner: Runner, context: string, jobName: string): Promise<string | null> {
+  const result = await runner.run(
     "kubectl",
     ["--context", context, "-n", NAMESPACE, "logs", `job/${jobName}`, "-c", "runner"],
     { allowFailure: true },
   );
-  if (logs.exitCode !== 0) {
-    throw new Error(`could not read ${jobName}'s runner logs to check the prompt override: ${logs.stderr.trim()}`);
+  return result.exitCode === 0 ? result.stdout : null;
+}
+
+/** The trimmed lines of a log, as a set for exact-line membership. */
+function logLines(logs: string): Set<string> {
+  return new Set(logs.split("\n").map((line) => line.trim()));
+}
+
+/**
+ * Poll a Job's runner log until it carries `line`.
+ *
+ * The runner resolves the whole prompt key surface before it does any work
+ * (ADR-0020), so this returns early in the run — long before the App can create
+ * the next ticket's Job, which is what makes deleting the override here safe. A
+ * Job that reaches terminal without the line fails at once instead of waiting out
+ * the timeout.
+ */
+async function waitForPromptSource(
+  runner: Runner,
+  context: string,
+  jobName: string,
+  line: string,
+  timeoutMs: number,
+): Promise<void> {
+  const observed = await poll<{ logs: string; job: K8sJobObject | null }>({
+    description: `${jobName} runner logs ${line}`,
+    timeoutMs,
+    intervalMs: 1000,
+    observe: async () => ({
+      logs: (await readRunnerLogs(runner, context, jobName)) ?? "",
+      job: await kubectlJson<K8sJobObject>(runner, context, NAMESPACE, "job", jobName),
+    }),
+    until: ({ logs, job }) => logLines(logs).has(line) || (job !== null && isJobFinished(job)),
+    describe: ({ logs, job }) =>
+      `${logs === "" ? "(no logs yet)" : `${logs.split("\n").length} lines`}; job ${job === null ? "absent" : "present"}`,
+  });
+  if (!logLines(observed.logs).has(line)) {
+    throw new Error(`${jobName} finished without logging ${line}; the prompt override did not resolve`);
   }
-  const lines = new Set(logs.stdout.split("\n").map((line) => line.trim()));
-  const expected = [
-    "prompt-source=_common:override",
-    "prompt-source=implement-ticket:image",
-    "prompt-source=implement-spec:image",
-    "prompt-source=review-standards:image",
-    "prompt-source=review-spec:image",
-  ];
-  const missing = expected.filter((line) => !lines.has(line));
+}
+
+/**
+ * Delete the incident override so later runs fall back to the image (ADR-0020).
+ * A forgotten override is the failure this hatch exists to make visible, so the
+ * harness deletes it exactly the way the runbook tells an operator to.
+ */
+async function deletePromptsOverride(runner: Runner, context: string): Promise<void> {
+  await runner.run("kubectl", [
+    "--context",
+    context,
+    "-n",
+    NAMESPACE,
+    "delete",
+    "configmap",
+    PROMPTS_OVERRIDE_CONFIGMAP,
+    "--ignore-not-found",
+  ]);
+  runner.note(`deleted ${PROMPTS_OVERRIDE_CONFIGMAP}; the next run must fall back to the image`);
+}
+
+/**
+ * Assert a run's per-key prompt sources (ADR-0020). The override hatch is the
+ * only path that can turn a key's source to `override`, so these lines are the
+ * evidence that the optional volume, `PROMPTS_DIR` and the per-key fallback are
+ * wired end to end — and that a deleted object yields an image-only run.
+ */
+async function assertPromptSources(
+  runner: Runner,
+  context: string,
+  jobName: string,
+  overrideKey: string | null,
+): Promise<void> {
+  const logs = await readRunnerLogs(runner, context, jobName);
+  if (logs === null) {
+    throw new Error(`could not read ${jobName}'s runner logs to check the prompt sources`);
+  }
+  const lines = logLines(logs);
+  const missing = expectedPromptSources(overrideKey).filter((line) => !lines.has(line));
   if (missing.length > 0) {
     throw new Error(
-      `${jobName}'s runner logs are missing ${missing.join(", ")}; the prompt override hatch did not resolve per key`,
+      `${jobName}'s runner logs are missing ${missing.join(", ")}; the prompt hatch did not resolve per key`,
     );
   }
-  runner.note(`${jobName}: prompt override exercised (_common:override, rest :image)`);
+  runner.note(
+    overrideKey === null
+      ? `${jobName}: every prompt key from the image`
+      : `${jobName}: ${overrideKey} from the override, the rest from the image`,
+  );
 }
 
 /** The final world (ticket #41 acceptance criteria). */
