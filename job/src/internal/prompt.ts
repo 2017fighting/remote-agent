@@ -108,7 +108,7 @@ export function placeholderValues(input: RenderPromptInput): Record<string, stri
  * them reopen the ticket (ADR-0017), or the one only a spec-level run can act on
  * ("don't open the PR yet", "the acceptance surface changed: drop ticket X", #65).
  *
- * The closeout role has no continuity channel besides them: its every round starts on
+ * The spec role has no continuity channel besides them: its every round starts on
  * a **fresh volume** (ADR-0016), so the comments — the App's own failure comment from
  * the round before included — are the whole record of what happened.
  *

@@ -17,7 +17,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { reviewerExtension } from "../../src/internal/reviewer-tools.js";
 import { buildRegistry, type RunDeps } from "../../src/internal/runner.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import type { RunResultV1, WorkItemV1 } from "@remote-agent/shared";
+import type { RunResultV1, WorkItemTicket, WorkItemV1 } from "@remote-agent/shared";
 import { jobPaths, type JobPaths, type RunnerEnv } from "../../src/internal/env.js";
 
 const exec = promisify(execFile);
@@ -47,6 +47,31 @@ export const WORK_ITEM: WorkItemV1 = {
   body: "Seed the volume, run one role, push, annotate.",
   comments: [{ author: "maintainer", body: "go", createdAt: "2026-01-01T00:00:00.000Z" }],
 };
+
+/**
+ * The spec role's work item: a spec with a body, no comments of its own by default,
+ * and a one-ticket map — the shape `workBody()` renders as body → comments → map.
+ */
+export function specWorkItem(overrides: Partial<WorkItemV1> = {}): WorkItemV1 {
+  return {
+    ...WORK_ITEM,
+    number: 33,
+    body: "SPEC BODY TEXT",
+    comments: [],
+    tickets: [specTicket()],
+    ...overrides,
+  };
+}
+
+/** One sub-issue of the spec role's ticket map, carrying a comment of its own. */
+export function specTicket(): WorkItemTicket {
+  return {
+    number: 39,
+    title: "seed + runner",
+    body: "TICKET BODY TEXT",
+    comments: [{ author: "human", body: "ticket comment", createdAt: "2026-10-26T06:10:00.000Z" }],
+  };
+}
 
 export interface RunnerFixture {
   root: string;
