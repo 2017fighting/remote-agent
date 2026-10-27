@@ -15,9 +15,9 @@ import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { reviewerExtension } from "../../src/internal/reviewer-tools.js";
-import { buildRegistry } from "../../src/internal/runner.js";
+import { buildRegistry, type RunDeps } from "../../src/internal/runner.js";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import type { WorkItemV1 } from "@remote-agent/shared";
+import type { RunResultV1, WorkItemV1 } from "@remote-agent/shared";
 import { jobPaths, type JobPaths, type RunnerEnv } from "../../src/internal/env.js";
 
 const exec = promisify(execFile);
@@ -170,6 +170,39 @@ export async function cleanup(fixture: RunnerFixture | undefined): Promise<void>
   if (fixture) await rm(fixture.root, { recursive: true, force: true });
 }
 
+/** Everything the runner does to the outside world, in order. */
+export interface Recorded {
+  events: string[];
+  results: unknown[];
+}
+
+/**
+ * The run's dependencies with a fixture's real pieces, plus a recorder for the two
+ * things the runner does to the outside world — a push that really lands on the
+ * fixture's bare remote, and the annotation — and `noOwnRunResult` as the default
+ * own-Job answer (the shape of a Job that was created fresh).
+ */
+export function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<RunDeps> = {}): RunDeps {
+  return {
+    env: f.env,
+    paths: f.paths,
+    models: f.models,
+    log: () => {},
+    openStorage: openStorageFor(),
+    annotate: async (result: RunResultV1) => {
+      recorded.events.push("annotate");
+      recorded.results.push(result);
+    },
+    push: async () => {
+      recorded.events.push("push");
+      await git(["push", "origin", `HEAD:refs/heads/${f.env.branch}`], f.worktree);
+      return { kind: "pushed" } as const;
+    },
+    hasOwnRunResult: noOwnRunResult,
+    ...overrides,
+  };
+}
+
 export function openStorageFor(): (path: string) => Promise<Awaited<ReturnType<typeof openNodeSqliteStorage>>> {
   return (path: string) => openNodeSqliteStorage(path);
 }
@@ -306,6 +339,36 @@ export interface ToolResultRecord {
   isError: boolean;
   code?: string;
   text: string;
+}
+
+/**
+ * Every user entry the volume carries, oldest first: one rendered prompt per round,
+ * then a conflict turn's. The only prompt the model ever sees.
+ */
+export async function submittedPrompts(fixture: RunnerFixture): Promise<string[]> {
+  const harness = await Harness.open(
+    await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+    { models: fixture.models, registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const page = await root.entries({}, 200, undefined, BACKGROUND_CONTEXT);
+    return page.items
+      .flatMap((entry) => {
+        if (entry.kind !== "pi.user") return [];
+        const content = (entry.model?.[0] as { content?: unknown } | undefined)?.content;
+        return [typeof content === "string" ? content : JSON.stringify(content)];
+      })
+      .reverse();
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/** The first prompt on the conversation: round 1's. */
+export async function submittedPrompt(fixture: RunnerFixture): Promise<string> {
+  return (await submittedPrompts(fixture))[0] ?? "";
 }
 
 /** Every tool result the implementer's transcript holds, oldest first. */

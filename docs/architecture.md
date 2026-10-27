@@ -211,6 +211,8 @@ Frontier(spec) = 该 spec 的 sub-issue 里第一条通过 Claim-gate 的
 
 **表里的 `agent:implement` 一律读作「仅当人把它写在票上」。** 授权可以继承自父 spec（[§4.2](#42-frontier-与-gate)），而继承不落 label：一张只靠继承进门的票，每一行的 label 列里都没有 `agent:implement`，其余一字不差。这张表记的是 **App 写什么**，App 从不写、也不删 `agent:implement`。
 
+**T4 之后重开一张票 = 同一条 conversation 上的新一轮（[ADR-0017](adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）。** T4 只摘 `agent:in-progress`，`ready-for-agent` 留着，所以重开这张 issue 就把它送回 T2——**重开这一个动作就是「再来一轮」**，不需要人再贴一次 label。旧 Job 对象一过保留窗，Claim 复用同一块卷，而卷上的 conversation 已经报过结论：runner 发现自己是一块**新 Job**（自己 Job 上没有 `run-result` annotation）时就地重置这一轮的五个 per-run 文档（`run-completed` / `run-result` / `review-fixed-point` / `review-round` / `conflict-handoff`），在**同一块卷、同一条 conversation** 上开新的一轮，并把「第几轮 + 上一轮怎么结束的」前置到 prompt 里；票自己的评论也一并渲进 `{{work_body}}`，因为那是人写下「这次为什么重开」的地方。T5 / T6a–e 的人重入（T8）走的是同一条路——`markComplete()` 对每个报过结论的 outcome 都跑，`blocked` 的卷和 `done` 的卷一样「已报过结论」。App 侧一字不改：Claim 照旧只清 `expires-at`、不删卷。收尾 role 没有这一支（[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md) 的守卫只管它）。
+
 ```mermaid
 flowchart TD
     T0["open · []<br/>人 / 交互 agent 定出"] -->|"加 ready-for-agent"| T1["open · [ready-for-agent]"]
@@ -340,6 +342,8 @@ flowchart LR
 
 spec 的收尾 Job 同一套：自己的 Ticket PVC、同一个确定性命名规则（作用在 spec 号上）、同一条 `expires-at` 规则——但它多一个**更早的删除点：起下一块收尾 Job 时先删掉上一轮那块**（[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md)），因为收尾 role 的 conversation 报过一次就是终态的，同一块卷上的第二轮只能 no-op（「重跑不回到干净态」只对中断的 run 成立）。回收的单位是「这块卷 + 同名的 per-Job Secret」；Job 本身归 k8s 的 `ttlSecondsAfterFinished`（[ADR-0012](adr/0012-job-deletion-ttl.md)），App 既无 Job 的 `delete` 也无 `patch` 权。
 
+**票这边相反：卷被复用，一轮不够就再来一轮**（[ADR-0017](adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）。票的卷不因「已经报过结论」而失效——人重开一张 `done` 票、或重入一张 `blocked` 票，Claim 照旧复用这块卷（只清 `expires-at`），runner 在**新 Job** 上就地重置这一轮的 per-run 文档，在同一块卷、同一条 conversation 上开新的一轮。所以「Spent volume」只描述事实（「这块卷上的对话已经报过结论」），能不能再跑由 role 决定：收尾不能，票能。
+
 ## 7. Run result 与 Outcome 判定
 
 ```mermaid
@@ -372,6 +376,8 @@ flowchart TD
 以下三点是**需求与当时 ADR 之间真实存在的差距**，不是实现细节。按 `docs/agents/domain.md` 的要求显式列出。
 
 > 原本记在这里的第三处——S3N 建出的新票关闭后同一批 `newTickets` 会被再建一遍（[#49](https://github.com/2017fighting/remote-agent/issues/49)）——**已修**，机制是 spec 上的 `closeout-consumed` 标记（[ADR-0015](adr/0015-closeout-outcome-consumed-once.md)，行为见 [§3](#3-spec-循环) 与 [§4.5](#45-spec)）。心智模型从「收尾 Job 的 outcome 在新票关闭之后可能被消费两次」改成：**收尾 Job 的 outcome 只被消费一次，靠 spec 上的 label 记，而不是靠它建出来的票还开着**。
+
+> 下面三处中，**缺口 A 与缺口 C 已解决**（各自开头有已解决块，描述保留作背景），**缺口 B 仍开着**：运行中无法观察，也没有介入通道。
 
 ### 缺口 A：崩溃后是「重跑整个 ticket」，不是「接着之前跑」——**已解决**
 
@@ -411,11 +417,11 @@ flowchart LR
 
 **这里还有一个词汇缺口**：这个能力在 `GLOSSARY.md` 里没有名字。按 `docs/agents/domain.md`，不要直接造词——留给 `/domain-modeling` 定名，再开 ADR。
 
-### 缺口 C：重开一张 `done` 票不会真的再跑一轮（[#62](https://github.com/2017fighting/remote-agent/issues/62)）——**已决定，待实现**
+### 缺口 C：重开一张 `done` 票不会真的再跑一轮（[#62](https://github.com/2017fighting/remote-agent/issues/62)）——**已解决**
 
-> **已决定（[ADR-0017](adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）**：runner 在「新 Job + 已报过结论的票卷」上就地重置这一轮的五个 per-run 文档、把票的评论渲进 prompt、前置一段 round 头，开新的一轮；收尾 role 照旧拒绝。下面这段描述的是**改动前的行为**，实现落地时本节连同 §4.3 / §6 的相应句子一并改写（不要在实现之前删掉本节）。
+> **已解决（[ADR-0017](adr/0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)）**：runner 在「新 Job + 已报过结论的票卷」上就地重置这一轮的五个 per-run 文档、把票的评论渲进 `{{work_body}}`、前置一段 round 头，在同一块卷、同一条 conversation 上开新的一轮；收尾 role 照旧拒绝（[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md) 的守卫收窄为它的守卫）。行为见 [§4.3](#43-ticket) 末段与 [§6](#6-卷与回收)。下面这段是**改动前**的行为，保留作背景。
 
-现状：`done`（T4）关票时只摘 `agent:in-progress`，`ready-for-agent` 留着（[§4.3](#43-ticket)），所以重开一张票就把它送回 `Gate`；旧 Job 对象一过 30 分钟保留窗，Claim 就再占上它，而 Claim 复用的正是上一轮那块卷（[ADR-0011](adr/0011-ticket-pvc-recycling.md)）。卷上 `state/session.sqlite` 带着 `remote-agent.run-completed`，runner 的 open 路径于是直接 `already-complete=true` + exit 0、**不写 annotation** → Job `Complete` 而无 annotation → App 判 `no-result` → `agent:error`。人的新评论模型一眼没看，一轮 Job 的额度先没了。
+现状（改动前）：`done`（T4）关票时只摘 `agent:in-progress`，`ready-for-agent` 留着（[§4.3](#43-ticket)），所以重开一张票就把它送回 `Gate`；旧 Job 对象一过 30 分钟保留窗，Claim 就再占上它，而 Claim 复用的正是上一轮那块卷（[ADR-0011](adr/0011-ticket-pvc-recycling.md)）。卷上 `state/session.sqlite` 带着 `remote-agent.run-completed`，runner 的 open 路径于是直接 `already-complete=true` + exit 0、**不写 annotation** → Job `Complete` 而无 annotation → App 判 `no-result` → `agent:error`。人的新评论模型一眼没看，一轮 Job 的额度先没了。
 
 这与 ADR-0011 写下的意图相反：重开一张 `done` 票**要的是**「同一条 conversation 上再跑一轮，模型带着『我刚说过做完了』的历史」。`#retry-<n>`（[#52](https://github.com/2017fighting/remote-agent/issues/52)）只覆盖 `unanswered`（已结算的 **input** submission），不覆盖 `done`——`isComplete()` 在 retry-key 之前就被读了，报过结论的卷永远跑不起来。
 

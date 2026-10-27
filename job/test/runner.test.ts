@@ -13,12 +13,15 @@ import {
   run,
 } from "../src/internal/runner.js";
 import { ReviewFixedPointDoc } from "../src/internal/fixed-point-doc.js";
-import { ConflictHandoffDoc, RunResultDoc } from "../src/internal/run-docs.js";
+import { resetForNewRound } from "../src/internal/round.js";
+import { ConflictHandoffDoc, RunCompletedDoc, RunResultDoc } from "../src/internal/run-docs.js";
 import { readRunnerEnv, StartupError, type RunnerEnv } from "../src/internal/env.js";
 import { runRunner } from "../src/runner.js";
 import {
   blockedCall,
   cleanup,
+  depsFor,
+  codeReviewCall,
   finishSpecCall,
   finishTicketCall,
   fauxAssistantMessage,
@@ -26,7 +29,12 @@ import {
   git,
   noOwnRunResult,
   openStorageFor,
+  reviewerConversations,
+  reviewerReport,
   runnerFixture,
+  type Recorded,
+  submittedPrompt,
+  submittedPrompts,
   WORK_ITEM,
   type RunnerFixture,
 } from "./support/runner-fixture.js";
@@ -36,35 +44,6 @@ afterEach(async () => {
   await cleanup(fixture);
   fixture = undefined;
 });
-
-/** Everything the runner does to the outside world, in order. */
-interface Recorded {
-  events: string[];
-  results: unknown[];
-}
-
-function depsFor(f: RunnerFixture, recorded: Recorded, overrides: Partial<Parameters<typeof run>[0]> = {}) {
-  return {
-    env: f.env,
-    paths: f.paths,
-    models: f.models,
-    log: () => {},
-    openStorage: openStorageFor(),
-    annotate: async (result: unknown) => {
-      recorded.events.push("annotate");
-      recorded.results.push(result);
-    },
-    push: async () => {
-      recorded.events.push("push");
-      await git(["push", "origin", "HEAD:refs/heads/agent/spec-33"], f.worktree);
-      return { kind: "pushed" } as const;
-    },
-    // This run's own Job object carries no run-result annotation: the shape of a
-    // Job that was created fresh (see `noOwnRunResult`).
-    hasOwnRunResult: noOwnRunResult,
-    ...overrides,
-  };
-}
 
 /** Read one durable document the way a later process would. */
 async function readDoc(f: RunnerFixture, token: typeof ReviewFixedPointDoc): Promise<unknown> {
@@ -119,7 +98,12 @@ async function appendSettledWrite(f: RunnerFixture): Promise<void> {
 }
 
 /** The rendered prompt is the user entry of the run — the only prompt the model ever sees. */
-async function submittedPrompt(f: RunnerFixture): Promise<string> {
+
+/** Put a specific committed round on the volume: the state a crash or a corruption leaves. */
+async function writeCommittedRun(
+  f: RunnerFixture,
+  state: { completedAt: string; payload: string },
+): Promise<void> {
   const harness = await Harness.open(
     await openNodeSqliteStorage(f.paths.sessionDatabase),
     { models: f.models, registry: createRegistry() },
@@ -127,11 +111,10 @@ async function submittedPrompt(f: RunnerFixture): Promise<string> {
   );
   try {
     const root = await harness.root(BACKGROUND_CONTEXT);
-    const page = await root.entries({}, 100, undefined, BACKGROUND_CONTEXT);
-    const user = page.items.find((entry) => entry.kind === "pi.user");
-    const message = user?.model?.[0] as { content?: unknown } | undefined;
-    const content = message?.content;
-    return typeof content === "string" ? content : JSON.stringify(content);
+    await root.commit(async (tx) => {
+      (await tx.doc(RunCompletedDoc, root.id)).completedAt = state.completedAt;
+      (await tx.doc(RunResultDoc, root.id)).payload = state.payload;
+    }, BACKGROUND_CONTEXT);
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
   }
@@ -216,6 +199,42 @@ describe("runner: one run to a Result tool", () => {
     expect(prompt).not.toMatch(/\{\{\s*[a-z_]+\s*\}\}/);
     // The templates never carry slash commands: durable has no such layer (ADR-0004).
     expect(prompt).not.toMatch(/^\s*\/[a-z-]+\s*$/m);
+  });
+
+  /**
+   * ADR-0017. A ticket's body is its acceptance surface, but the comments are where
+   * a human writes a correction — including the one that made them reopen the ticket.
+   * They were never rendered at all, so the model could not read the words the whole
+   * round exists to answer. Same shape as the spec role's ticket map: one reader
+   * learns one format.
+   */
+  it("renders the ticket's own comments into the body, oldest first", async () => {
+    fixture = await runnerFixture();
+    const workItem = {
+      ...WORK_ITEM,
+      comments: [
+        { author: "remote-agent[bot]", body: "Done: pushed a fix", createdAt: "2026-10-26T05:26:00.000Z" },
+        { author: "maintainer", body: "reopened: the CI job still fails", createdAt: "2026-10-26T05:44:00.000Z" },
+      ],
+    };
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall()]);
+    await run(depsFor(fixture, recorded, { env: { ...fixture.env, workItem } }));
+
+    const prompt = await submittedPrompt(fixture);
+    expect(prompt).toContain("## Comments");
+    expect(prompt).toContain("**maintainer** (2026-10-26T05:44:00.000Z):");
+    expect(prompt).toContain("reopened: the CI job still fails");
+    expect(prompt.indexOf("Done: pushed a fix")).toBeLessThan(prompt.indexOf("reopened: the CI job still fails"));
+  });
+
+  it("renders no comment section for a ticket with no comments", async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall()]);
+    await run(depsFor(fixture, recorded, { env: { ...fixture.env, workItem: { ...WORK_ITEM, comments: [] } } }));
+
+    expect(await submittedPrompt(fixture)).not.toContain("## Comments");
   });
 
   it("pushes before it annotates, and annotates exactly once", async () => {
@@ -308,33 +327,254 @@ describe("runner: one run to a Result tool", () => {
     expect(fixture.pendingResponses()).toBe(0);
   });
 
-  // The guard is not role-gated (ADR-0016): it defends a role-independent
-  // invariant, and the ticket side is where it actually fires today (a reopened
-  // `done` ticket re-claims on its spent volume, #62).
-  it.each(["implement-ticket", "implement-spec"] as const)(
-    "refuses a new Job on a spent volume instead of ending Complete with no annotation (%s)",
-    async (role) => {
-      fixture = await runnerFixture();
-      const env: RunnerEnv = { ...fixture.env, role, workItem: { ...WORK_ITEM, number: 33 } };
-      const first: Recorded = { events: [], results: [] };
-      fixture.script([role === "implement-spec" ? finishSpecCall({ prBody: "p" }) : finishTicketCall()]);
-      await run(depsFor(fixture, first, { env }));
+  /**
+   * ADR-0017. The ticket role's mirror image of the closeout shape above: the
+   * volume already reported, but the Job is new — the human reopened a `done`
+   * ticket, or re-entered a `blocked` one — so there is a round to run, not a
+   * no-op and not a refusal. The conversation stays on purpose: the previous
+   * round's history is exactly what makes "reopened, with new comments" worth
+   * running (ADR-0011).
+   */
+  it("runs a new round when a new Job finds a reported ticket volume", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("did the thing")]);
+    expect((await run(depsFor(fixture, first))).alreadyComplete).toBe(false);
+    expect(first.results[0]).toMatchObject({ summary: "did the thing" });
 
-      // The Job object went away (its TTL) and a new one was created under the same
-      // deterministic name: no annotation on this Job, a finished conversation on
-      // the volume.
-      const second: Recorded = { events: [], results: [] };
-      const log: string[] = [];
-      const outcome = await run(depsFor(fixture, second, { env, log: (line: string) => log.push(line) }));
+    // The Job object left its retention window and a new one appeared under the same
+    // deterministic name: no annotation on this Job, a reported conversation on the
+    // volume.
+    const second: Recorded = { events: [], results: [] };
+    const log: string[] = [];
+    fixture.script([finishTicketCall("did the second thing")]);
+    const outcome = await run(depsFor(fixture, second, { log: (line: string) => log.push(line) }));
 
-      expect(outcome.exitCode).toBe(RUNNER_EXIT.fatal);
-      // Nothing was pushed and nothing was annotated: the App reads a Failed Job, not
-      // a Complete one with an empty result.
-      expect(second.events).toEqual([]);
-      expect(log.join("\n")).toContain("runner-refused");
-      expect(log.join("\n")).toContain("spent-volume");
-    },
-  );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.alreadyComplete).toBe(false);
+    expect(second.events).toEqual(["push", "annotate"]);
+    // The new round's own result, not the previous round's re-annotated.
+    expect(second.results[0]).toMatchObject({ outcome: "done", summary: "did the second thing" });
+    // The round says which round it is and how the one before it ended, read before
+    // the reset cleared it.
+    expect(log.join("\n")).toContain("runner-round-start round=2 previous-outcome=done previous-completed-at=2");
+    // The submission key moved on by itself (#52): the base key is settled, so the
+    // new round runs under its numbered retry — without which the dedup key would
+    // hand the new round the finished run's record.
+    const base = `remote-agent:${WORK_ITEM.repo}#${WORK_ITEM.number}:implement-ticket`;
+    expect(await submissionRequestIds(fixture)).toEqual([base, `${base}#retry-1`]);
+
+    // A third round keeps counting: the number counts rounds that reported, not Jobs.
+    const third: Recorded = { events: [], results: [] };
+    const thirdLog: string[] = [];
+    fixture.script([finishTicketCall("did the third thing")]);
+    const thirdOutcome = await run(depsFor(fixture, third, { log: (line: string) => thirdLog.push(line) }));
+    expect(thirdOutcome.exitCode).toBe(0);
+    expect(thirdLog.join("\n")).toContain("runner-round-start round=3 previous-outcome=done");
+    expect((await submittedPrompts(fixture))[2]).toContain("# Round 3 of this ticket");
+  });
+
+  it("leaves the spec role's body without a comment section", async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    const env: RunnerEnv = { ...fixture.env, role: "implement-spec", workItem: { ...WORK_ITEM, number: 33 } };
+    fixture.script([finishSpecCall({ prBody: "p" })]);
+    await run(depsFor(fixture, recorded, { env }));
+
+    // The ticket role's own comments are this change; a spec's own comments are a
+    // separate gap (#65), so the spec role's body must not grow one here.
+    const prompt = await submittedPrompt(fixture);
+    expect(prompt).not.toContain("## Comments");
+    expect(prompt).toContain(WORK_ITEM.body);
+  });
+
+  /**
+   * ADR-0017. A round's review is per-round: its fixed point is where **that**
+   * round's work started, and its `code_review` round is its own. Inheriting either
+   * from the round that already reported would review the wrong range, or bounce the
+   * new round's review as "already ran" and let its work go unreviewed.
+   */
+  it("gives the new round its own fixed point and its own review round", async () => {
+    fixture = await runnerFixture();
+    const { writeFile } = await import("node:fs/promises");
+    const commit = async (name: string): Promise<string> => {
+      await writeFile(join(fixture!.worktree, name), "work\n");
+      await git(["add", "-A"], fixture!.worktree);
+      await git(["commit", "-m", `work: ${name} (#39)`], fixture!.worktree);
+      return git(["rev-parse", "HEAD"], fixture!.worktree);
+    };
+    const beforeWork = await git(["rev-parse", "HEAD"], fixture.worktree);
+    const headAfterRound1 = await commit("round-1.txt");
+
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([
+      codeReviewCall(beforeWork),
+      reviewerReport("round 1 spec"),
+      reviewerReport("round 1 standards"),
+      finishTicketCall("round 1 done"),
+    ]);
+    await run(depsFor(fixture, first, { standardsFiles: async () => [] }));
+    expect(await readDoc(fixture, ReviewFixedPointDoc)).toMatchObject({ fixedPoint: headAfterRound1 });
+    expect(await reviewerConversations(fixture)).toHaveLength(2);
+
+    const headAfterRound2 = await commit("round-2.txt");
+    const second: Recorded = { events: [], results: [] };
+    const log: string[] = [];
+    fixture.script([
+      codeReviewCall(headAfterRound1),
+      reviewerReport("round 2 spec"),
+      reviewerReport("round 2 standards"),
+      finishTicketCall("round 2 done"),
+    ]);
+    const outcome = await run(
+      depsFor(fixture, second, { standardsFiles: async () => [], log: (line: string) => log.push(line) }),
+    );
+
+    expect(outcome.result).toMatchObject({ outcome: "done", summary: "round 2 done" });
+    // Recomputed for this round, not inherited from the one that reported.
+    expect(await readDoc(fixture, ReviewFixedPointDoc)).toMatchObject({
+      fixedPoint: headAfterRound2,
+      source: "run-start",
+    });
+    expect(log.join("\n")).toContain(`fixed-point sha=${headAfterRound2} source=run-start`);
+    // Its own round ran: two reviewer conversations per round, and the scripted
+    // provider was asked for exactly the four reports it had.
+    expect(await reviewerConversations(fixture)).toHaveLength(4);
+    expect(fixture.pendingResponses()).toBe(0);
+  });
+
+  /**
+   * ADR-0017. The same entrance, one outcome over: `markComplete()` runs for every
+   * reported round, so a `blocked` round leaves the volume just as reported as a
+   * `done` one — and the human's re-entry (drop `agent:blocked`, swap
+   * `ready-for-human` back to `ready-for-agent`) is exactly the re-entry ADR-0011
+   * keeps the volume for.
+   */
+  it("runs a new round after a blocked round too", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([blockedCall({ summary: "needs a decision", commentBody: "change X" })]);
+    expect((await run(depsFor(fixture, first))).result).toMatchObject({ outcome: "blocked" });
+
+    const second: Recorded = { events: [], results: [] };
+    const log: string[] = [];
+    fixture.script([finishTicketCall("did it after all")]);
+    const outcome = await run(depsFor(fixture, second, { log: (line: string) => log.push(line) }));
+
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.alreadyComplete).toBe(false);
+    expect(second.results[0]).toMatchObject({ outcome: "done", summary: "did it after all" });
+    expect(log.join("\n")).toContain("runner-round-start round=2 previous-outcome=blocked");
+  });
+
+  /**
+   * ADR-0017. The previous round's history is in the conversation, but nothing there
+   * says "the human reopened this and this is a new round" — the model's own last act
+   * was reporting `done`. The header is the runner's one line about that, and it is
+   * prepended: it is what the model reads first.
+   */
+  it("tells the new round that it is one, and leaves the first round without a header", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("round 1")]);
+    await run(depsFor(fixture, first));
+
+    const second: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("round 2")]);
+    await run(depsFor(fixture, second));
+
+    const prompts = await submittedPrompts(fixture);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain("# Round 1 of this ticket");
+    expect(prompts[1]).toContain("# Round 2 of this ticket");
+    expect(prompts[1]).toContain("reported **done**");
+    expect(prompts[1]!.indexOf("# Round 2 of this ticket")).toBeLessThan(prompts[1]!.indexOf("# Who you are"));
+  });
+
+  /**
+   * ADR-0017. The round boundary is one commit, and a pod that dies right after it
+   * leaves "a clean unfinished conversation that is still round 2". The number comes
+   * from the settled submissions, which the reset never touches — so the next pod
+   * names the round correctly even though the facts about the previous one are gone.
+   * The header must degrade there, not throw.
+   */
+  it("still names the round when the previous round's facts were already cleared", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("round 1")]);
+    await run(depsFor(fixture, first));
+
+    // The crash window: the round boundary landed, the first model request never did.
+    const harness = await Harness.open(
+      await openNodeSqliteStorage(fixture.paths.sessionDatabase),
+      { models: fixture.models, registry: createRegistry() },
+      BACKGROUND_CONTEXT,
+    );
+    try {
+      await resetForNewRound(harness, await harness.root(BACKGROUND_CONTEXT));
+    } finally {
+      await harness.close(BACKGROUND_CONTEXT);
+    }
+
+    const second: Recorded = { events: [], results: [] };
+    const log: string[] = [];
+    fixture.script([finishTicketCall("round 2 after the crash")]);
+    const outcome = await run(depsFor(fixture, second, { log: (line: string) => log.push(line) }));
+
+    expect(outcome.exitCode).toBe(0);
+    expect(second.results[0]).toMatchObject({ summary: "round 2 after the crash" });
+    // Not a round boundary this time — the boundary already happened — but still round 2.
+    expect(log.join("\n")).not.toContain("runner-round-start");
+    const prompts = await submittedPrompts(fixture);
+    expect(prompts[1]).toContain("# Round 2 of this ticket");
+    expect(prompts[1]).not.toContain("reported **done**");
+  });
+
+  it("degrades the header when the previous round's outcome is unreadable", async () => {
+    fixture = await runnerFixture();
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("round 1")]);
+    await run(depsFor(fixture, first));
+
+    // A volume whose committed run result no longer parses: the header says what it
+    // still knows (which round) instead of inventing an outcome, and the round runs.
+    await writeCommittedRun(fixture, { completedAt: "2026-10-26T05:26:00.000Z", payload: "not json" });
+
+    const second: Recorded = { events: [], results: [] };
+    fixture.script([finishTicketCall("round 2")]);
+    const outcome = await run(depsFor(fixture, second));
+
+    expect(outcome.exitCode).toBe(0);
+    const prompt = (await submittedPrompts(fixture))[1]!;
+    expect(prompt).toContain("# Round 2 of this ticket");
+    expect(prompt).toContain("already ran and reported its outcome");
+    expect(prompt).not.toContain("reported **done**");
+  });
+
+  // The guard narrows to the closeout role (ADR-0017): a spent closeout volume can
+  // only mean the App's reclaim did not happen, which must stay loud. The ticket
+  // role's same shape is a normal path and starts a round instead.
+  it("still refuses a new Job on a spent closeout volume", async () => {
+    fixture = await runnerFixture();
+    const env: RunnerEnv = { ...fixture.env, role: "implement-spec", workItem: { ...WORK_ITEM, number: 33 } };
+    const first: Recorded = { events: [], results: [] };
+    fixture.script([finishSpecCall({ prBody: "p" })]);
+    await run(depsFor(fixture, first, { env }));
+
+    // The Job object went away (its TTL) and a new one was created under the same
+    // deterministic name: no annotation on this Job, a finished conversation on
+    // the volume.
+    const second: Recorded = { events: [], results: [] };
+    const log: string[] = [];
+    const outcome = await run(depsFor(fixture, second, { env, log: (line: string) => log.push(line) }));
+
+    expect(outcome.exitCode).toBe(RUNNER_EXIT.fatal);
+    // Nothing was pushed and nothing was annotated: the App reads a Failed Job, not
+    // a Complete one with an empty result.
+    expect(second.events).toEqual([]);
+    expect(log.join("\n")).toContain("runner-refused");
+    expect(log.join("\n")).toContain("spent-volume");
+  });
 
   it("keeps exiting 0 when this Job's own annotation cannot be read", async () => {
     fixture = await runnerFixture();
@@ -355,6 +595,19 @@ describe("runner: one run to a Result tool", () => {
 
     expect(outcome.exitCode).toBe(0);
     expect(second.events).toEqual([]);
+
+    // And it reset nothing (ADR-0017): "cannot tell" must not start a round nobody
+    // asked for. The next Job still reads the round the volume actually carries —
+    // `previous-outcome=done` is only knowable if the reset never happened, since a
+    // reset clears the completed run and the result with it.
+    const third: Recorded = { events: [], results: [] };
+    const log: string[] = [];
+    fixture.script([finishTicketCall("the real round 2")]);
+    const thirdOutcome = await run(depsFor(fixture, third, { log: (line: string) => log.push(line) }));
+
+    expect(thirdOutcome.exitCode).toBe(0);
+    expect(third.results[0]).toMatchObject({ summary: "the real round 2" });
+    expect(log.join("\n")).toContain("runner-round-start round=2 previous-outcome=done");
   });
 
   it("resumes an unfinished run instead of submitting a second one", async () => {
@@ -456,6 +709,14 @@ describe("runner: one run to a Result tool", () => {
     expect(outcome.resumed).toBe(false);
     expect(second.events).toEqual(["push", "annotate"]);
     expect(second.results[0]).toMatchObject({ outcome: "done", summary: "finished on the retry" });
+
+    // And the retry is still round 1 (ADR-0017): a round is a run that **reported**,
+    // and this conversation has reported nothing yet. Counting settled submissions
+    // instead would hand the retry a header claiming a previous round already
+    // reported an outcome — a lie the model has no way to check.
+    const prompts = await submittedPrompts(fixture);
+    expect(prompts[1]).not.toContain("# Round 2 of this ticket");
+    expect(prompts[1]).not.toContain("already ran and reported");
   });
 
   /**
@@ -567,27 +828,6 @@ describe("runner: one run to a Result tool", () => {
 });
 
 /** Every user entry the volume carries, oldest first: the run's prompt, then a conflict turn's. */
-async function submittedPrompts(f: RunnerFixture): Promise<string[]> {
-  const harness = await Harness.open(
-    await openNodeSqliteStorage(f.paths.sessionDatabase),
-    { models: f.models, registry: createRegistry() },
-    BACKGROUND_CONTEXT,
-  );
-  try {
-    const root = await harness.root(BACKGROUND_CONTEXT);
-    const page = await root.entries({}, 200, undefined, BACKGROUND_CONTEXT);
-    return page.items
-      .flatMap((entry) => {
-        if (entry.kind !== "pi.user") return [];
-        const content = (entry.model?.[0] as { content?: unknown } | undefined)?.content;
-        return [typeof content === "string" ? content : JSON.stringify(content)];
-      })
-      .reverse();
-  } finally {
-    await harness.close(BACKGROUND_CONTEXT);
-  }
-}
-
 /** A second clone of the bare remote, standing in for the ticket that pushed first. */
 async function otherTicket(f: RunnerFixture): Promise<string> {
   const other = join(f.root, "other");

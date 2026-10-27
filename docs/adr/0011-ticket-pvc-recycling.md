@@ -25,6 +25,7 @@ v1 每 ticket 一块 PVC、不随 Job 删（[ADR-0008](0008-durable-runtime-base
 | **S3** 收尾 `done`（已开 PR） | `expires-at = 判定时刻 + 7d` | App：到点删 |
 | **S4** 收尾 `blocked` / **S5** 收尾 `error` | `expires-at = 判定时刻 + 30d` | App：到点删 |
 | **S3N → 下一轮** / **S6** 重入收尾 | 上一轮判过、下一块收尾 Job 要起 | App：起 Job 前删（卷 + 同名 Secret，[ADR-0016](0016-closeout-round-starts-on-a-fresh-volume.md)） |
+| **T4 → 重开** / **T8** 重入票 | 上一轮已报过结论，下一块 Job 要起 | **不删**：Claim 只清 `expires-at`，runner 就地在同一块卷上开新的一轮（[ADR-0017](0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md)） |
 | **T3** 被占 / **T3L** 自环 | 无 `expires-at`（Claim 时清） | 不删 |
 | **S2** 收尾在跑 | 无 `expires-at` | 不删 |
 | 无 outcome 的孤儿 | 无 `expires-at` | App：无活 Job ∧ 年龄 > 30d |

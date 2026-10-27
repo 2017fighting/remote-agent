@@ -20,7 +20,8 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
 import { RUNNER_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
 import type { JobPaths, RunnerEnv } from "./env.js";
-import { renderPrompt } from "./prompt.js";
+import { renderPrompt, roundHeader, type RoundContext } from "./prompt.js";
+import { readPreviousRound, resetForNewRound, type PreviousRound } from "./round.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
 import {
   ConflictHandoffDoc,
@@ -157,17 +158,28 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
 
   try {
     const root = await harness.root(context, { agent: implementerAgent(deps) });
+    // Which round this Job is (ADR-0017). The same count the retry key uses, read
+    // once and used by both the boundary log and the prompt header; the reset below
+    // touches no submission, so a round that crashes keeps its number.
+    const roundNumber = await roundNumberFor(deps, storage, root);
+    let previous: PreviousRound | null = null;
     if (await isComplete(harness, root)) {
-      // The volume's conversation is finished. Which Job is asking, though?
+      // The volume's conversation already reported. Which Job is asking, though?
       //
       // A **replacement pod of the Job that finished it** finds its own run result
-      // already on that Job and has nothing left to do. A **new Job on a spent
-      // volume** — the shape that made a second closeout round do nothing (#60) —
-      // carries no annotation, and returning exit 0 there would end the Job
-      // `Complete` with nothing reported: a shape no reader, human or App, can tell
-      // apart from a crashed runner. Refuse instead (exit 78 → `podFailurePolicy`
-      // `FailJob` → the App judges `unrecoverable`, whose evidence comment already
-      // tells the human to discard the volume). See ADR-0016.
+      // already on that Job and has nothing left to do. A **new Job on a reported
+      // volume** carries no annotation, and that shape has two different answers,
+      // by role (ADR-0017):
+      //
+      // - **closeout**: the volume is spent for good — the App reclaims it at the
+      //   start of every round (ADR-0016), so finding one here means the reclaim did
+      //   not happen, which must stay loud. Refuse (exit 78 → `podFailurePolicy`
+      //   `FailJob` → the App judges `unrecoverable`, whose evidence comment already
+      //   tells the human to discard the volume).
+      // - **ticket**: this is the normal path. The human reopened a `done` ticket or
+      //   re-entered a `blocked` one, and a ticket's volume is meant to be reused
+      //   (ADR-0011): reset the round's documents and run the next round on this same
+      //   conversation, with the previous round's history in front of the model.
       //
       // Presence is the whole test: a Job object is created fresh per round, so an
       // annotation can only ever be this Job's own.
@@ -176,7 +188,9 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
         reported = await deps.hasOwnRunResult();
       } catch (error) {
         // "Cannot tell which Job this is." Failing the run would FailJob a Job whose
-        // result may already have landed, so keep the old behaviour instead.
+        // result may already have landed, so keep the old behaviour instead — and
+        // reset nothing: starting a round nobody asked for is the other half of the
+        // same mistake.
         deps.log(
           `runner-open conversation=${ROOT_CONVERSATION_ID} already-complete=true own-result-unreadable=true detail=${
             error instanceof Error ? error.message : String(error)
@@ -184,13 +198,26 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
         );
         return { exitCode: 0, resumed: false, alreadyComplete: true };
       }
-      if (!reported) {
+      if (!reported && deps.env.role !== "implement-ticket") {
         deps.log(`runner-refused reason=spent-volume role=${deps.env.role} job=${deps.env.jobName}`);
         return { exitCode: RUNNER_EXIT.fatal, resumed: false, alreadyComplete: true };
       }
-      deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} already-complete=true`);
-      return { exitCode: 0, resumed: false, alreadyComplete: true };
+      if (!reported) {
+        // A new round on this conversation. Everything the round must *say* about the
+        // one before it is read first: the reset below clears it (ADR-0017).
+        previous = await readPreviousRound(harness, root);
+        await resetForNewRound(harness, root);
+        deps.log(
+          `runner-round-start round=${roundNumber} previous-outcome=${previous.outcome ?? "unknown"} previous-completed-at=${
+            previous.completedAt
+          }`,
+        );
+      } else {
+        deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} already-complete=true`);
+        return { exitCode: 0, resumed: false, alreadyComplete: true };
+      }
     }
+    const round: RoundContext = { round: roundNumber, previous };
 
     // Outcome already decided but not delivered (the previous pod died before the push
     // landed): go straight to push + annotate, never back through the agent. A claimed
@@ -204,7 +231,7 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
     let submission = pending;
     if (decided === undefined && submission === undefined) {
       const fixedPoint = await readOrComputeFixedPoint(deps, harness, root);
-      submission = await submitRun(deps, storage, root, fixedPoint);
+      submission = await submitRun(deps, storage, root, fixedPoint, round);
       deps.crashAfterSubmit?.();
     }
     deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} resumed=${resumed}`);
@@ -377,13 +404,24 @@ async function resumeUnfinished(deps: RunDeps, harness: HarnessHandle): Promise<
   return pending ? await harness.submission(pending.id, context) : undefined;
 }
 
-async function submitRun(deps: RunDeps, storage: Storage, root: Conversation, fixedPoint: ReviewFixedPoint): Promise<Submission> {
-  const prompt = await renderPrompt({
+async function submitRun(
+  deps: RunDeps,
+  storage: Storage,
+  root: Conversation,
+  fixedPoint: ReviewFixedPoint,
+  round: RoundContext,
+): Promise<Submission> {
+  const rendered = await renderPrompt({
     role: deps.env.role,
     workItem: deps.env.workItem,
     fixedPoint: fixedPoint.fixedPoint,
     promptsDir: deps.paths.prompts,
   });
+  // The header goes in front of the rendered prompt, not into the templates: the
+  // facts it states (which round, how the last one ended) live on the volume, and
+  // the ConfigMap's key and placeholder surface stays untouched (ADR-0004/0017).
+  const header = roundHeader(round);
+  const prompt = header === "" ? rendered : `${header}\n\n${rendered}`;
   // Deduplication key: a process that reaches this line again after a crash finds
   // the same submission instead of starting a second run (ADR-0008).
   return submitInput(deps, storage, root, prompt, "");
@@ -571,6 +609,29 @@ async function claimConflictHandoff(
 /** A submission that can no longer change: the run it admitted has ended. */
 function isSettled(submission: SubmissionRecord): boolean {
   return submission.status === "done" || submission.status === "unanswered";
+}
+
+/**
+ * Which round this Job is (ADR-0017): round 1 is a fresh conversation, and every
+ * round that **reported** adds one.
+ *
+ * "Reported" is the whole point, and it is why the count filters on the settled
+ * status rather than taking every settled submission: a run that died `unanswered`
+ * (a model error) never reported anything, so the pod that retries it is still
+ * running the same round (#52). Counting it as a round would hand that retry a
+ * header claiming a previous round already reported an outcome — a lie the model
+ * cannot check.
+ *
+ * The count comes from the same scan that numbers the retry key. The conflict
+ * turn's family (`…:implement-ticket#conflict`) is deliberately outside it, or the
+ * two families would consume each other's numbers (#58). The reset at a round
+ * boundary touches no submission, so the number a crashed new round reads on its
+ * next pod is the same one.
+ */
+async function roundNumberFor(deps: RunDeps, storage: Storage, root: Conversation): Promise<number> {
+  const settled = await settledInputSubmissions(storage, root, runRequestId(deps));
+  const reported = settled.filter((submission) => submission.status === "done").length;
+  return reported + 1;
 }
 
 /**
