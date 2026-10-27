@@ -174,9 +174,10 @@ prompt 模板**随 Job 镜像发布**（[ADR-0020](adr/0020-prompts-travel-with-
 
 1. `kubectl create configmap remote-agent-prompts-override -n remote-agent --from-file=<key>=<path>`（`--from-file` 的文件名就是 prompt key）。
 2. 等下一轮 Job 起来，看它的日志：那个 key 是 `prompt-source=<key>:override`，其余仍是 `:image`。
-3. **用完删掉**：`kubectl delete configmap remote-agent-prompts-override -n remote-agent`。忘记删就会一直生效，而这是唯一的线索来源。
+3. 删之前先确认没有在跑的 Job：`kubectl get jobs -n remote-agent` 为空再删（spec [#75](https://github.com/2017fighting/remote-agent/issues/75) 的事故前置）。
+4. **用完删掉**：`kubectl delete configmap remote-agent-prompts-override -n remote-agent`。忘记删就会一直生效，而这是唯一的线索来源。
 
-（runner 在**每一轮开始时**一次性解析整个 key 面，不是在每次读模板时惰性读；所以删覆盖 ConfigMap 只影响之后才起跑的那些轮——它们读回镜像里的模板，在跑的 Job 已经读过，不受影响。最初设想里「删之前先确认 `kubectl get jobs -n remote-agent` 为空」那条前置因此不再需要，理由见 [ADR-0020](adr/0020-prompts-travel-with-the-image.md) 与 [#76](https://github.com/2017fighting/remote-agent/issues/76)。）
+（runner 在**每一轮开始时**一次性解析整个 key 面，不是在每次读模板时惰性读；所以第 3 步那条确认只是保守起见——在跑的 Job 已经读过覆盖，删掉不会打断它。这个「eager 解析」是 [#76](https://github.com/2017fighting/remote-agent/issues/76) 的实现决定，与 spec 原文假设的「每轮惰性读取」不同，理由见 [ADR-0020](adr/0020-prompts-travel-with-the-image.md)。）
 
 渲染顺序已定：runner 先读 `_common`、再读 role 模板，拼起来后一次把 `{{...}}` 全部替掉（未知占位符直接报错，不把字面值交给模型）。
 

@@ -9,6 +9,7 @@ import {
   NAMESPACE,
   PROMPTS_OVERRIDE_CONFIGMAP,
   PROMPTS_OVERRIDE_KEY,
+  readPromptKeys,
   renderAppDeployment,
   renderAppRbac,
   renderAppSecret,
@@ -125,6 +126,14 @@ describe("harness manifests: quota, storage class, prompts", () => {
     // unit tests, and a second expression here is the one this ticket retires.
     expect(Object.keys(configMap.data)).toEqual([PROMPTS_OVERRIDE_KEY]);
     expect(configMap.data[PROMPTS_OVERRIDE_KEY]).not.toBe("");
+  });
+
+  it("reads the prompt key surface from prompts/, so the assertion tracks the repo (ADR-0020)", async () => {
+    const keys = await readPromptKeys(join(repoRoot, "prompts"));
+    // The override key the fixture plants must be part of the surface the runner
+    // resolves; the e2e derives the rest of the surface from this same listing.
+    expect(keys).toContain(PROMPTS_OVERRIDE_KEY);
+    expect(keys.length).toBeGreaterThan(1);
   });
 });
 

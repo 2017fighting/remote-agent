@@ -16,6 +16,7 @@ import {
   NAMESPACE,
   PROMPTS_OVERRIDE_CONFIGMAP,
   PROMPTS_OVERRIDE_KEY,
+  readPromptKeys,
   renderAppDeployment,
   renderAppRbac,
   renderJobRbac,
@@ -746,6 +747,9 @@ async function sendWebhooks(
  * then every key `:image`.
  */
 async function observeSequentialClaims(runner: Runner, context: string, options: RunOptions): Promise<string[]> {
+  // The key surface is the repo's `prompts/` — the same source the image is
+  // built from — so the assertion does not re-spell it (ADR-0020).
+  const promptKeys = await readPromptKeys(join(repoRoot, "prompts"));
   const observed: string[] = [];
   for (const [index, ticketNumber] of TICKET_NUMBERS.entries()) {
     const jobName = `agent-2017fighting-remote-agent-${ticketNumber}`;
@@ -767,7 +771,8 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
     // resolved the key surface. The next Job is created only after this ticket
     // closes, so it mounts an empty override directory and must fall back to the
     // image for every key — the absent case, for real rather than as a second
-    // assertion on the same world.
+    // assertion on the same world. Deleting mid-run is safe because the runner
+    // resolves the whole key surface up front (ADR-0020); the README says why.
     if (overrideKey !== null) {
       await waitForPromptSource(runner, context, jobName, promptSourceLine(overrideKey, "override"), options.timeoutMs);
       await deletePromptsOverride(runner, context);
@@ -796,17 +801,10 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
       until: (value) => value?.metadata.annotations?.["remote-agent/run-result"] !== undefined,
       describe: (value) => JSON.stringify(Object.keys(value?.metadata.annotations ?? {})),
     });
-    await assertPromptSources(runner, context, jobName, overrideKey);
+    await assertPromptSources(runner, context, jobName, overrideKey, promptKeys);
   }
   return observed;
 }
-
-/**
- * The runner's whole prompt key surface (ADR-0020), in resolution order. The
- * harness only needs the five spellings to read a run's per-key source line out
- * of its log; the product owns the surface itself (`PROMPT_TEMPLATE_KEYS`).
- */
-const PROMPT_KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"] as const;
 
 /** `prompt-source=<key>:<image|override>` — one line per resolved key (ADR-0020). */
 function promptSourceLine(key: string, source: "image" | "override"): string {
@@ -814,8 +812,8 @@ function promptSourceLine(key: string, source: "image" | "override"): string {
 }
 
 /** The lines a run must carry: `override` for the one key the fixture holds, `image` for the rest. */
-function expectedPromptSources(overrideKey: string | null): string[] {
-  return PROMPT_KEYS.map((key) => promptSourceLine(key, key === overrideKey ? "override" : "image"));
+function expectedPromptSources(promptKeys: readonly string[], overrideKey: string | null): string[] {
+  return promptKeys.map((key) => promptSourceLine(key, key === overrideKey ? "override" : "image"));
 }
 
 /** The runner container's log text, or null when the pod is not up yet or the read failed. */
@@ -896,13 +894,14 @@ async function assertPromptSources(
   context: string,
   jobName: string,
   overrideKey: string | null,
+  promptKeys: readonly string[],
 ): Promise<void> {
   const logs = await readRunnerLogs(runner, context, jobName);
   if (logs === null) {
     throw new Error(`could not read ${jobName}'s runner logs to check the prompt sources`);
   }
   const lines = logLines(logs);
-  const missing = expectedPromptSources(overrideKey).filter((line) => !lines.has(line));
+  const missing = expectedPromptSources(promptKeys, overrideKey).filter((line) => !lines.has(line));
   if (missing.length > 0) {
     throw new Error(
       `${jobName}'s runner logs are missing ${missing.join(", ")}; the prompt hatch did not resolve per key`,

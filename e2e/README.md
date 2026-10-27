@@ -103,6 +103,10 @@ the second ticket is a real image-only run and every key logs
 exercised in one pass, and a forgotten override would show up as `:override` on a
 run that should be image-only.
 
+Deleting the ConfigMap while the first run is still going is safe: the runner
+resolves the whole key surface once at the start of each round (ADR-0020), so the
+override's effect does not depend on the file still being present later.
+
 ### Why the storage class exists
 
 `app/src/renders/job-template.ts` hardcodes `truenas-iscsi-delete` (ADR-0010).

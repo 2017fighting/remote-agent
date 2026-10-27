@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -47,6 +47,16 @@ export async function renderPromptsOverrideConfigMap(promptsDir: string): Promis
     metadata: { name: PROMPTS_OVERRIDE_CONFIGMAP, namespace: NAMESPACE },
     data: { [PROMPTS_OVERRIDE_KEY]: await readFile(join(promptsDir, PROMPTS_OVERRIDE_KEY), "utf8") },
   };
+}
+
+/**
+ * The prompt keys the image carries: the file names in `prompts/` (ADR-0020).
+ * The harness reads them from the same source the image is built from, so the
+ * per-key source assertion tracks the repo instead of re-spelling the surface —
+ * a key added to `prompts/` is asserted without editing the e2e.
+ */
+export async function readPromptKeys(promptsDir: string): Promise<string[]> {
+  return (await readdir(promptsDir)).sort();
 }
 
 export function renderNamespace(): Record<string, unknown> {
