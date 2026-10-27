@@ -48,5 +48,7 @@
 - **改 prompt 要重建镜像、走一次发版**。这是有意的代价：prompt 与 runner 代码同版本、同一次发布，不再两仓漂移。今天副本本来就按 pin 逐字比，所以变化是「CI 会红但绕得过」变成「绕不过」。事故时的临时改动走 `PROMPTS_DIR` 覆盖。
 - **home-ops 的 git 里不再能看到集群在跑什么 prompt**：可读性搬到 remote-agent 的 tag 与 PR；prompt 与代码的契约漂移在结构上不可能发生。
 - **ADR-0004 的载体决定作废，键面与「无 skill 层」保留**；`docs/agents/prompt-checklist.md` 的「角色 prompt 放 home-ops ConfigMap」一行与承载形态一节改指本文。
+- **为什么这次反转是诚实的**：ADR-0004 的两条收益里，只有一条与载体有关。**「同一份镜像被多个 Agent role 复用」与 prompt 进不进镜像无关**——五个 key 本来就一起发布，所以一份镜像仍然带全部五个 key、被两个 role 与 reviewer 共用（[ADR-0005](0005-self-built-job-image.md)）；而「改 prompt 不必重建镜像」被它自己的 drift 检查封死了（副本是 verbatim 的、按 pin 逐字比对）。于是这不是推翻一个还在生效的决定，而是承认它已经在事实上被推翻。**副本不要再加回来**：把它抄进 home-ops 是本仓唯一的例外，而那个例外的收益已经归零。
+- **模板要自包含那条结论原样留下**：它与 prompt 住在哪里无关。
 - **Seed 容器的挂载与行为一字未变**（[ADR-0009](0009-ticket-volume-seeding.md)）：seed 只做 git，从不读 prompt。
 - **旧 ConfigMap 与它的挂载在 T2 之前仍是必需的**：Job 模板挂着它，k8s 要求被挂的 ConfigMap 存在，所以 home-ops 里的 `remote-agent-prompts` 暂时不能删——但它对 runner 已经没有意义。

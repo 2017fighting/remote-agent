@@ -166,7 +166,9 @@ prompt 模板**随 Job 镜像发布**（[ADR-0020](adr/0020-prompts-travel-with-
 
 事故覆盖口子是 `PROMPTS_DIR`（[ADR-0020](adr/0020-prompts-travel-with-the-image.md)）：某 key 在该目录里有文件就用它，否则回落镜像目录；role 模板与 review axis 模板走同一条回落路径。每个 key 解析时打一行 `prompt-source=<key>:image` 或 `prompt-source=<key>:override`，一次运行解析整个 key 面，所以单次运行的日志点名每个 key 的来源；两处都没有该 key 时直接报错，文案同时点名两个目录。
 
-覆盖口子已经接上（ticket [#77](https://github.com/2017fighting/remote-agent/issues/77)）：Job 模板常驻一个 `optional: true` 的 ConfigMap 卷 `prompts-override` → `remote-agent-prompts-override`，挂在 `/mnt/prompts-override`（`JOB_MOUNT_PATHS.promptsOverride`），`PROMPTS_DIR` 指向同一路径。对象不存在时 k8s 挂一个空目录，默认路径不受影响；旧的 `remote-agent-prompts` 卷与 `PROMPTS_CONFIGMAP_NAME` 常量已退场，home-ops 的 `prompts-configmap.yaml` 随之删除。App 不需要新 RBAC（卷由 kubelet 挂），seed 容器挂载不变。
+覆盖口子已经接上（ticket [#77](https://github.com/2017fighting/remote-agent/issues/77)）：Job 模板常驻一个 `optional: true` 的 ConfigMap 卷 `prompts-override` → `remote-agent-prompts-override`，挂在 `/mnt/prompts-override`（`JOB_MOUNT_PATHS.promptsOverride`），`PROMPTS_DIR` 指向同一路径。对象不存在时 k8s 挂一个空目录，默认路径不受影响；旧的 `remote-agent-prompts` 卷与 `PROMPTS_CONFIGMAP_NAME` 常量已退场。App 不需要新 RBAC（卷由 kubelet 挂），seed 容器挂载不变。
+
+**home-ops 侧的删链是另一件事，还没做**（本仓不持有那些文件）：删 prompts 副本 ConfigMap、drift 脚本与它的单测、drift 工作流、mise task、`scripts/validate.sh` 里对它的调用；helmrelease 顶部只留一行指针。它**必须与含 T1+T2 的 pin bump 落在同一个 PR**——旧 App 仍在渲染 `remote-agent-prompts` 卷，ConfigMap 先没则那些 Job 起不来（[ADR-0020](adr/0020-prompts-travel-with-the-image.md) 的发布与切换）。
 
 ### 事故热改
 
