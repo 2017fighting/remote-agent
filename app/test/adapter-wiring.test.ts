@@ -14,9 +14,10 @@ import { json, startStubServer, type StubRequest, type StubServer } from "./http
  * cannot see a mismatch — a real `OctokitGitHub` + `KubeClientK8s` behind the
  * scheduler's startup list and first pass.
  *
- * The k8s adapter gets its kubeconfig path explicitly: `KubeClientK8s` prefers
- * in-cluster config over `KUBECONFIG`, so a pod run would otherwise point this
- * test at the real cluster (403) instead of the stub.
+ * The k8s adapter is constructed here with an explicit `kubeconfigPath`:
+ * `KubeClientK8s` prefers in-cluster config over `KUBECONFIG`, so letting
+ * `startApp` build it would point a pod run at the real cluster (403) instead
+ * of the stub.
  */
 
 const { privateKey: TEST_PRIVATE_KEY } = generateKeyPairSync("rsa", {
@@ -102,8 +103,6 @@ describe("App on the production adapters", () => {
         GITHUB_API_BASE_URL: githubServer.url,
         NAMESPACE,
       },
-      // Point the production k8s adapter at the stub with an explicit path, so
-      // the stub is the only config source whether or not we run in a pod.
       k8s: new KubeClientK8s({ namespace: NAMESPACE, kubeconfigPath: kubeconfigFor(k8sServer.url) }),
       log: (line) => logLines.push(line),
       webhookSecret: "wiring-secret",
