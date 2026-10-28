@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/2017fighting/remote-agent/compare/v0.7.1...v0.8.0) (2026-10-28)
+
+
+### Features
+
+* prompt 随镜像走，留一个事故覆盖口子 ([#75](https://github.com/2017fighting/remote-agent/issues/75)) ([#81](https://github.com/2017fighting/remote-agent/issues/81)) ([6f99d47](https://github.com/2017fighting/remote-agent/commit/6f99d479d7d30e1dd01d243b6cf5ba85cf27240b))
+
 ## [0.7.1](https://github.com/2017fighting/remote-agent/compare/v0.7.0...v0.7.1) (2026-10-27)
 
 
