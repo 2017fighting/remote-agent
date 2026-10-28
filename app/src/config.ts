@@ -38,6 +38,14 @@ export interface AppConfig {
   jobBackoffLimit: number;
   /** Job `ttlSecondsAfterFinished` (JOB_TTL_SECONDS_AFTER_FINISHED, ADR-0012). */
   jobTtlSecondsAfterFinished: number;
+  /**
+   * How long one closeout round waits for the previous round's Ticket PVC to
+   * actually disappear before giving up on the pass (ticket #85). Bounded on
+   * purpose: the `pvc-protection` finalizer can hold a name for as long as a
+   * pod is still releasing it, and a pass must never hang on that. Giving up is
+   * a `failed` pass — no Job — and the next pass retries from world state.
+   */
+  pvcReclaimTimeoutMs: number;
 }
 
 export const DEFAULT_RESYNC_INTERVAL_SECONDS = 300;
@@ -47,6 +55,12 @@ export const DEFAULT_JOB_PVC_SIZE = "8Gi";
 export const DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS = 10800;
 export const DEFAULT_JOB_BACKOFF_LIMIT = 4;
 export const DEFAULT_JOB_TTL_SECONDS_AFTER_FINISHED = 1800;
+/**
+ * Ten seconds: comfortably longer than a released finalizer takes to clear, and
+ * far shorter than the 300s resync tick, so a pass that gives up is retried by
+ * the next tick rather than by a human.
+ */
+export const DEFAULT_PVC_RECLAIM_TIMEOUT_MS = 10_000;
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 const DEFAULT_GIT_BASE_URL = "https://github.com";
 const DEFAULT_NAMESPACE = "remote-agent";
@@ -83,6 +97,11 @@ export function readAppConfig(env: EnvSource = process.env): AppConfig {
       env,
       APP_ENV_KEYS.jobTtlSecondsAfterFinished,
       DEFAULT_JOB_TTL_SECONDS_AFTER_FINISHED,
+    ),
+    pvcReclaimTimeoutMs: readPositiveInt(
+      env,
+      APP_ENV_KEYS.pvcReclaimTimeoutMs,
+      DEFAULT_PVC_RECLAIM_TIMEOUT_MS,
     ),
   };
 }

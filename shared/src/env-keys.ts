@@ -7,6 +7,11 @@ export const APP_ENV_KEYS = {
   jobActiveDeadlineSeconds: "JOB_ACTIVE_DEADLINE_SECONDS",
   jobBackoffLimit: "JOB_BACKOFF_LIMIT",
   jobTtlSecondsAfterFinished: "JOB_TTL_SECONDS_AFTER_FINISHED",
+  /**
+   * Bound on the closeout round's wait for a deleted Ticket PVC to actually
+   * vanish (ticket #85). Milliseconds; the default lives in `app/src/config.ts`.
+   */
+  pvcReclaimTimeoutMs: "PVC_RECLAIM_TIMEOUT_MS",
   githubApiBaseUrl: "GITHUB_API_BASE_URL",
   gitBaseUrl: "GIT_BASE_URL",
   githubAppId: "GITHUB_APP_ID",

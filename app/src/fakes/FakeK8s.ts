@@ -35,6 +35,16 @@ export class FakeK8s implements K8sPort {
   writeLog: string[] = [];
   /** When set, the next matching create throws this error (failure injection). */
   failNextCreate?: { object: "job" | "secret" | "pvc"; error: Error };
+  /**
+   * Deletions that the API accepts but the finalizer holds (ticket #85): the
+   * object stays listed and the name stays taken until the test releases it with
+   * `releasePvc`. A real PVC keeps `kubernetes.io/pvc-protection` while a pod
+   * mounts it, so a `create` under the same name is a 409 in the meantime —
+   * which is exactly the shape that used to build a Job with no volume.
+   */
+  heldPvcDeletions = new Set<string>();
+  /** How many `waitForPvcGone` calls timed out — the reclaim's give-up signal. */
+  pvcGoneTimeouts = 0;
   private watchers: Array<(event: K8sEvent) => void> = [];
 
   /** How many watch streams are subscribed — the App's third wake source, observable. */
@@ -239,11 +249,34 @@ export class FakeK8s implements K8sPort {
   }
 
   async deletePvc(name: string): Promise<void> {
-    const idx = this.pvcs.findIndex((p) => p.name === name);
-    if (idx >= 0) {
-      this.pvcs.splice(idx, 1);
+    const pvc = this.pvcs.find((p) => p.name === name);
+    if (pvc === undefined) return;
+    if (this.heldPvcDeletions.has(name)) {
+      // The finalizer holds it: the API accepted the delete, the object stays
+      // listed with a deletion timestamp, and the name is still taken (#85).
+      pvc.deleting = true;
       this.record(`deletePvc ${name}`);
+      return;
     }
+    this.pvcs.splice(this.pvcs.indexOf(pvc), 1);
+    this.record(`deletePvc ${name}`);
+  }
+
+  /**
+   * The real delete's second step: wait for the name. Resolves as soon as the
+   * object is gone; a held finalizer reports the timeout the adapter would.
+   */
+  async waitForPvcGone(name: string, _timeoutMs: number): Promise<{ gone: boolean }> {
+    if (this.pvcs.every((p) => p.name !== name)) return { gone: true };
+    this.pvcGoneTimeouts += 1;
+    return { gone: false };
+  }
+
+  /** The finalizer's release: the last pod let go, so the held name disappears. */
+  releasePvc(name: string): void {
+    this.heldPvcDeletions.delete(name);
+    const idx = this.pvcs.findIndex((p) => p.name === name);
+    if (idx >= 0) this.pvcs.splice(idx, 1);
   }
 }
 

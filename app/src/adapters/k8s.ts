@@ -55,6 +55,13 @@ import type {
 /** Log tail budget for the evidence comment (`renders/comments.ts` keeps 40 lines). */
 const LOG_TAIL_LINES = 200;
 
+/**
+ * How often `waitForPvcGone` re-reads the name. Small enough that the common
+ * case (nothing is holding the finalizer) costs one extra round trip, large
+ * enough that a held finalizer does not turn a pass into a busy loop.
+ */
+const PVC_GONE_POLL_INTERVAL_MS = 250;
+
 export interface KubeClientK8sConfig {
   namespace: string;
   /** Optional kubeconfig path for local runs; in-cluster config wins when present. */
@@ -378,6 +385,21 @@ export class KubeClientK8s implements K8sPort {
       throw toK8sApiError(error);
     }
   }
+
+  /**
+   * Poll until the name is free (ticket #85). Deliberately a poll and not a
+   * watch: the answer is needed inside the same pass that started the delete,
+   * and the object is expected to vanish in seconds once its last pod lets go.
+   * A timeout is `gone: false` — a fact for the caller to act on, not a failure.
+   */
+  async waitForPvcGone(name: string, timeoutMs: number): Promise<{ gone: boolean }> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if ((await this.getPvc(name)) === null) return { gone: true };
+      if (Date.now() >= deadline) return { gone: false };
+      await new Promise((resolve) => setTimeout(resolve, PVC_GONE_POLL_INTERVAL_MS));
+    }
+  }
 }
 
 /**
@@ -542,6 +564,7 @@ function toPvc(pvc: V1PersistentVolumeClaim): K8sPvc {
     annotations: meta.annotations,
     labels: meta.labels,
     ...(meta.creationTimestamp === undefined ? {} : { creationTimestamp: meta.creationTimestamp }),
+    deleting: pvc.metadata?.deletionTimestamp !== undefined,
   };
 }
 

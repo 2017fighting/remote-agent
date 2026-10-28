@@ -660,6 +660,57 @@ describe("S2 → S3N: closeout done with newTickets creates sub-issues and opens
     expect(k8s.secrets.map((secret) => secret.name)).toEqual([secretName(REPO, SPEC)]);
   });
 
+  /**
+   * Ticket #85, the production shape: a delete is not an absence. The
+   * `pvc-protection` finalizer holds the name while a pod lets go of it, so the
+   * `create` on the next line came back 409 — which create-if-absent reads as
+   * "already satisfied" — and the Job was built against a volume that vanished a
+   * moment later. The pod sat `Pending` for 45 minutes on
+   * `persistentvolumeclaim ... not found`, holding its Slot, until the 3h
+   * deadline killed the round.
+   */
+  it("refuses to build the Job while the reclaimed volume is still terminating (ticket #85)", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s }); // S3N: the outcome is consumed.
+    closeEveryFollowUp(github);
+    k8s.pvcs.push(ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" }));
+    k8s.secrets.push(tokenSecret(REPO, SPEC));
+    k8s.deleteJob(CLOSEOUT);
+    // The finalizer holds the name: the delete is accepted, the object stays.
+    k8s.heldPvcDeletions.add(CLOSEOUT);
+    k8s.writeLog.length = 0;
+
+    await expect(run({ github, k8s })).rejects.toThrow(/still terminating/);
+
+    // The pass stopped before the Job: a Job without a volume is the bug.
+    expect(k8s.jobs).toEqual([]);
+    expect(k8s.pvcGoneTimeouts).toBe(1);
+    // The volume and its Secret are already gone, so the next pass has nothing
+    // to reclaim and the retry is a plain create (ADR-0016's replay promise).
+    expect(k8s.writeLog).toEqual([`deletePvc ${CLOSEOUT}`, `deleteSecret ${tokenSecretName(CLOSEOUT)}`]);
+  });
+
+  it("builds the Job once the held volume's finalizer is released (ticket #85)", async () => {
+    const { github, k8s } = followUpWorld();
+    await run({ github, k8s });
+    closeEveryFollowUp(github);
+    k8s.pvcs.push(ticketPvc(REPO, SPEC, { expiresAt: "2025-03-08T12:00:00.000Z" }));
+    k8s.secrets.push(tokenSecret(REPO, SPEC));
+    k8s.deleteJob(CLOSEOUT);
+    k8s.heldPvcDeletions.add(CLOSEOUT);
+    await expect(run({ github, k8s })).rejects.toThrow(/still terminating/);
+
+    // The last pod let go between passes: the name is free again.
+    k8s.releasePvc(CLOSEOUT);
+    k8s.writeLog.length = 0;
+
+    await run({ github, k8s });
+
+    expect(k8s.writeLog).toEqual([`createPvc ${CLOSEOUT}`, `createSecret ${tokenSecretName(CLOSEOUT)}`, `createJob ${CLOSEOUT}`]);
+    expect(k8s.jobs.map((job) => job.name)).toEqual([CLOSEOUT]);
+    expect(k8s.pvcs.map((pvc) => pvc.name)).toEqual([CLOSEOUT]);
+  });
+
   it("a crash between the marker clear and the Job create replays cleanly (ticket #60)", async () => {
     const { github, k8s } = followUpWorld();
     await run({ github, k8s });

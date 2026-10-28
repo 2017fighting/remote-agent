@@ -7,6 +7,7 @@
 ## 决定
 
 - **S1 → S2 那一步先回收上一轮的卷**：`start-closeout` 的那一次 reconcile 在清 `closeout-consumed` 之后、建 Job 之前，删掉上一轮的 Ticket PVC 与它的同名 Secret，再按原样 create-if-absent 建新的。收尾的每一轮因此都从一块空卷播种（marker 缺失、`state/` 里也没有 session → 正常播种），「重新判断还剩什么」真的发生。
+  - **删完要等名字真的空出来，再建**（[#85](https://github.com/2017fighting/remote-agent/issues/85)，2026-10-28）。删除**只是开始一次删除**：`kubernetes.io/pvc-protection` finalizer 还在时，对象仍被列出、名字仍被占着，紧跟其后的 `create` 是 **409 AlreadyExists**——而 create-if-absent 把 409 读作「已经满足了」，于是这一轮建出了一块**不存在的卷**上的 Job。生产上这就是 45 分钟 `Pending`：`0/3 nodes are available: persistentvolumeclaim "agent-2017fighting-pi-web-1" not found`，pod 未终态所以一直占着 Slot，直到 3 小时 `activeDeadlineSeconds` 把它判死。所以这一步现在是**删 → 等（有界）→ 建**：`K8sPort.waitForPvcGone(name, config.pvcReclaimTimeoutMs)` 轮询到名字空出来为止；超时是 `gone: false` 这个**事实**而不是异常，这一次 pass 记一行 `failed`、不建 Job，下一 pass 从世界状态重算（那时卷已经真的没了，走的是「无卷 → 建卷」的普通路径）。不变式因此变成可测的一条：**卷不存在（或还在 terminating），就绝不建 Job**。
 - **回收落在「起 Job」那一个函数里，用一个显式入参打开**：`startAgentJob` 已经拥有写序（PVC → Secret → Job）与复用路径（清 `expires-at`），所以收尾的回收是它的一个分支——复用路径从「清 `expires-at`」换成「删 PVC + 删同名 Secret」，由 `startCloseoutJob` 传入的开关打开。**ticket 的 Claim 一字不改**：一张票的卷本来就该被复用（`resume()`、`resume` 之外的「接着之前跑」、人回来读全文都靠它）。
 - **无条件删**。`start-closeout` 的前提就是「确定性名下无对象」，所以那块卷只可能是两种：上一轮**判过**的，或上一轮 App 在保留窗内**没读到结果**的（[ADR-0012](0012-job-deletion-ttl.md) 的超预算宕机路径）。两种情况下新的一轮都会从 ticket map 与分支重新算出「还剩什么」，丢的只是证据——这条代价明写，见下。
 - **runner 侧加一道守卫，把「Complete 而无 annotation」这个形状变成不可能**：打开 durable storage 后若 conversation 已完成（`RunCompletedDoc` 有值），读**自己 Job** 的 `remote-agent/run-result` annotation（`agent-job` SA 已有 `batch/jobs get,patch`，[ADR-0007](0007-run-result-contract.md)）：
@@ -34,3 +35,5 @@
 - **ADR-0015 就地改**：S1 → S2 的写序从「清标记、建 Job」变成「清标记、删旧卷、建新卷与新 Job」，崩在任意两步之间都停在可重放的状态。
 - **[#62](https://github.com/2017fighting/remote-agent/issues/62) 已由 [ADR-0017](0017-a-new-job-on-a-spent-ticket-volume-starts-a-new-round.md) 解决**：ticket role 的同类形状（新 Job 跑在一块已报过结论的票卷上）不再拒绝，而是**就地开新的一轮**——重置五个 per-run 文档、渲 prompt（评论进正文 + round 头）、submit。本文的守卫因此收窄为收尾 role 的守卫。
 - **一次删除动作多出来，且它在写序最前面**：删卷失败（API 报错）会让这次 `startAgentJob` 判 `failed`，pass 记一行错误、不建 Job，下一轮重算重试；删成功而建 Job 前崩掉，则下一轮看到「无标记 + 无对象」照常起 Job。两个窗口都不留半状态。
+- **`pvcReclaimTimeoutMs` 是 App 的 env 面第 N 个键**（默认 10s，`PVC_RECLAIM_TIMEOUT_MS`）：它必须远小于 resync tick（300s），这样「放弃」的一次 pass 由下一个 tick 自然重试，而不是等人。它也是 App 里**唯一**有界等待：一个卡住的 finalizer 不该把一次 reconcile 挂死（[ADR-0001](0001-stateless-reconciler.md) 的无状态重算正是这里的兜底）。
+- **代价是一块卷的删除可能要多等一次 pass**：finalizer 被一个正在退出的 pod 拖住时，这一轮收尾会晚一个 tick 才起跑。相比「建出一块没有卷的 Job、白占 Slot 三小时」，这个代价是零。

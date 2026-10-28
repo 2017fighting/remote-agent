@@ -87,6 +87,15 @@ export interface K8sPvc {
    * is the safety pad for the window between Claim and Job creation.
    */
   creationTimestamp?: string;
+  /**
+   * True while the object is being deleted (its `deletionTimestamp` is set).
+   * A delete is not an absence: `kubernetes.io/pvc-protection` keeps the object
+   * listed and the name taken until the pods that mount it let go, so a create
+   * under that name is a 409 and not a fresh volume (ticket #85). Optional
+   * because only the adapter can know it — a manifest and a test fixture have
+   * no deletion in flight.
+   */
+  deleting?: boolean;
 }
 
 export interface K8sPvcSpec {
@@ -222,4 +231,16 @@ export interface K8sPort {
    */
   clearPvcAnnotation(name: string, key: string): Promise<K8sPvc>;
   deletePvc(name: string): Promise<void>;
+  /**
+   * Wait until the name is genuinely free, or give up and report it.
+   *
+   * `deletePvc` only starts the deletion: the object lingers as `Terminating`
+   * while the `pvc-protection` finalizer holds it, so an immediate `createPvc`
+   * under the same name is a 409 — which create-if-absent would read as "already
+   * satisfied" and Claim would then build a Job against a volume that is about
+   * to disappear (ticket #85). This is the port's one *bounded* wait, and it is
+   * bounded so that a pass never hangs on a stuck finalizer: giving up is a
+   * normal outcome (`gone: false`), and the next pass retries from world state.
+   */
+  waitForPvcGone(name: string, timeoutMs: number): Promise<{ gone: boolean }>;
 }
