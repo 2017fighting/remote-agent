@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/2017fighting/remote-agent/compare/v0.8.0...v0.8.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* rewrite the five prompt templates, close two holes ([#83](https://github.com/2017fighting/remote-agent/issues/83)) ([#84](https://github.com/2017fighting/remote-agent/issues/84)) ([6670e9f](https://github.com/2017fighting/remote-agent/commit/6670e9f65dc38a8428c620fa443376fb75c2c805))
+* wait for a reclaimed volume to actually go before building the Job ([#85](https://github.com/2017fighting/remote-agent/issues/85)) ([#86](https://github.com/2017fighting/remote-agent/issues/86)) ([071431f](https://github.com/2017fighting/remote-agent/commit/071431ffadcdf2df16ba72f9cdc00a11915dc254))
+
 ## [0.8.0](https://github.com/2017fighting/remote-agent/compare/v0.7.1...v0.8.0) (2026-10-28)
 
 
