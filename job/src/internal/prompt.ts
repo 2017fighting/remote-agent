@@ -138,6 +138,15 @@ export interface RenderReviewPromptInput {
   specRef: string;
   /** The spec body; empty only when the work item carries none (the template then says so). */
   specBody: string;
+  /**
+   * The written standards the scan found, one bullet per file — the Standards
+   * axis' `{{standards_files}}`. Required rather than optional so every caller
+   * states the list it means: the runner scans the working copy at review time
+   * (A17a) for the Standards axis and passes `[]` for the Spec axis, which has
+   * no standards section. A default here would let a caller that forgot the scan
+   * render "no standards files" and silently turn the axis into baseline-only.
+   */
+  standardsFiles: readonly string[];
   /** The key surface resolved by `resolvePromptTemplates` (ADR-0020). */
   templates: PromptTemplates;
 }
@@ -149,7 +158,17 @@ export function renderReviewPrompt(input: RenderReviewPromptInput): string {
     fixed_point: input.fixedPoint,
     spec_ref: input.specRef,
     spec_body: input.specBody,
+    standards_files: renderStandardsFiles(input.standardsFiles),
   });
+}
+
+/**
+ * The standards list as the reviewer reads it. An empty scan says so explicitly:
+ * the reviewer must never be left to wonder whether the section is missing.
+ */
+function renderStandardsFiles(files: readonly string[]): string {
+  if (files.length === 0) return "none (this repository has no written standards files; use the smell baseline only)";
+  return files.map((file) => `- \`${file}\``).join("\n");
 }
 
 export function placeholderValues(input: RenderPromptInput): Record<string, string> {

@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { run } from "../src/internal/runner.js";
+import { conflictHandoffPrompt, run } from "../src/internal/runner.js";
 import { ReviewRoundDoc } from "../src/internal/run-docs.js";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -536,6 +536,44 @@ describe("#40/#76 prompt carrier", () => {
       const text = await readFile(join(REPO_ROOT, "prompts", key), "utf8");
       expect(text.toLowerCase()).toContain("sub-agent");
     }
+  });
+
+  /**
+   * The Standards axis' list is a placeholder, not an appendix: the injected list
+   * has to land before the closing report instructions, so the reviewer's last
+   * word stays its report rules rather than a file listing.
+   */
+  it("gives the Standards axis a standards-files placeholder before its closing instructions", async () => {
+    const text = await readFile(join(REPO_ROOT, "prompts", "review-standards"), "utf8");
+    expect(text).toContain("{{standards_files}}");
+    expect(text.indexOf("{{standards_files}}")).toBeLessThan(text.indexOf("## Report"));
+  });
+
+  /**
+   * Checklist item 7: the closing line of both review templates is the fuse.
+   * A file list appended after rendering would push it off the end — which is
+   * exactly what the `{{standards_files}}` placeholder exists to prevent.
+   */
+  it.each(["review-spec", "review-standards"])("keeps %s's fuse as its last line", async (key) => {
+    const text = await readFile(join(REPO_ROOT, "prompts", key), "utf8");
+    const closing = text.trimEnd().split("\n").at(-1) ?? "";
+    expect(closing).toMatch(/sub-agents/);
+    expect(closing).toMatch(/modify files/);
+  });
+
+  /**
+   * The conflict hand-off re-reports with the same Result tool, and `finish_spec`
+   * requires `prBody`: a spec closeout that hits a conflict would be bounced by
+   * its own schema with nothing to act on. Asserted on the runner's own message,
+   * not on `_common` — the message is the one that can drift.
+   */
+  it("tells a conflict hand-off to re-report the whole payload, prBody included", () => {
+    const message = conflictHandoffPrompt({ branch: "agent/spec-33", files: ["contested.txt"] });
+    expect(message).toContain("whole payload");
+    expect(message).toContain("prBody");
+    expect(message).toContain("finish_spec");
+    // The paths it hands over are the ones git left unmerged.
+    expect(message).toContain("contested.txt");
   });
 });
 

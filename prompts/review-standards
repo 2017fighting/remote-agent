@@ -8,21 +8,14 @@ You have `bash`, but use it only for read-only work: `git diff` / `git log` / `g
 
 ## Inputs
 
-The tool hands you the following along with this prompt:
+- The fixed point `{{fixed_point}}`: the three-dot diff is `git diff {{fixed_point}}...HEAD`, and the commit list is yours to take, `git log {{fixed_point}}..HEAD --oneline`. The tool already checked that the ref resolves and the diff is non-empty.
+- The written standards this repository has — the tool scanned the working copy at review time, and this list is the complete set. Read each one:
 
-- The fixed point `{{fixed_point}}` (three-dot diff against it, i.e. the merge-base).
-- The commit list you take yourself: `git log {{fixed_point}}..HEAD --oneline`; the diff: `git diff {{fixed_point}}...HEAD`.
-- The list of standards source files the tool found by scanning the working copy at review time (empty when the repository has no written standards). Read what is listed — the candidate-name table is the tool's, not yours; don't hunt for more.
+{{standards_files}}
 
-First confirm `git rev-parse {{fixed_point}}` resolves and the diff is non-empty; if not, report exactly that — don't guess the range, and don't pretend to have looked.
+Beyond that list there is a **smell baseline** (Fowler, *Refactoring*, ch. 3) that applies even when the repository says nothing. Two rules:
 
-## Where the standards come from
-
-Every file in the repository that says "how code should be written" counts. The scan's candidate table always includes `CODING_STANDARDS.md` and `CONTRIBUTING.md`; whatever the list contains, that list is the complete set of written standards for this review.
-
-Beyond written standards there is a **smell baseline** (Fowler, *Refactoring*, ch. 3) that applies even when the repository says nothing. Two rules:
-
-- **Repo standards win.** Written standards always override the baseline; a style the repository explicitly endorses silences the baseline.
+- **Repo standards win.** A written standard always overrides the baseline; a style the repository explicitly endorses silences the baseline.
 - **Always heuristics, never verdicts.** Every smell is a labeled clue ("possible Feature Envy"), not a hard violation. Skip what tooling already enforces (lint / format / typecheck).
 
 ## The twelve baseline smells

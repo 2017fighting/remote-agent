@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   PROMPT_TEMPLATE_KEYS,
   readPromptFile,
+  renderReviewPrompt,
   resolvePromptTemplates,
   type PromptSources,
+  type PromptTemplates,
 } from "../src/internal/prompt.js";
 
 const KEYS = [...PROMPT_TEMPLATE_KEYS];
@@ -122,5 +124,60 @@ describe("prompt resolution (ADR-0020)", () => {
     await writeAll(image, (key) => `image:${key}`);
 
     await expect(readPromptFile(sources([], join(root, "does-not-exist")), "_common")).resolves.toBe("image:_common");
+  });
+});
+
+describe("review prompt rendering", () => {
+  const templates = (overrides: Partial<Record<string, string>> = {}): PromptTemplates => {
+    const base = {
+      "_common": "common",
+      "implement-ticket": "ticket",
+      "implement-spec": "spec",
+      "review-spec": "spec {{fixed_point}} {{spec_ref}} {{spec_body}}",
+      "review-standards": "standards {{fixed_point}} files:\n{{standards_files}}",
+    };
+    return { ...base, ...overrides } as PromptTemplates;
+  };
+
+  /**
+   * The standards list reaches the reviewer through the same substitution as the
+   * other inputs, so the template's closing instructions stay last. The empty scan
+   * says so in words: a blank section would leave the reviewer guessing. `[]` is
+   * stated by the caller, never defaulted — the Spec axis passes it deliberately.
+   */
+  it("substitutes the scanned standards files, and names an empty scan", () => {
+    const rendered = renderReviewPrompt({
+      axis: "standards",
+      fixedPoint: "abc123",
+      specRef: "o/r#1",
+      specBody: "",
+      standardsFiles: ["CODING_STANDARDS.md", "docs/CONTRIBUTING.md"],
+      templates: templates(),
+    });
+    expect(rendered).toContain("- `CODING_STANDARDS.md`");
+    expect(rendered).toContain("- `docs/CONTRIBUTING.md`");
+
+    const empty = renderReviewPrompt({
+      axis: "standards",
+      fixedPoint: "abc123",
+      specRef: "o/r#1",
+      specBody: "",
+      standardsFiles: [],
+      templates: templates(),
+    });
+    expect(empty).toContain("no written standards files");
+    expect(empty).not.toContain("{{standards_files}}");
+  });
+
+  it("leaves the Spec axis untouched by the standards list", () => {
+    const rendered = renderReviewPrompt({
+      axis: "spec",
+      fixedPoint: "abc123",
+      specRef: "o/r#7",
+      specBody: "THE SPEC",
+      standardsFiles: [],
+      templates: templates(),
+    });
+    expect(rendered).toBe("spec abc123 o/r#7 THE SPEC");
   });
 });

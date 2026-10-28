@@ -79,26 +79,21 @@ async function runAxis(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string)
   return report;
 }
 
-/** The axis template, rendered with the values the tool injects and nothing else. */
+/**
+ * The axis template, rendered with the values the tool injects. The Standards
+ * axis gets the file list the runner scanned at review time (A17a); the Spec
+ * axis states `[]` because its template has no standards section at all.
+ */
 async function axisPrompt(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string): Promise<string> {
-  const rendered = renderReviewPrompt({
+  const standardsFiles = axis === "standards" ? await (deps.standardsFiles?.() ?? findStandardsFiles(deps.repo)) : [];
+  return renderReviewPrompt({
     axis,
     fixedPoint,
     specRef: deps.specRef,
     specBody: deps.specBody,
+    standardsFiles,
     templates: deps.templates,
   });
-  if (axis !== "standards") return rendered;
-  // The standards list is not a template value: the runner scans the working copy
-  // at review time (A17a), so the list is appended to the rendered prompt.
-  const files = await (deps.standardsFiles?.() ?? findStandardsFiles(deps.repo));
-  return `${rendered.trimEnd()}\n\n## Standards files found in this working copy\n\n${renderStandardsList(files)}`;
-}
-
-/** The real list, or an explicit empty table — never a placeholder the reviewer must resolve. */
-function renderStandardsList(files: readonly string[]): string {
-  if (files.length === 0) return "none (this repository has no written standards files; use the smell baseline only)";
-  return files.map((file) => `- \`${file}\``).join("\n");
 }
 
 async function answerText(conversation: Conversation, answer: EntryId): Promise<string> {

@@ -158,7 +158,7 @@ export async function runnerFixture(): Promise<RunnerFixture> {
   );
   await writeFile(
     join(paths.imagePrompts, "review-standards"),
-    ["# Standards axis", "Fixed point {{fixed_point}}.", ""].join("\n"),
+    ["# Standards axis", "Fixed point {{fixed_point}}.", "Standards files:", "{{standards_files}}", ""].join("\n"),
   );
 
   const faux = fauxProvider({
