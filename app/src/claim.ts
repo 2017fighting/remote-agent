@@ -3,7 +3,7 @@ import { LABEL_AGENT_IN_PROGRESS } from "./planners/gate.js";
 import { reclaimTicketVolume } from "./reclamation.js";
 import { renderJobManifest, renderTicketPvc, type AgentRole } from "./renders/job-template.js";
 import { renderTokenSecret } from "./renders/token-steward.js";
-import { isAlreadyExists, isQuotaExceeded } from "./ports/errors.js";
+import { isAlreadyExists, isQuotaExceeded, K8sApiError } from "./ports/errors.js";
 import type { AppConfig } from "./config.js";
 import type { GitHubPort } from "./ports/GitHubPort.js";
 import type { K8sPort } from "./ports/K8sPort.js";
@@ -15,7 +15,17 @@ import type { K8sPort } from "./ports/K8sPort.js";
  *
  * and for the closeout role the volume step is a *reclaim* instead of a create:
  *
- *   reclaim the spent PVC + Secret (ADR-0016) → PVC → Secret → Job
+ *   reclaim the spent PVC + Secret (ADR-0016) → wait for the name → PVC → Secret → Job
+ *
+ * The wait is not decoration (ticket #85). A delete only starts a deletion: the
+ * `pvc-protection` finalizer keeps the object listed and the name taken, so an
+ * immediate `create` is a 409 that create-if-absent would read as "already
+ * satisfied" — and the Job would then mount a volume that is about to vanish.
+ * That is exactly the shape that produced a 45-minute `Pending` pod on
+ * `persistentvolumeclaim ... not found`, holding its Slot until the deadline.
+ * So the invariant this file upholds is: **no Job is created unless its volume
+ * exists and is not terminating.** A wait that times out is a `failed` pass —
+ * no Job — and the next pass recomputes from world state.
  *
  * Job before label is deliberate: crashing between the two leaves "Job running
  * + ticket still in the gate", which the k8s half of the gate absorbs next
@@ -142,8 +152,24 @@ async function startAgentJob(input: AgentJobInput): Promise<ClaimResult> {
       // A spent volume: its conversation is terminal, so this round cannot run on
       // it. Reclaim it and its credential, then create a fresh one below
       // (ADR-0016). Deleting before creating is what makes the seed and the
-      // runner start from nothing.
+      // runner start from nothing — and the *wait* between the two is what makes
+      // the create mean something (ticket #85): a delete only starts a deletion,
+      // so a `create` against a still-terminating name is a 409 that
+      // create-if-absent would read as "already satisfied" while the volume was
+      // in fact on its way out. Giving up after the wait is a normal `failed`
+      // pass: no Job is built, and the next pass retries from world state.
       await reclaimTicketVolume(k8s, pvc.name);
+      const { gone } = await k8s.waitForPvcGone(pvc.name, config.pvcReclaimTimeoutMs);
+      if (!gone) {
+        // Name the fact, not the attempt: whoever reads `pass-error` has to know
+        // that no Job was built, and why the next tick is the retry.
+        const still = await k8s.getPvc(pvc.name);
+        throw new K8sApiError(
+          409,
+          `persistentvolumeclaims "${pvc.name}" is still ${still?.deleting === false ? "present" : "terminating"} ` +
+            `after ${config.pvcReclaimTimeoutMs}ms; no Job was built, the next pass retries`,
+        );
+      }
       await createIfAbsent(() => k8s.createPvc(pvc));
     } else {
       await k8s.clearPvcAnnotation(pvc.name, ANNOTATIONS.expiresAt);

@@ -83,6 +83,7 @@ Job 名是动态生成的，RBAC 收窄不到 `resourceNames`，所以这是 nam
 | `JOB_ACTIVE_DEADLINE_SECONDS` | `10800` | Job 的 `activeDeadlineSeconds` |
 | `JOB_BACKOFF_LIMIT` | `4` | Job 的 `backoffLimit` |
 | `JOB_TTL_SECONDS_AFTER_FINISHED` | `1800` | 终态 Job 的保留窗 = App 的读取预算（[ADR-0012](adr/0012-job-deletion-ttl.md)） |
+| `PVC_RECLAIM_TIMEOUT_MS` | `10000` | 收尾那一轮回收上一块卷时，等它真的消失的上限（毫秒）。超时 = 这一 pass 不建 Job、下一 tick 重试；必须远小于 `RESYNC_INTERVAL_SECONDS`（[ADR-0016](adr/0016-closeout-round-starts-on-a-fresh-volume.md)、[#85](https://github.com/2017fighting/remote-agent/issues/85)） |
 | `NAMESPACE` | `remote-agent` | Jobs / Secrets / Ticket PVCs 建在哪里 |
 | `GITHUB_API_BASE_URL` | `https://api.github.com` | octokit 的 base URL（e2e 指向 stub） |
 | `GIT_BASE_URL` | `https://github.com` | 拼给 Job 的 `GIT_REMOTE_URL` 用它（e2e 指向 stub 的 git http-backend） |

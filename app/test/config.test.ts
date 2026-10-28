@@ -6,6 +6,7 @@ import {
   DEFAULT_JOB_TTL_SECONDS_AFTER_FINISHED,
   DEFAULT_MAX_JOBS_GLOBAL,
   DEFAULT_MAX_JOBS_PER_REPO,
+  DEFAULT_PVC_RECLAIM_TIMEOUT_MS,
   DEFAULT_RESYNC_INTERVAL_SECONDS,
   readAppConfig,
   type EnvSource,
@@ -85,6 +86,15 @@ describe("readAppConfig (App env read at startup)", () => {
   it("rejects a resync interval at or above the 1800s token renewal threshold (ADR-0014)", () => {
     expect(() => readAppConfig(env({ RESYNC_INTERVAL_SECONDS: "1800" }))).toThrow(/1800/);
     expect(() => readAppConfig(env({ RESYNC_INTERVAL_SECONDS: "3600" }))).toThrow(/threshold/);
+  });
+
+  it("bounds the closeout reclaim's wait below the resync tick (ticket #85)", () => {
+    const config = readAppConfig(env({}));
+    expect(config.pvcReclaimTimeoutMs).toBe(DEFAULT_PVC_RECLAIM_TIMEOUT_MS);
+    // A pass that gives up must be retried by the next tick, not by a human:
+    // the wait has to stay well inside one resync interval.
+    expect(config.pvcReclaimTimeoutMs).toBeLessThan(config.resyncIntervalSeconds * 1000);
+    expect(readAppConfig(env({ PVC_RECLAIM_TIMEOUT_MS: "2000" })).pvcReclaimTimeoutMs).toBe(2000);
   });
 
   it("rejects non-integer values", () => {

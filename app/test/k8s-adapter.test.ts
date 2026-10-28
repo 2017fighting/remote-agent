@@ -553,6 +553,47 @@ describe("KubeClientK8s: Ticket PVCs", () => {
     await k8s.deletePvc("agent-x");
     expect(await k8s.getPvc("agent-x")).toBeNull();
   });
+
+  /**
+   * Ticket #85: a delete only *starts* a deletion. The `pvc-protection`
+   * finalizer keeps the object listed (and the name taken) while a pod lets go,
+   * so a `create` under the same name is a 409 — the shape that used to build a
+   * Job with no volume. The port's answer is a bounded wait, and giving up is a
+   * normal `gone: false`, never a thrown pass failure.
+   */
+  it("waitForPvcGone resolves as soon as the name is free", async () => {
+    const { k8s } = await adapter();
+    await k8s.createPvc(pvcManifest("agent-x"));
+    await k8s.deletePvc("agent-x");
+
+    expect(await k8s.waitForPvcGone("agent-x", 1000)).toEqual({ gone: true });
+  });
+
+  it("waitForPvcGone reports gone: false instead of throwing when a finalizer holds the name", async () => {
+    // The stub's DELETE is immediate, so a GET failure is what a held finalizer
+    // looks like from the adapter's side: the object is still there.
+    const { k8s, state } = await adapter();
+    await k8s.createPvc(pvcManifest("agent-x"));
+    state.failures.set(`GET ${PVC_PATH}/agent-x`, () =>
+      statusFailure(500, "simulated: still terminating", "InternalError"),
+    );
+
+    // A 500 is not "gone": the adapter lets the error out rather than guessing.
+    await expect(k8s.waitForPvcGone("agent-x", 50)).rejects.toThrow(/still terminating/);
+  });
+
+  it("waitForPvcGone gives up at its bound when the object stays listed", async () => {
+    // A listed object whose GET keeps succeeding is the terminating shape; the
+    // wait has to end by itself, so a stuck finalizer costs one pass and not a hang.
+    const { k8s } = await adapter();
+    await k8s.createPvc(pvcManifest("agent-x"));
+
+    const startedAt = Date.now();
+    const result = await k8s.waitForPvcGone("agent-x", 120);
+
+    expect(result).toEqual({ gone: false });
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(120);
+  });
 });
 
 describe("KubeClientK8s: error mapping (the decision layer branches on these)", () => {
