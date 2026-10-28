@@ -140,11 +140,13 @@ export interface RenderReviewPromptInput {
   specBody: string;
   /**
    * The written standards the scan found, one bullet per file — the Standards
-   * axis' `{{standards_files}}`. The list is not a template value of its own: it
-   * is scanned at review time (A17a), so the template stays verbatim while the
-   * value arrives through the same substitution every other input uses.
+   * axis' `{{standards_files}}`. Required rather than optional so every caller
+   * states the list it means: the runner scans the working copy at review time
+   * (A17a) for the Standards axis and passes `[]` for the Spec axis, which has
+   * no standards section. A default here would let a caller that forgot the scan
+   * render "no standards files" and silently turn the axis into baseline-only.
    */
-  standardsFiles?: readonly string[];
+  standardsFiles: readonly string[];
   /** The key surface resolved by `resolvePromptTemplates` (ADR-0020). */
   templates: PromptTemplates;
 }
@@ -156,7 +158,7 @@ export function renderReviewPrompt(input: RenderReviewPromptInput): string {
     fixed_point: input.fixedPoint,
     spec_ref: input.specRef,
     spec_body: input.specBody,
-    standards_files: renderStandardsFiles(input.standardsFiles ?? []),
+    standards_files: renderStandardsFiles(input.standardsFiles),
   });
 }
 
@@ -164,7 +166,7 @@ export function renderReviewPrompt(input: RenderReviewPromptInput): string {
  * The standards list as the reviewer reads it. An empty scan says so explicitly:
  * the reviewer must never be left to wonder whether the section is missing.
  */
-export function renderStandardsFiles(files: readonly string[]): string {
+function renderStandardsFiles(files: readonly string[]): string {
   if (files.length === 0) return "none (this repository has no written standards files; use the smell baseline only)";
   return files.map((file) => `- \`${file}\``).join("\n");
 }

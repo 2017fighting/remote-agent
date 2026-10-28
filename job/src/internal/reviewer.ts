@@ -79,18 +79,19 @@ async function runAxis(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string)
   return report;
 }
 
-/** The axis template, rendered with the values the tool injects and nothing else. */
+/**
+ * The axis template, rendered with the values the tool injects. The Standards
+ * axis gets the file list the runner scanned at review time (A17a); the Spec
+ * axis states `[]` because its template has no standards section at all.
+ */
 async function axisPrompt(deps: ReviewerDeps, axis: ReviewAxis, fixedPoint: string): Promise<string> {
-  // The standards list is not a template value of its own: the runner scans the
-  // working copy at review time (A17a) and hands the result to the one placeholder
-  // the Standards axis template carries, so the template's last line stays last.
-  const standardsFiles = axis === "standards" ? await (deps.standardsFiles?.() ?? findStandardsFiles(deps.repo)) : undefined;
+  const standardsFiles = axis === "standards" ? await (deps.standardsFiles?.() ?? findStandardsFiles(deps.repo)) : [];
   return renderReviewPrompt({
     axis,
     fixedPoint,
     specRef: deps.specRef,
     specBody: deps.specBody,
-    ...(standardsFiles === undefined ? {} : { standardsFiles }),
+    standardsFiles,
     templates: deps.templates,
   });
 }

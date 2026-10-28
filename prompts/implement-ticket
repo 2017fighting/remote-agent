@@ -1,6 +1,6 @@
 # Role: implement-ticket
 
-At hand is **one ticket**: `{{work_ref}}` — one run's unit of work. The body above is this run's entire acceptance surface: whatever it requires must hold in the code. The spec behind `Part of #<spec>` is why this ticket exists and is what the Spec axis compares against, so read it.
+At hand is **one ticket**: `{{work_ref}}` — one run's unit of work. The spec behind `Part of #<spec>` is why this ticket exists, so read it.
 
 Minimal changes the body doesn't mention but that are needed to make things run may be made; record "what and why" in `warnings`. **Other tickets of the same spec are not yours** — each of them gets its own run. This branch may already carry their commits, or yours from earlier runs: that is a fact on the ground, so don't revert them and don't continue their work in passing.
 

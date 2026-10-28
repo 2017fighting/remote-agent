@@ -41,7 +41,8 @@ function sources(log: string[], overrideDir?: string): PromptSources {
   return { imageDir: image, ...(overrideDir === undefined ? {} : { overrideDir }), log: (line) => log.push(line) };
 }
 
-describe("prompt resolution (ADR-0020)", () => {  it("logs prompt-source=<key>:image for every key when only the image carries them", async () => {
+describe("prompt resolution (ADR-0020)", () => {
+  it("logs prompt-source=<key>:image for every key when only the image carries them", async () => {
     await writeAll(image, (key) => `image:${key}`);
     const log: string[] = [];
 
@@ -141,7 +142,8 @@ describe("review prompt rendering", () => {
   /**
    * The standards list reaches the reviewer through the same substitution as the
    * other inputs, so the template's closing instructions stay last. The empty scan
-   * says so in words: a blank section would leave the reviewer guessing.
+   * says so in words: a blank section would leave the reviewer guessing. `[]` is
+   * stated by the caller, never defaulted — the Spec axis passes it deliberately.
    */
   it("substitutes the scanned standards files, and names an empty scan", () => {
     const rendered = renderReviewPrompt({
@@ -160,6 +162,7 @@ describe("review prompt rendering", () => {
       fixedPoint: "abc123",
       specRef: "o/r#1",
       specBody: "",
+      standardsFiles: [],
       templates: templates(),
     });
     expect(empty).toContain("no written standards files");
@@ -172,7 +175,7 @@ describe("review prompt rendering", () => {
       fixedPoint: "abc123",
       specRef: "o/r#7",
       specBody: "THE SPEC",
-      standardsFiles: ["AGENTS.md"],
+      standardsFiles: [],
       templates: templates(),
     });
     expect(rendered).toBe("spec abc123 o/r#7 THE SPEC");

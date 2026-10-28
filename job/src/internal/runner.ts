@@ -559,8 +559,11 @@ async function assertHandoffFinishedTheRebase(deps: RunDeps, files: readonly str
  * commands that finish it. The rules — keep both intents, never abort or skip,
  * re-report, still never push — live in `_common`, which every role reads
  * (ADR-0020: the templates ship in the image, not in a ConfigMap).
+ *
+ * Exported so the test can assert the payload rule the `finish_spec` schema
+ * depends on: a closeout that re-reports here must carry `prBody` too.
  */
-function conflictHandoffPrompt(input: { branch: string; files: readonly string[] }): string {
+export function conflictHandoffPrompt(input: { branch: string; files: readonly string[] }): string {
   return [
     `The push of this run to \`${input.branch}\` stopped on a rebase conflict, and the control plane has handed you the stopped rebase.`,
     "",

@@ -77,7 +77,7 @@ v1 没有 skill 层：durable 没有 Skill 工具、没有 slash command，runne
   - **工具**：runner 烧一个 `code_review` 工具，起一个**独立 conversation** 的 reviewer（foreground、`replay: "safe"`、独立模型由 runner 给），传固定点与 spec 正文，取回两轴报告。它的工具表是 `read` / `grep` / `bash`——**不给 subagent 工具，也不给 `code_review` 自己**，扇出从工具表上被结构地断掉。（[#14](https://github.com/2017fighting/remote-agent/issues/14) 就地改：reviewer 得自己跑 `git diff` / `git log`，所以它拿到 `bash`；只读靠 prompt 约束，`bash` 本身不打开扇出。）
   - **镜像里的模板**：两轴 brief 写成 `review-standards` / `review-spec` 两份模板（diff 命令与 commit 列表），随 Job 镜像发布（[ADR-0020](../adr/0020-prompts-travel-with-the-image.md)）。改 review 话术要重建镜像——事故时可走 `PROMPTS_DIR` 覆盖。smell baseline 十二条**只住在 `review-standards`**（[#25](https://github.com/2017fighting/remote-agent/issues/25)：Spec 轴用不上它，单份不漂移）；Standards 轴读的 standards 文件清单**不由模板提供**——`code_review` 被调时 runner 扫工作副本得出，候选名表是 runner 代码常量（A17a），扫出的列表作为 `{{standards_files}}` 占位符**在模板内部**替换（不是渲染完再追加：追加会让模板的末行不再是被读到的最后一句）；Spec 轴的 spec 正文由工具注入（A10）。
   - **工具（扇出第二层，[#25](https://github.com/2017fighting/remote-agent/issues/25) A15）**：`code_review` 同一 run 第二次调用直接报错（「review 已跑过：修完就收尾」）——implementer 真正的扇出向量是反复调 review，不只在 reviewer 里开子 agent。implementer 模板**不写**「不要开子 agent」：它的工具表里没有 subagent 工具（[#21](https://github.com/2017fighting/remote-agent/issues/21) 研究证实 durable 无内置），禁令只写进两份 review 模板当保险丝。原则：**工具表先行，prompt 只为真实持有的工具写禁令**。
-  - **模板末行**：一句「不要开子 agent、不要改文件」，两轴模板各一遍——reviewer 才是被约束的人。
+  - **模板末行**：一句「不要开子 agent、不要改文件」，两轴模板各一遍——reviewer 才是被约束的人。它是**最后一行**，这也是 standards 清单走 `{{standards_files}}` 占位符而不是渲染后追加的原因（追加会把保险丝推到中间）。单测两边都断言。
 - **落点**：工具（起 conversation + 工具表裁剪）+ 镜像里的模板（两份 brief）+ prompt（一句禁令，在 review 模板里而不是角色模板里）。
 
 ### 8. 承载形态 → 清单开头那条规矩
@@ -108,7 +108,7 @@ v1 没有 skill 层：durable 没有 Skill 工具、没有 slash command，runne
 
 **不做**（agent 手上就不该有这些通道）：push、开 PR、关票或改 label、调 `gh`、调 `kubectl`。push 由 runner 做，GitHub 写入由 App 做（ADR-0002）。**这一栏不由 prompt 承载**：镜像里只有 git / ca-certificates / ripgrep，没有 `gh`、没有 `kubectl`，token 也不在 agent 手上——写成禁令只是把不该发生的行为再拉进上下文一遍（no-op，且按第 7 条的原则就是错位）。`_common` 只留一句正面表述：「你永不 push，永不碰 PR / issue / label，GitHub 写入由控制面在你报完之后做」。
 
-**唯一的例外写在这里**（[#58](https://github.com/2017fighting/remote-agent/issues/58)）：冲突时 runner 会把**停在冲突上的 rebase** 交给 agent，那一刻工作副本归它——解冲突、`git add`、`GIT_EDITOR=true git rebase --continue`、跑全量测试与 typecheck、用同一个 Result tool 再自述一次。规矩写死在同一段里：保住对方提交的意图、不许 `--abort` / `--skip` / `-X ours|theirs`、不重跑 `code_review`（那一轮已用掉）、**仍然不 push**。不写成新条目，是因为它只从「不做」这一栏里开一个口子，其余各栏不变。
+**唯一的例外写在这里**（[#58](https://github.com/2017fighting/remote-agent/issues/58)）：冲突时 runner 会把**停在冲突上的 rebase** 交给 agent，那一刻工作副本归它——解冲突、`git add`、`GIT_EDITOR=true git rebase --continue`、跑全量测试与 typecheck、用同一个 Result tool 把**整份载荷**再报一次（`finish_spec` 时含必填的 `prBody`，见 `job/src/internal/runner.ts` 的 `conflictHandoffPrompt`）。规矩写死在同一段里：保住对方提交的意图、不许 `--abort` / `--skip` / `-X ours|theirs`、不重跑 `code_review`（那一轮已用掉）、**仍然不 push**。不写成新条目，是因为它只从「不做」这一栏里开一个口子，其余各栏不变。
 
 - **落点**：init container / runner / App。
 
@@ -144,7 +144,7 @@ v1 没有 skill 层：durable 没有 Skill 工具、没有 slash command，runne
 - [ADR-0004](../adr/0004-prompts-live-in-configmap.md) 就地改：ConfigMap 的键从「同名一份模板」扩到「`_common` + 两份角色 + 两份 review」。
 - [ADR-0020](../adr/0020-prompts-travel-with-the-image.md) 新增（ticket [#76](https://github.com/2017fighting/remote-agent/issues/76)，Part of [#75](https://github.com/2017fighting/remote-agent/issues/75)）：prompt 随 Job 镜像发布，runner 从镜像内 canonical 目录读，只留 `PROMPTS_DIR` 一个事故覆盖口子，逐 key 打 `prompt-source=<key>:<image|override>`；本文的载体描述改指它。
 - [#4](https://github.com/2017fighting/remote-agent/issues/4) 的「收尾 Job 跑 e2e」撤销；`docs/architecture.md` §3 的 Spec 循环图已按新执行面重画（收尾不跑 e2e，`Closes` 由 App 写进 PR body 而不是 commit）。
-- **2026-10-28 模板重写**（第 2、5、6、7、12 条）：`prompts/` 五份模板按本清单重新收一遍——删掉 no-op 禁令（`gh` / `kubectl` / 凭证 / 卷布局在镜像里根本不存在）、删掉与工具自述重复的段落、补上 review 后复验与「先找仓库自己的检查命令」。`{{standards_files}}` 从 runner 侧字符串追加改成模板内占位符（`renderReviewPrompt` 的输入），冲突交接的重报补上 `prBody`。量：`_common` 1167 → 953 词。
+- **2026-10-28 模板重写**（第 2、5、6、7、12 条）：`prompts/` 五份模板按本清单重新收一遍——删掉 no-op 禁令（`gh` / `kubectl` / 凭证 / 卷布局在镜像里根本不存在）、删掉与工具自述重复的段落、补上 review 后复验与「先找仓库自己的检查命令」。`{{standards_files}}` 从 runner 侧字符串追加改成模板内占位符（`renderReviewPrompt` 的必填输入），冲突交接的重报补上 `prBody`。量：`_common` 1167 → 956 词，渲染后 1434 → 1170（ticket）、1544 → 1324（spec）。
 
 ## 本清单不覆盖
 
