@@ -571,7 +571,7 @@ function conflictHandoffPrompt(input: { branch: string; files: readonly string[]
     "  1. `git add` each path you resolved.",
     "  2. `git rebase --continue`, and repeat if it stops on another commit.",
     "  3. Run the full test suite and the typecheck once against the merged result.",
-    "  4. Call the same Result tool again with the final summary, commentBody and warnings. That report replaces the one this run made before the conflict, and the control plane pushes after it.",
+    "  4. Call the same Result tool again with the whole payload — `summary`, `commentBody`, `warnings`, and `prBody` when the tool is `finish_spec`, whose schema requires it. That report replaces the one this run made before the conflict, and the control plane pushes after it.",
     "",
   ].join("\n");
 }

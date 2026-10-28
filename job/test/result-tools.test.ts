@@ -537,6 +537,28 @@ describe("#40/#76 prompt carrier", () => {
       expect(text.toLowerCase()).toContain("sub-agent");
     }
   });
+
+  /**
+   * The Standards axis' list is a placeholder, not an appendix: the injected list
+   * has to land before the closing report instructions, so the reviewer's last
+   * word stays its report rules rather than a file listing.
+   */
+  it("gives the Standards axis a standards-files placeholder before its closing instructions", async () => {
+    const text = await readFile(join(REPO_ROOT, "prompts", "review-standards"), "utf8");
+    expect(text).toContain("{{standards_files}}");
+    expect(text.indexOf("{{standards_files}}")).toBeLessThan(text.indexOf("## Report"));
+  });
+
+  /**
+   * The conflict hand-off re-reports with the same Result tool, and `finish_spec`
+   * requires `prBody`: the prompt has to say so, or a spec closeout that hits a
+   * conflict is bounced by its own schema with nothing to act on.
+   */
+  it("tells a conflict hand-off to re-report the whole payload, prBody included", async () => {
+    const text = await readFile(join(REPO_ROOT, "prompts", "_common"), "utf8");
+    expect(text).toContain("prBody");
+    expect(text).toContain("finish_spec");
+  });
 });
 
 describe("#40 the Spec axis' comparison surface", () => {
