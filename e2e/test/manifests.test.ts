@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -8,13 +7,14 @@ import {
   APP_SERVICE_ACCOUNT,
   JOB_SERVICE_ACCOUNT,
   NAMESPACE,
-  PROMPT_KEYS,
-  PROMPTS_CONFIGMAP,
+  PROMPTS_OVERRIDE_CONFIGMAP,
+  PROMPTS_OVERRIDE_KEY,
+  readPromptKeys,
   renderAppDeployment,
   renderAppRbac,
   renderAppSecret,
   renderJobRbac,
-  renderPromptsConfigMap,
+  renderPromptsOverrideConfigMap,
   renderResourceQuota,
   renderTicketStorageClass,
 } from "../src/manifests.js";
@@ -114,18 +114,26 @@ describe("harness manifests: quota, storage class, prompts", () => {
     expect(storageClass.provisioner).not.toBe("");
   });
 
-  it("builds the prompts ConfigMap with exactly the five keys from prompts/", async () => {
-    const configMap = (await renderPromptsConfigMap(join(repoRoot, "prompts"))) as {
+  it("builds the prompt override ConfigMap with only `_common` (ADR-0020)", async () => {
+    const configMap = (await renderPromptsOverrideConfigMap(join(repoRoot, "prompts"))) as {
       metadata: { name: string };
       data: Record<string, string>;
     };
-    expect(configMap.metadata.name).toBe(PROMPTS_CONFIGMAP);
-    expect(Object.keys(configMap.data).sort()).toEqual([...PROMPT_KEYS].sort());
-    // Verbatim from the repo, not a fixture copy (ADR-0004: text is the ConfigMap's).
-    for (const key of PROMPT_KEYS) {
-      const onDisk = await readFile(join(repoRoot, "prompts", key), "utf8");
-      expect(configMap.data[key]).toBe(onDisk);
-    }
+    expect(configMap.metadata.name).toBe(PROMPTS_OVERRIDE_CONFIGMAP);
+    // Exactly the one key, so the run must fall back to the image for the other
+    // four. The content is deliberately not compared against `prompts/`: that
+    // the image and the repo carry the same text is asserted once, by the Job's
+    // unit tests, and a second expression here is the one this ticket retires.
+    expect(Object.keys(configMap.data)).toEqual([PROMPTS_OVERRIDE_KEY]);
+    expect(configMap.data[PROMPTS_OVERRIDE_KEY]).not.toBe("");
+  });
+
+  it("reads the prompt key surface from prompts/, so the assertion tracks the repo (ADR-0020)", async () => {
+    const keys = await readPromptKeys(join(repoRoot, "prompts"));
+    // The override key the fixture plants must be part of the surface the runner
+    // resolves; the e2e derives the rest of the surface from this same listing.
+    expect(keys).toContain(PROMPTS_OVERRIDE_KEY);
+    expect(keys.length).toBeGreaterThan(1);
   });
 });
 

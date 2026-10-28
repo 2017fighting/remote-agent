@@ -20,8 +20,7 @@ apps/remote-agent/
 ├── remote-agent-secret.sops.yaml    # 三键，见 §3
 ├── rbac.yaml                        # SA remote-agent + Role + RoleBinding，见 §4
 ├── agent-job-rbac.yaml              # SA agent-job + Role（jobs get,patch）+ RoleBinding，见 §5
-├── resourcequota.yaml               # 只算数量的护栏，见 §7
-└── prompts-configmap.yaml           # remote-agent-prompts，见 §8
+└── resourcequota.yaml               # 只算数量的护栏，见 §7
 ```
 
 （`clusters/home/app-registry.yaml` 加一行；目录里**不放** `namespace.yaml`、不写 `kustomization.yaml`——namespace 由 registry 渲染，目录是 plain build root。lint 强制 `HelmRelease` + `chartRef: OCIRepository app-template` + `valuesFrom: <app>-workload-profile`，禁止手写 HTTPRoute `parentRefs`、禁止内联 `nodeSelector/affinity/tolerations`。）
@@ -113,6 +112,7 @@ agent 容器（`runner`）：
 | `OMNIROUTE_API_KEY` | `secretKeyRef` → `remote-agent-secret` 的**同一个 key** | 网关 key（从不用 `envFrom`） |
 | `JOB_NAME` | **字面值**，就是 Job 名 | runner 往自己 Job 上 PATCH annotation 时的目标 |
 | `JOB_NAMESPACE` | `fieldRef: metadata.namespace` | 同上 |
+| `PROMPTS_DIR` | 代码常量 `/mnt/prompts-override` | 事故覆盖目录（[ADR-0020](adr/0020-prompts-travel-with-the-image.md)）：某 key 在此有文件则用它，否则回落镜像 |
 
 init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOTE_URL`——它只做 git，拿不到 work item 与模型配置（[ADR-0009](adr/0009-ticket-volume-seeding.md)）。
 
@@ -122,9 +122,9 @@ init 容器（`seed`）只要三个：`TARGET_REPO`、`SPEC_NUMBER`、`GIT_REMOT
 | --- | --- | --- | --- |
 | `ticket` | PVC，名字 = Job 名 | `/mnt/agent`（`repo/` · `state/` · `home/`） | seed + runner |
 | `token` | Secret，`agent-<repo-slug>-<issue#>-token`（整个 Secret） | `/mnt/credentials`（只读；`token` 键落在 `/mnt/credentials/token`） | seed + runner |
-| `prompts` | ConfigMap `remote-agent-prompts` | `/mnt/prompts`（只读） | **只 runner** |
+| `prompts-override` | ConfigMap `remote-agent-prompts-override`（`optional: true`） | `/mnt/prompts-override`（只读） | 只 runner（见 §8） |
 
-这三块就是镜像会读的全部输入面：少一个 volume，Job 会在第一个模型调用之前就死（seed 拿不到 token 或 runner 读不到 prompt 文件）。**任何一边加路径而不加另一边的断言，都会静默变成「Job 永远起不来」**——这正是 kind e2e 存在的理由（[e2e/README.md](../e2e/README.md)）。
+这三块就是镜像会读的全部输入面：`ticket` 与 `token` 少一个，Job 会在第一个模型调用之前就死（seed 拿不到 token 或 runner 读不到凭证）；`prompts-override` 是**可选**的，对象不存在时挂一个空目录，runner 逐 key 回落镜像里的模板，默认路径不受影响。**任何一边加路径而不加另一边的断言，都会静默变成「Job 永远起不来」**——这正是 kind e2e 存在的理由（[e2e/README.md](../e2e/README.md)）。
 
 `token` 那条挂的是**整个 Secret 目录**，不是用 `subPath` 挑出 `token` 键——两者最终路径一样，行为却不同。kubelet 传播 Secret 更新靠原子切换卷的符号链接，`subPath` 在容器启动时就把链接解析掉了，之后永远读启动那一刻的文件。App 的续期是原地 patch Secret（`token-renewal.ts`），所以 `subPath` 会把 token 冻在 pod 出生那一刻：任何跑过 60 分钟（installation token 寿命）的 run 都会拿一枚死凭证去 push（[#53](https://github.com/2017fighting/remote-agent/issues/53)）。挂目录则让 ADR-0009 / ADR-0014 那句「挂载晚 1–1.5 分钟生效」重新成立，30 分钟续期阈值也才有意义。
 
@@ -162,9 +162,26 @@ spec §4 把 `remote-agent/ticket=<repo>#<n>` 与 `remote-agent/repo=<repo>` 写
 
 ## 8. prompt 的载体
 
-ConfigMap `remote-agent-prompts`（放 `apps/remote-agent/`，与 App 同生命周期），作为**只读卷**挂进 Job 的 **runner** 容器（seed 不挂，它只做 git）。**键面以 [ADR-0004](adr/0004-prompts-live-in-configmap.md) 为准**，一个 key 一个文件：`_common`（所有 role 拼在最前）+ `implement-ticket` / `implement-spec` + `review-standards` / `review-spec`（reviewer conversation 两轴各一份）。
+prompt 模板**随 Job 镜像发布**（[ADR-0020](adr/0020-prompts-travel-with-the-image.md)）：`job/Dockerfile` 把 repo 的 `prompts/` COPY 到 `IMAGE_PROMPTS_DIR` = `/opt/remote-agent/prompts`（与 `seed.mjs` / `runner.mjs` 同级），runner 默认从那里读，**不依赖任何挂载的 ConfigMap**。键面仍是五个（[ADR-0004](adr/0004-prompts-live-in-configmap.md) 的结论，载体由 0020 取代）：`_common`（所有 role 拼在最前）+ `implement-ticket` / `implement-spec` + `review-standards` / `review-spec`（reviewer conversation 两轴各一份）。repo 里的 `prompts/` 就是这份 key 面的逐字源，单测断言它恰好是这五个键、且每个 Agent role 与 review axis 映射出的 key 都在里面。
 
-挂载点与渲染顺序已经定：`JOB_MOUNT_PATHS.prompts` = `/mnt/prompts`（App 的 Job 模板与 Job 镜像 import 同一个常量），runner 先读 `_common`、再读 role 模板，拼起来后一次把 `{{...}}` 全部替掉（未知占位符直接报错，不把字面值交给模型）。repo 里的 `prompts/` 就是这份 key 面的逐字源。
+事故覆盖口子是 `PROMPTS_DIR`（[ADR-0020](adr/0020-prompts-travel-with-the-image.md)）：某 key 在该目录里有文件就用它，否则回落镜像目录；role 模板与 review axis 模板走同一条回落路径。每个 key 解析时打一行 `prompt-source=<key>:image` 或 `prompt-source=<key>:override`，一次运行解析整个 key 面，所以单次运行的日志点名每个 key 的来源；两处都没有该 key 时直接报错，文案同时点名两个目录。
+
+覆盖口子已经接上（ticket [#77](https://github.com/2017fighting/remote-agent/issues/77)）：Job 模板常驻一个 `optional: true` 的 ConfigMap 卷 `prompts-override` → `remote-agent-prompts-override`，挂在 `/mnt/prompts-override`（`JOB_MOUNT_PATHS.promptsOverride`），`PROMPTS_DIR` 指向同一路径。对象不存在时 k8s 挂一个空目录，默认路径不受影响；旧的 `remote-agent-prompts` 卷与 `PROMPTS_CONFIGMAP_NAME` 常量已退场。App 不需要新 RBAC（卷由 kubelet 挂），seed 容器挂载不变。
+
+**home-ops 侧的删链是另一件事，还没做**（本仓不持有那些文件）：删 prompts 副本 ConfigMap、drift 脚本与它的单测、drift 工作流、mise task、`scripts/validate.sh` 里对它的调用；helmrelease 顶部只留一行指针。它**必须与含 T1+T2 的 pin bump 落在同一个 PR**——旧 App 仍在渲染 `remote-agent-prompts` 卷，ConfigMap 先没则那些 Job 起不来（[ADR-0020](adr/0020-prompts-travel-with-the-image.md) 的发布与切换）。
+
+### 事故热改
+
+覆盖卷常驻、但默认不存在：Job 模板挂一个 `optional: true` 的 ConfigMap `remote-agent-prompts-override` 到 `/mnt/prompts-override`，`PROMPTS_DIR` 指向它。**这是事故工具，不是常规发布路径**：prompt 的正常变更走 `prompts/` + 一次 release（§10），只有事故里要临时改一句、又等不起一次发版时才用它，而且用完必须删掉。事故里只改一个 key（键面就是上面那五个：`_common` / `implement-ticket` / `implement-spec` / `review-standards` / `review-spec`；只放要改的那一个）：
+
+1. `kubectl create configmap remote-agent-prompts-override -n remote-agent --from-file=<key>=<path>`（`--from-file` 的文件名就是 prompt key）。
+2. 等下一轮 Job 起来，看它的日志：那个 key 是 `prompt-source=<key>:override`，其余仍是 `:image`。
+3. 删之前先确认没有在跑的 Job：`kubectl get jobs -n remote-agent` 为空再删（spec [#75](https://github.com/2017fighting/remote-agent/issues/75) 的事故前置）。
+4. **用完删掉**：`kubectl delete configmap remote-agent-prompts-override -n remote-agent`。忘记删就会一直生效，而这是唯一的线索来源。
+
+（runner 在**每一轮开始时**一次性解析整个 key 面，不是在每次读模板时惰性读；所以第 3 步那条确认只是保守起见——在跑的 Job 已经读过覆盖，删掉不会打断它。这个「eager 解析」是 [#76](https://github.com/2017fighting/remote-agent/issues/76) 的实现决定，与 spec 原文假设的「每轮惰性读取」不同，理由见 [ADR-0020](adr/0020-prompts-travel-with-the-image.md)。）
+
+渲染顺序已定：runner 先读 `_common`、再读 role 模板，拼起来后一次把 `{{...}}` 全部替掉（未知占位符直接报错，不把字面值交给模型）。
 
 每条 prompt 义务的落点与内容见 [prompt 必写项清单](agents/prompt-checklist.md)。
 

@@ -37,7 +37,7 @@ App 侧四个 env 覆盖（默认值就是上表）：`JOB_PVC_SIZE` / `JOB_ACTI
 - **`backoffLimit` 取 k8s 默认 6**：纯退避 630s、容忍度更高，但同一 phase 反复崩时可能把 3h 塔满才交人。**取 4。**
 - **HOME 留在容器可写层**：每次崩溃换 pod 都要重下 853 个包的 tarball（几分钟），且那几百 MB 写在全节点共享的 45GB 可写层上。**不放。**
 - **分 role 的超时**（ticket 2h / spec 收尾 4h）：更贴画像，但两个数、两条规则，而单一 3h 已覆盖两者的 p99 区间。**先不分。**
-- **数值放 home-ops ConfigMap**：与 [ADR-0004](0004-prompts-live-in-configmap.md) 的 prompt 载体一致，但 pod spec 的旋钮跨到了另一个仓库，且 App 要读 ConfigMap（#12 的最小 RBAC 里没有）。**放 App 代码 + env。**
+- **数值放 home-ops ConfigMap**：与当时的 [ADR-0004](0004-prompts-live-in-configmap.md) 的 prompt 载体一致（该载体已由 [ADR-0020](0020-prompts-travel-with-the-image.md) 取代），但 pod spec 的旋钮跨到了另一个仓库，且 App 要读 ConfigMap（#12 的最小 RBAC 里没有）。**放 App 代码 + env。**
 
 ## Consequences
 

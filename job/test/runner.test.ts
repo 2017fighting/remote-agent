@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
@@ -14,6 +14,7 @@ import {
 } from "../src/internal/runner.js";
 import { ReviewFixedPointDoc } from "../src/internal/fixed-point-doc.js";
 import { resetForNewRound } from "../src/internal/round.js";
+import { PROMPT_TEMPLATE_KEYS } from "../src/internal/prompt.js";
 import { ConflictHandoffDoc, RunCompletedDoc, RunResultDoc } from "../src/internal/run-docs.js";
 import { readRunnerEnv, StartupError, type RunnerEnv } from "../src/internal/env.js";
 import { runRunner } from "../src/runner.js";
@@ -178,6 +179,20 @@ describe("runner: startup validation", () => {
     env["AGENT_WORK_ITEM"] = JSON.stringify({ ...WORK_ITEM, repo: "other/repo" });
     expect(() => readRunnerEnv(env, NAMESPACE)).toThrow(/does not match/);
   });
+
+  /**
+   * ADR-0020: `PROMPTS_DIR` is optional and, when absent, the runner falls back
+   * to the image's canonical directory (the default `paths.imagePrompts`).
+   */
+  it("reads PROMPTS_DIR as the override directory when the Job sets it", () => {
+    const env = fullEnv();
+    env["PROMPTS_DIR"] = "/mnt/prompts-override";
+    expect(readRunnerEnv(env, NAMESPACE).promptsDir).toBe("/mnt/prompts-override");
+  });
+
+  it("leaves PROMPTS_DIR unset when the Job does not set it", () => {
+    expect(readRunnerEnv(fullEnv(), NAMESPACE).promptsDir).toBeUndefined();
+  });
 });
 
 describe("runner: one run to a Result tool", () => {
@@ -200,6 +215,47 @@ describe("runner: one run to a Result tool", () => {
     expect(prompt).not.toMatch(/\{\{\s*[a-z_]+\s*\}\}/);
     // The templates never carry slash commands: durable has no such layer (ADR-0004).
     expect(prompt).not.toMatch(/^\s*\/[a-z-]+\s*$/m);
+  });
+
+  /**
+   * ADR-0020. The runner resolves the whole prompt key surface from the image and
+   * records each key's source, so one run's log names where every key came from —
+   * the only evidence that a forgotten hot-edit is (not) living in the override
+   * directory. With no override directory set, every key here is `:image`.
+   */
+  it("logs prompt-source=<key>:image for every key in one run", async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    const lines: string[] = [];
+    fixture.script([finishTicketCall()]);
+
+    await run(depsFor(fixture, recorded, { log: (line) => lines.push(line) }));
+
+    for (const key of PROMPT_TEMPLATE_KEYS) {
+      expect(lines).toContain(`prompt-source=${key}:image`);
+    }
+  });
+
+  it("reads a single key from PROMPTS_DIR and leaves the rest on the image", async () => {
+    fixture = await runnerFixture();
+    const recorded: Recorded = { events: [], results: [] };
+    const lines: string[] = [];
+    const override = join(fixture.root, "override-prompts");
+    await mkdir(override, { recursive: true });
+    await writeFile(join(override, "implement-ticket"), "# Role: implement-ticket\noverridden ticket #{{ticket_number}}\n");
+    fixture.script([finishTicketCall()]);
+
+    await run(
+      depsFor(fixture, recorded, {
+        env: { ...fixture.env, promptsDir: override },
+        log: (line) => lines.push(line),
+      }),
+    );
+
+    expect(lines).toContain("prompt-source=implement-ticket:override");
+    expect(lines).toContain("prompt-source=_common:image");
+    const prompt = await submittedPrompt(fixture);
+    expect(prompt).toContain("overridden ticket #39");
   });
 
   /**

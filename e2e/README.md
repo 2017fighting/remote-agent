@@ -7,8 +7,8 @@ tickets + closeout, run to the end on a real kind cluster:
 ```
 signed webhook → App Deployment → Ticket PVC + per-Job Secret + Job
   → Job runs (real clone, real model, real push) → run-result annotation
-  → App closes the ticket → next ticket becomes Frontier
-  → both closed → closeout Job → ready PR with `Closes #33` → spec ready-for-human
+  → App closes the ticket → both tickets closed → closeout Job
+  → ready PR with `Closes #33` → spec ready-for-human
 ```
 
 Nothing in `app/` or `job/` knows this is a test. The whole difference between
@@ -77,7 +77,7 @@ kind delete cluster --name ra-e2e
 | --- | --- | --- |
 | stub GitHub | `stub-github/` | REST limited to the `GitHubPort` endpoints, plus **real** git over `git http-backend` |
 | stub model | `stub-model/` | OpenAI-compatible streaming `/v1/chat/completions`, scripted per scenario |
-| namespace contract | `src/manifests.ts` | namespace, both ServiceAccounts + Roles, guardrail quota, prompts ConfigMap, storage class |
+| namespace contract | `src/manifests.ts` | namespace, both ServiceAccounts + Roles, guardrail quota, prompt override ConfigMap, storage class |
 | scenario | `src/scenario.ts` | the world (spec + 2 tickets) and the scripted model turns |
 | driver | `src/run.ts` | bring-up, scenario, assertions, diagnostics |
 | assertions | `src/assertions.ts` | bounded polling; no fixed sleeps |
@@ -91,6 +91,28 @@ git's own code, and the push lands in a real repository. The stub records every
 served operation with its service (`upload-pack` / `receive-pack`) and exit code;
 the scenario asserts on that, which is how "the git work was real, not mocked
 objects" is evidenced rather than claimed.
+
+### Why the prompt override runs for the ticket phase and not the closeout
+
+The harness applies the incident override ConfigMap (`remote-agent-prompts-override`,
+holding only `_common`) before the scenario, so each ticket's Job resolves
+`prompt-source=_common:override` and falls back to the image for the other four
+keys. Once both ticket runs have read the override, the harness deletes the
+ConfigMap; the closeout Job is the next run, so it is a real image-only run and
+every key logs `prompt-source=<key>:image`. Both halves of ADR-0020's hatch are
+therefore exercised in one pass, and a forgotten override would show up as
+`:override` on a run that should be image-only.
+
+The closeout is the *only* run that can play the image-only half. The two tickets
+are claimed in order but not serially — #34 leaves the Frontier by carrying
+`agent:in-progress` while #35 still passes the Claim-gate, so both Jobs are
+created about a second apart and run concurrently (`slots=2/3` in the App's pass
+log). Deleting the override between them would not change what #35 reads. The
+closeout, by contrast, cannot start until both tickets have closed.
+
+Deleting the ConfigMap while the closeout is still absent is safe: the runner
+resolves the whole key surface once at the start of each round (ADR-0020), so the
+override's effect never depended on the file being present later in that run.
 
 ### Why the storage class exists
 

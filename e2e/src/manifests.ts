@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -6,10 +6,13 @@ import { join } from "node:path";
  *
  * These are the harness's own copies, not home-ops': the point is to reproduce
  * the deployed *contract* — the namespace, the two ServiceAccounts with exactly
- * the permissions the docs grant, the guardrail quota, and the prompt ConfigMap
- * built from `prompts/` — so the e2e exercises the same permission surface the
- * real deployment has. A missing RBAC verb here fails the same way it would in
- * production, which is what makes the gate meaningful.
+ * the permissions the docs grant, the guardrail quota, and the optional prompt
+ * override ConfigMap — so the e2e exercises the same permission surface the real
+ * deployment has. The prompt override is the incident hatch (ADR-0020): the
+ * harness creates it with only `_common`, and the run must log
+ * `prompt-source=_common:override` with every other key `:image`. A missing RBAC
+ * verb here fails the same way it would in production, which is what makes the
+ * gate meaningful.
  *
  * Everything the harness adds beyond the docs is e2e-only and stays in this
  * file: the stub services and their Service, and the App's env pointing at them.
@@ -18,25 +21,42 @@ import { join } from "node:path";
 export const NAMESPACE = "remote-agent";
 export const APP_SERVICE_ACCOUNT = "remote-agent";
 export const JOB_SERVICE_ACCOUNT = "agent-job";
-export const PROMPTS_CONFIGMAP = "remote-agent-prompts";
+/** The optional incident override ConfigMap the Job template mounts (ADR-0020). */
+export const PROMPTS_OVERRIDE_CONFIGMAP = "remote-agent-prompts-override";
+/**
+ * The one key the harness's incident override carries (ADR-0020). One key is
+ * enough: the point is the per-key *source* the run logs, so the run must report
+ * `_common:override` and fall back to the image for the other four. This is the
+ * single spelling the fixture and the log assertion share.
+ */
+export const PROMPTS_OVERRIDE_KEY = "_common";
 /** The one sops-equivalent Secret (docs/deployment.md §3); the App and the Job both read it. */
 export const APP_SECRET = "remote-agent-secret";
 
-/** docs/deployment.md §8 / ADR-0004: the five keys, verbatim from `prompts/`. */
-export const PROMPT_KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"] as const;
-
-/** The prompt ConfigMap, one key per file in `prompts/` (ADR-0004). */
-export async function renderPromptsConfigMap(promptsDir: string): Promise<Record<string, unknown>> {
-  const data: Record<string, string> = {};
-  for (const key of PROMPT_KEYS) {
-    data[key] = await readFile(join(promptsDir, key), "utf8");
-  }
+/**
+ * The prompt override ConfigMap, with only `_common` (ADR-0020). An operator
+ * creates this by hand in an incident; the harness does the same so the wired
+ * hatch is exercised end to end. Its content is an operator's hot-edit, so the
+ * evidence is the run's `prompt-source=_common:override` line, not a comparison
+ * against `prompts/` (that comparison lives once, in the Job's unit tests).
+ */
+export async function renderPromptsOverrideConfigMap(promptsDir: string): Promise<Record<string, unknown>> {
   return {
     apiVersion: "v1",
     kind: "ConfigMap",
-    metadata: { name: PROMPTS_CONFIGMAP, namespace: NAMESPACE },
-    data,
+    metadata: { name: PROMPTS_OVERRIDE_CONFIGMAP, namespace: NAMESPACE },
+    data: { [PROMPTS_OVERRIDE_KEY]: await readFile(join(promptsDir, PROMPTS_OVERRIDE_KEY), "utf8") },
   };
+}
+
+/**
+ * The prompt keys the image carries: the file names in `prompts/` (ADR-0020).
+ * The harness reads them from the same source the image is built from, so the
+ * per-key source assertion tracks the repo instead of re-spelling the surface —
+ * a key added to `prompts/` is asserted without editing the e2e.
+ */
+export async function readPromptKeys(promptsDir: string): Promise<string[]> {
+  return (await readdir(promptsDir)).sort();
 }
 
 export function renderNamespace(): Record<string, unknown> {

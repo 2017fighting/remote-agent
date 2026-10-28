@@ -1,6 +1,6 @@
 # prompt 必写项清单（v1）
 
-v1 没有 skill 层：durable 没有 Skill 工具、没有 slash command，runner 也不扫目录（[ADR-0004](../adr/0004-prompts-live-in-configmap.md)、[ADR-0008](../adr/0008-durable-runtime-base.md)）。所以 mattpocock 那套里 AFK 必需的语义**全部**得由我们自己钉死，而钉死不等于「塞进 prompt」——[ADR-0007](../adr/0007-run-result-contract.md) 已经证明有些规矩该由工具自述承载。
+v1 没有 skill 层：durable 没有 Skill 工具、没有 slash command，runner 不扫 skill 目录（[ADR-0004](../adr/0004-prompts-live-in-configmap.md)、[ADR-0008](../adr/0008-durable-runtime-base.md)）。所以 mattpocock 那套里 AFK 必需的语义**全部**得由我们自己钉死，而钉死不等于「塞进 prompt」——[ADR-0007](../adr/0007-run-result-contract.md) 已经证明有些规矩该由工具自述承载。
 
 本清单是 [#16](https://github.com/2017fighting/remote-agent/issues/16) 的结论，前置是 [#8](https://github.com/2017fighting/remote-agent/issues/8)（`/implement`、`/implement-spec`、`code-review`、`pr`、`tdd` 的契约）。消费者：[#14](https://github.com/2017fighting/remote-agent/issues/14)（两份模板初稿）。
 
@@ -8,14 +8,14 @@ v1 没有 skill 层：durable 没有 Skill 工具、没有 slash command，runne
 
 | 落点 | 谁维护 | 能强制到什么程度 |
 | --- | --- | --- |
-| **角色 prompt**（home-ops ConfigMap） | 人 | 只靠模型自觉 |
+| **角色 prompt**（随 Job 镜像发布的 `prompts/`） | 镜像（事故时可被 `PROMPTS_DIR` 覆盖） | 只靠模型自觉 |
 | **工具自述**（镜像里的 durable 工具：`description` / schema） | 镜像 | schema 能拒收，描述能引导 |
 | **App**（唯一 GitHub writer，[ADR-0002](../adr/0002-app-is-sole-github-writer.md)） | App 代码 | 能兜底、能补、能校验 |
 | **init container / runner** | 镜像 + Job 模板 | 能注入、能不做 |
 
 没有第五类：**不引入 wrapper、辅助命令、skill 加载器**。每条越界都是错——prompt 里写了 App 的活就是两仓漂移，工具里放了下游的决策就是改一句话要重建镜像。
 
-ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in-configmap.md) 就地改）：
+`prompts/` 的键（随镜像发布，[ADR-0020](../adr/0020-prompts-travel-with-the-image.md)；键面自 [ADR-0004](../adr/0004-prompts-live-in-configmap.md) 不变）：
 
 - `_common`：所有 role 都拼在最前（第 3、4、8、9、10、11 条）
 - `implement-ticket`、`implement-spec`：两份角色差异（第 1、5、6 条）
@@ -71,14 +71,14 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 - **不写会怎样**：一次运行炸成几十个 conversation，烧钱烧额度，最后没人说得清结论从哪来。
 - **写什么**（三处，缺一层都不够）：
   - **工具**：runner 烧一个 `code_review` 工具，起一个**独立 conversation** 的 reviewer（foreground、`replay: "safe"`、独立模型由 runner 给），传固定点与 spec 正文，取回两轴报告。它的工具表是 `read` / `grep` / `bash`——**不给 subagent 工具，也不给 `code_review` 自己**，扇出从工具表上被结构地断掉。（[#14](https://github.com/2017fighting/remote-agent/issues/14) 就地改：reviewer 得自己跑 `git diff` / `git log`，所以它拿到 `bash`；只读靠 prompt 约束，`bash` 本身不打开扇出。）
-  - **ConfigMap**：两轴 brief 写成 `review-standards` / `review-spec` 两份模板（diff 命令与 commit 列表）。改 review 话术不必重建镜像。smell baseline 十二条**只住在 `review-standards`**（[#25](https://github.com/2017fighting/remote-agent/issues/25)：Spec 轴用不上它，单份不漂移）；Standards 轴读的 standards 文件清单**不由模板提供**——`code_review` 被调时 runner 扫工作副本得出，候选名表是 runner 代码常量（A17a）；Spec 轴的 spec 正文由工具注入（A10）。
+  - **镜像里的模板**：两轴 brief 写成 `review-standards` / `review-spec` 两份模板（diff 命令与 commit 列表），随 Job 镜像发布（[ADR-0020](../adr/0020-prompts-travel-with-the-image.md)）。改 review 话术要重建镜像——事故时可走 `PROMPTS_DIR` 覆盖。smell baseline 十二条**只住在 `review-standards`**（[#25](https://github.com/2017fighting/remote-agent/issues/25)：Spec 轴用不上它，单份不漂移）；Standards 轴读的 standards 文件清单**不由模板提供**——`code_review` 被调时 runner 扫工作副本得出，候选名表是 runner 代码常量（A17a）；Spec 轴的 spec 正文由工具注入（A10）。
   - **工具（扇出第二层，[#25](https://github.com/2017fighting/remote-agent/issues/25) A15）**：`code_review` 同一 run 第二次调用直接报错（「review 已跑过：修完就收尾」）——implementer 真正的扇出向量是反复调 review，不只在 reviewer 里开子 agent。implementer 模板**不写**「不要开子 agent」：它的工具表里没有 subagent 工具（[#21](https://github.com/2017fighting/remote-agent/issues/21) 研究证实 durable 无内置），禁令只写进两份 review 模板当保险丝。原则：**工具表先行，prompt 只为真实持有的工具写禁令**。
   - **模板末行**：一句「不要开子 agent、不要改文件」，两轴模板各一遍——reviewer 才是被约束的人。
-- **落点**：工具（起 conversation + 工具表裁剪）+ ConfigMap（两份 brief）+ prompt（一句禁令，在 review 模板里而不是角色模板里）。
+- **落点**：工具（起 conversation + 工具表裁剪）+ 镜像里的模板（两份 brief）+ prompt（一句禁令，在 review 模板里而不是角色模板里）。
 
 ### 8. 承载形态 → 清单开头那条规矩
 
-- **为什么必写**：ADR-0004 只说了「prompt 放 ConfigMap」，没说清什么不该进 prompt，于是每张票都会有人想往里加一段。
+- **为什么必写**：[ADR-0020](../adr/0020-prompts-travel-with-the-image.md) 把 prompt 放进了镜像（自 [ADR-0004](../adr/0004-prompts-live-in-configmap.md) 的 ConfigMap 让位），但没说清什么不该进 prompt，于是每张票都会有人想往里加一段。
 - **不写会怎样**：prompt 越长越像 spec，最后变成第二份真相之源，改名、改契约各改一半。
 - **写什么**：四类落点的规矩 + 「没有第五类（wrapper / 辅助命令 / skill 加载器）」+ 「模板里不出现 `/implement`、`/code-review` 这类斜杠命令，步骤摊成流程叙述」（#22：模型眼里根本没有这些东西，写了它会去找不存在的工具）。
 - **落点**：规矩本身（本文件开头）。
@@ -130,6 +130,7 @@ ConfigMap `remote-agent-prompts` 的键（[ADR-0004](../adr/0004-prompts-live-in
 
 - [ADR-0007](../adr/0007-run-result-contract.md) 就地改：outcome 由工具身份决定、新增 `prBody`、删 `reason`、error 不由 agent 自述。
 - [ADR-0004](../adr/0004-prompts-live-in-configmap.md) 就地改：ConfigMap 的键从「同名一份模板」扩到「`_common` + 两份角色 + 两份 review」。
+- [ADR-0020](../adr/0020-prompts-travel-with-the-image.md) 新增（ticket [#76](https://github.com/2017fighting/remote-agent/issues/76)，Part of [#75](https://github.com/2017fighting/remote-agent/issues/75)）：prompt 随 Job 镜像发布，runner 从镜像内 canonical 目录读，只留 `PROMPTS_DIR` 一个事故覆盖口子，逐 key 打 `prompt-source=<key>:<image|override>`；本文的载体描述改指它。
 - [#4](https://github.com/2017fighting/remote-agent/issues/4) 的「收尾 Job 跑 e2e」撤销；`docs/architecture.md` §3 的 Spec 循环图已按新执行面重画（收尾不跑 e2e，`Closes` 由 App 写进 PR body 而不是 commit）。
 
 ## 本清单不覆盖

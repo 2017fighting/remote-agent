@@ -14,12 +14,15 @@ import {
 } from "./harness.js";
 import {
   NAMESPACE,
+  PROMPTS_OVERRIDE_CONFIGMAP,
+  PROMPTS_OVERRIDE_KEY,
+  readPromptKeys,
   renderAppDeployment,
   renderAppRbac,
   renderJobRbac,
   renderNamespace,
   renderAppSecret,
-  renderPromptsConfigMap,
+  renderPromptsOverrideConfigMap,
   renderResourceQuota,
   renderStubService,
   renderTicketStorageClass,
@@ -34,6 +37,7 @@ import {
 } from "./scenario.js";
 import {
   AssertionTimeout,
+  assertPromptSources,
   clearFailFast,
   delay,
   failRunFast,
@@ -42,6 +46,8 @@ import {
   jobTerminalReason,
   kubectlJson,
   poll,
+  promptSourceLine,
+  waitForPromptSource,
   type K8sDeploymentObject,
   type K8sJobObject,
   type K8sObjectList,
@@ -57,13 +63,14 @@ import {
  *
  *   1. bring up a kind cluster and build + load both images;
  *   2. apply the namespace contract from docs/deployment.md §4/§5/§7/§8 (RBAC,
- *      guardrail quota, prompt ConfigMap from `prompts/`) plus a storage class
- *      of the name the App's template requires;
+ *      guardrail quota, the optional prompt override ConfigMap) plus a storage
+ *      class of the name the App's template requires;
  *   3. start the two stub services as Deployments, with a real bare git
  *      repository behind stub-github;
  *   4. start the App as a Deployment, pointed at the stubs by env only;
- *   5. drive the scenario: signed webhooks, two sequential claims, two Job runs,
- *      the closeout, the PR;
+ *   5. drive the scenario: signed webhooks, two claims (run concurrently), the
+ *      closeout, the PR — the ticket runs with the incident prompt override
+ *      present, the closeout after it is deleted;
  *   6. assert the final world and print a sectioned log.
  *
  * The only difference between this and production is the three base URLs. There
@@ -192,7 +199,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       ...renderAppRbac(),
       ...renderJobRbac(),
       renderResourceQuota(),
-      await renderPromptsConfigMap(join(repoRoot, "prompts")),
+      await renderPromptsOverrideConfigMap(join(repoRoot, "prompts")),
       renderAppSecret({
         privateKey: APP_PRIVATE_KEY,
         webhookSecret: WEBHOOK_SECRET,
@@ -277,8 +284,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
 
     markSection("job");
     runner.section("job", "two ticket Jobs, then the closeout");
-    const claims = await observeSequentialClaims(runner, context, options);
-    runner.note(`claims observed in order: ${claims.join(", ")}`);
+    const claims = await observeClaims(runner, context, options);
+    runner.note(`claims observed: ${claims.join(", ")}`);
 
     markSection("assert");
     runner.section("assert", "final world");
@@ -730,15 +737,38 @@ async function sendWebhooks(
 }
 
 /**
- * Both tickets are claimed, one after the other, and both claims are observed:
- * the second ticket's Job only appears once the first ticket's Job object is
- * gone (the k8s half of the Claim-gate, ADR-0013). So the assertion is that the
- * two Jobs appear in order and both reach Complete.
+ * Both tickets are claimed, and both claims are observed. Claim order is the
+ * sub-issue list order, but the runs are **not** serialized: `agent:in-progress`
+ * on #34 takes it out of the Frontier while #35 still passes the Claim-gate, so
+ * the App claims #35 on its next pass and both Jobs run concurrently (the pass
+ * log's `slots=2/3` is that fact). So the assertion is that both Jobs appear and
+ * both reach Complete — not that one waits for the other.
+ *
+ * This is also where the prompt override hatch is exercised end to end (ADR-0020).
+ * The harness applies `remote-agent-prompts-override` with only `_common`, so the
+ * first ticket's Job resolves `_common:override` and falls back to the image for
+ * the other four keys; once that run has resolved its key surface the harness
+ * deletes the ConfigMap. The image-only half of the hatch is asserted on the
+ * **closeout** Job (see `assertFinalWorld`), because the closeout is the one run
+ * that cannot start before the override is gone: it only starts after both
+ * tickets have closed.
+ *
+ * That ordering is the point. Tickets are claimed in order but **not** serially:
+ * both pass the Claim-gate as soon as they appear, so #35's Job is created while
+ * #34's run is still going — which is what the App's `slots=2/3` pass log says,
+ * and what the first CI run of this assertion got wrong by assuming the second
+ * ticket's Job would wait for the first.
  */
-async function observeSequentialClaims(runner: Runner, context: string, options: RunOptions): Promise<string[]> {
+async function observeClaims(runner: Runner, context: string, options: RunOptions): Promise<string[]> {
+  // The key surface is the repo's `prompts/` — the same source the image is
+  // built from — so the assertion does not re-spell it (ADR-0020).
+  const promptKeys = await readPromptKeys(join(repoRoot, "prompts"));
   const observed: string[] = [];
   for (const ticketNumber of TICKET_NUMBERS) {
     const jobName = `agent-2017fighting-remote-agent-${ticketNumber}`;
+    // The override is present for the whole ticket phase: #35 is created before
+    // #34 finishes, so neither ticket's Job can be the image-only run.
+    const overrideKey = PROMPTS_OVERRIDE_KEY;
     // If the App has already reported a pass failure, the Job will never appear:
     // report the App's own line now instead of timing out on "Job absent".
     await abortOnAppFailure(runner, context, `claim of ticket #${ticketNumber}`);
@@ -751,6 +781,11 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
       describe: (job) => (job === null ? "absent" : "present"),
     });
     observed.push(jobName);
+
+    // Wait for this run to resolve its key surface before moving on: the override
+    // lines are the evidence, and the runner resolves them before it does any
+    // work (ADR-0020), so this returns early in the run.
+    await waitForPromptSource(runner, context, jobName, promptSourceLine(overrideKey, "override"), options.timeoutMs);
 
     // The ticket must show `agent:in-progress` while its Job is running: this is
     // the label half of the claim being observable on GitHub, not just in k8s.
@@ -775,22 +810,56 @@ async function observeSequentialClaims(runner: Runner, context: string, options:
       until: (value) => value?.metadata.annotations?.["remote-agent/run-result"] !== undefined,
       describe: (value) => JSON.stringify(Object.keys(value?.metadata.annotations ?? {})),
     });
+    await assertPromptSources(runner, context, jobName, overrideKey, promptKeys);
   }
+  // The override has done its job: every ticket run has read it. Deleting it now
+  // — after the ticket phase, before the closeout — is what makes the closeout a
+  // real image-only run. It cannot start earlier than this: it starts only once
+  // both tickets have closed.
+  await deletePromptsOverride(runner, context);
   return observed;
+}
+
+/**
+ * Delete the incident override so the closeout run falls back to the image
+ * (ADR-0020). A forgotten override is the failure this hatch exists to make
+ * visible. The harness deletes it once every ticket run has read it, which is
+ * also the point after which the only remaining run is the closeout — the run
+ * that proves the absent case for real rather than as a second assertion on the
+ * same world.
+ */
+async function deletePromptsOverride(runner: Runner, context: string): Promise<void> {
+  await runner.run("kubectl", [
+    "--context",
+    context,
+    "-n",
+    NAMESPACE,
+    "delete",
+    "configmap",
+    PROMPTS_OVERRIDE_CONFIGMAP,
+    "--ignore-not-found",
+  ]);
+  runner.note(`deleted ${PROMPTS_OVERRIDE_CONFIGMAP}; the closeout run must fall back to the image`);
 }
 
 /** The final world (ticket #41 acceptance criteria). */
 async function assertFinalWorld(runner: Runner, context: string, options: RunOptions): Promise<void> {
-  // 1. Both tickets closed.
+  // 1. Both tickets closed, and the closeout ran.
+  const closeoutJobName = `agent-2017fighting-remote-agent-${SPEC_NUMBER}`;
   await poll<K8sJobObject | null>({
     description: "the closeout Job exists and finished",
     timeoutMs: options.timeoutMs,
     intervalMs: 2000,
-    observe: () =>
-      kubectlJson<K8sJobObject>(runner, context, NAMESPACE, "job", `agent-2017fighting-remote-agent-${SPEC_NUMBER}`),
+    observe: () => kubectlJson<K8sJobObject>(runner, context, NAMESPACE, "job", closeoutJobName),
     until: (job) => job !== null && isJobFinished(job),
     describe: (job) => (job === null ? "absent" : JSON.stringify(job.status?.conditions ?? [])),
   });
+
+  // 1b. The image-only half of the prompt hatch (ADR-0020): the override was
+  //     deleted before this Job could start, so every key must come from the
+  //     image. The key surface is read from `prompts/`, the same source the image
+  //     is built from.
+  await assertPromptSources(runner, context, closeoutJobName, null, await readPromptKeys(join(repoRoot, "prompts")));
 
   // 2. Every Ticket PVC carries `expires-at`, about seven days out (done retention).
   await poll<K8sObjectList<K8sPvcObject>>({

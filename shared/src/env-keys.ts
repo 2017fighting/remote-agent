@@ -38,4 +38,11 @@ export const JOB_ENV_KEYS = {
   jobName: "JOB_NAME",
   /** The Job's namespace, from the downward API. */
   jobNamespace: "JOB_NAMESPACE",
+  /**
+   * The incident prompt-override directory the template mounts at
+   * `JOB_MOUNT_PATHS.promptsOverride` (ADR-0020). The runner reads a key from
+   * here when the file exists and from the image otherwise; an empty value means
+   * image-only, which only the runner tests produce.
+   */
+  promptsDir: "PROMPTS_DIR",
 } as const;

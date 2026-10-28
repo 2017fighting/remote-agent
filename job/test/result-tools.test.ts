@@ -9,7 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { specBodyFor } from "../src/internal/runner.js";
 import type { RunnerEnv } from "../src/internal/env.js";
 import { findStandardsFiles } from "../src/internal/standards-files.js";
-import { PROMPT_TEMPLATE_KEYS } from "../src/internal/prompt.js";
+import { PROMPT_TEMPLATE_KEYS, reviewTemplateKey, roleTemplateKey } from "../src/internal/prompt.js";
 import type { RunResultV1 } from "@remote-agent/shared";
 import {
   blockedCall,
@@ -465,11 +465,11 @@ describe("#40 the reviewer's own tools", () => {
   });
 });
 
-describe("#40 prompt carrier", () => {
+describe("#40/#76 prompt carrier", () => {
   const REPO_ROOT = join(import.meta.dirname, "..", "..");
   const KEYS = ["_common", "implement-ticket", "implement-spec", "review-standards", "review-spec"];
 
-  it.each(KEYS)("ships %s as a ConfigMap key with no slash command", async (key) => {
+  it.each(KEYS)("ships %s in the image with no slash command", async (key) => {
     const text = await readFile(join(REPO_ROOT, "prompts", key), "utf8");
     expect(text.trim()).not.toBe("");
     // No slash command: durable has no such layer, so a `/implement` in a template
@@ -477,10 +477,36 @@ describe("#40 prompt carrier", () => {
     expect(text).not.toMatch(/(^|\s)\/[a-z][a-z-]*/m);
   });
 
-  it("carries the five keys as the ConfigMap's whole key surface", async () => {
+  it("carries the five keys as the image's whole key surface", async () => {
     const dir = await readdir(join(REPO_ROOT, "prompts"));
     expect(dir.sort()).toEqual([...KEYS].sort());
     expect([...PROMPT_TEMPLATE_KEYS].sort()).toEqual([...KEYS].sort());
+  });
+
+  /**
+   * The image must actually carry `prompts/` (ADR-0020). The source test above
+   * cannot see a dropped COPY, so a missing `COPY prompts` is caught here at
+   * unit-test stage instead of as a runtime ENOENT. The target path is an
+   * implementation detail and is deliberately not asserted.
+   */
+  it("keeps the prompts/ COPY in the image build", async () => {
+    const dockerfile = await readFile(join(REPO_ROOT, "job", "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/^COPY prompts\b/m);
+  });
+
+  /**
+   * Every Agent role and review axis must map to a key that is really in the
+   * image's key surface. Together with the exact-set assertion above, this is
+   * where a dropped key is caught at unit-test stage instead of as a runtime
+   * ENOENT — the image carries `prompts/` verbatim (ADR-0020).
+   */
+  it("maps every Agent role and review axis to one of the five image keys", () => {
+    for (const role of ["implement-ticket", "implement-spec"] as const) {
+      expect(KEYS).toContain(roleTemplateKey(role));
+    }
+    for (const axis of ["spec", "standards"] as const) {
+      expect(KEYS).toContain(reviewTemplateKey(axis));
+    }
   });
 
   /**

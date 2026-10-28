@@ -18,10 +18,11 @@ import type { ModelScript } from "../stub-model/script.js";
  * label down, so `agent:implement` never appears on #34 / #35 in the final world
  * unless a human wrote it there.
  *
- * Serial advancement is the spec loop's, not the harness's: each pass computes
- * one Frontier per spec and claims it, and while a ticket is claimed
- * (`agent:in-progress`) the next one is held back. So the two claims arrive in
- * order without the harness adding a label between them.
+ * Claim order is the spec loop's, not the harness's: each pass computes one
+ * Frontier per spec and claims it, so #34 is claimed before #35 without the
+ * harness adding a label between them. The runs are not serialized, though —
+ * once #34 carries `agent:in-progress` it leaves the Frontier while #35 still
+ * passes the Claim-gate, so both Jobs end up running at the same time.
  *
  * The end state the scenario asserts: both tickets closed, the spec
  * `ready-for-human`, a ready PR on `agent/spec-33` whose body carries

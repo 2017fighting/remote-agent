@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApp } from "../src/main.js";
+import { KubeClientK8s } from "../src/adapters/k8s.js";
 import { json, startStubServer, type StubRequest, type StubServer } from "./http-stub.js";
 
 /**
@@ -12,6 +13,11 @@ import { json, startStubServer, type StubRequest, type StubServer } from "./http
  * startup list without throwing"). This is the seam where a stub-only unit test
  * cannot see a mismatch — a real `OctokitGitHub` + `KubeClientK8s` behind the
  * scheduler's startup list and first pass.
+ *
+ * The k8s adapter is constructed here with an explicit `kubeconfigPath`:
+ * `KubeClientK8s` prefers in-cluster config over `KUBECONFIG`, so letting
+ * `startApp` build it would point a pod run at the real cluster (403) instead
+ * of the stub.
  */
 
 const { privateKey: TEST_PRIVATE_KEY } = generateKeyPairSync("rsa", {
@@ -89,10 +95,6 @@ describe("App on the production adapters", () => {
     const k8sServer = await k8sStub();
     servers.push(githubServer, k8sServer);
 
-    // The k8s client reads KUBECONFIG itself (same path `kubectl` uses), so the
-    // stub is selected exactly the way a local run selects a cluster.
-    const previousKubeconfig = process.env["KUBECONFIG"];
-    process.env["KUBECONFIG"] = kubeconfigFor(k8sServer.url);
     const logLines: string[] = [];
     const app = await startApp({
       env: {
@@ -101,6 +103,7 @@ describe("App on the production adapters", () => {
         GITHUB_API_BASE_URL: githubServer.url,
         NAMESPACE,
       },
+      k8s: new KubeClientK8s({ namespace: NAMESPACE, kubeconfigPath: kubeconfigFor(k8sServer.url) }),
       log: (line) => logLines.push(line),
       webhookSecret: "wiring-secret",
     });
@@ -130,8 +133,6 @@ describe("App on the production adapters", () => {
       expect(githubServer.requests.filter((request) => request.method !== "GET")).toHaveLength(1);
     } finally {
       await app.stop();
-      if (previousKubeconfig === undefined) delete process.env["KUBECONFIG"];
-      else process.env["KUBECONFIG"] = previousKubeconfig;
     }
   });
 });

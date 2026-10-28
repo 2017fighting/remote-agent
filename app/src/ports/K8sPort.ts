@@ -135,8 +135,12 @@ export interface K8sVolume {
   name: string;
   persistentVolumeClaim?: { claimName: string };
   secret?: { secretName: string };
-  /** The prompt ConfigMap `remote-agent-prompts` (ADR-0004 / docs/deployment.md §8). */
-  configMap?: { name: string };
+  /**
+   * A ConfigMap volume. `optional: true` makes an absent object mount as an empty
+   * directory instead of failing the pod — the incident prompt-override hatch
+   * (ADR-0020) is normally not created at all.
+   */
+  configMap?: { name: string; optional?: boolean };
 }
 
 export interface K8sContainer {

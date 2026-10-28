@@ -5,9 +5,10 @@ import type { AgentRole } from "./env.js";
 import type { PreviousRound } from "./round.js";
 
 /**
- * ConfigMap `remote-agent-prompts` keys (ADR-0004): `_common` first, then the
- * role's template, plus one system prompt per review axis. `prompts/` in this
- * repo is the verbatim source of that key surface.
+ * The prompt key surface (ADR-0020): `_common` first, then the role's template,
+ * plus one system prompt per review axis. `prompts/` in this repo is the
+ * verbatim source that `job/Dockerfile` copies into the image; an operator can
+ * override any single key through `PROMPTS_DIR`.
  */
 export const PROMPT_TEMPLATE_KEYS = [
   "_common",
@@ -19,20 +20,93 @@ export const PROMPT_TEMPLATE_KEYS = [
 
 export const COMMON_PROMPT_KEY = "_common";
 
+/** One key of the image's prompt key surface. */
+export type PromptTemplateKey = (typeof PROMPT_TEMPLATE_KEYS)[number];
+
 /** The reviewer conversation's two axes: each reads its own template. */
 export type ReviewAxis = "spec" | "standards";
 
-const REVIEW_TEMPLATE_KEYS: Record<ReviewAxis, string> = {
+const REVIEW_TEMPLATE_KEYS: Record<ReviewAxis, PromptTemplateKey> = {
   spec: "review-spec",
   standards: "review-standards",
 };
 
-export function roleTemplateKey(role: AgentRole): string {
+export function roleTemplateKey(role: AgentRole): PromptTemplateKey {
   return role;
 }
 
-export function reviewTemplateKey(axis: ReviewAxis): string {
+export function reviewTemplateKey(axis: ReviewAxis): PromptTemplateKey {
   return REVIEW_TEMPLATE_KEYS[axis];
+}
+
+/** Where one run's prompt templates come from (ADR-0020). */
+export interface PromptSources {
+  /** The canonical directory baked into the Job image; always the fallback. */
+  imageDir: string;
+  /** `PROMPTS_DIR`: an operator's incident override, when the Job sets one. */
+  overrideDir?: string;
+  /** Records one `prompt-source=<key>:<image|override>` line per resolved key. */
+  log(line: string): void;
+}
+
+/** The whole key surface resolved for one run: template key -> template text. */
+export type PromptTemplates = Record<PromptTemplateKey, string>;
+
+/**
+ * Resolve every prompt key for this run, logging each key's source.
+ *
+ * The whole surface is resolved — not only the keys this role happens to read —
+ * so a single run's log names the source of every key. That is the point of the
+ * line: a forgotten hot-edit in the override directory is only visible if the
+ * run looks at the key, and a lazy read would never look at `implement-spec`
+ * from a ticket run. The cost is five small file reads.
+ *
+ * Both the role templates and the review-axis templates come through here, so
+ * there is one fallback rule rather than two.
+ */
+export async function resolvePromptTemplates(sources: PromptSources): Promise<PromptTemplates> {
+  const templates: Partial<PromptTemplates> = {};
+  for (const key of PROMPT_TEMPLATE_KEYS) templates[key] = await readPromptFile(sources, key);
+  // The loop above fills every key in `PROMPT_TEMPLATE_KEYS`.
+  return templates as PromptTemplates;
+}
+
+/**
+ * One key: the directories in precedence order — the override first, the image
+ * second — and the first one that carries the file answers. The source is logged
+ * for every read, whichever one answered; when neither carries the key the error
+ * names both directories, because the operator has to know where to put the file.
+ */
+export async function readPromptFile(sources: PromptSources, key: PromptTemplateKey): Promise<string> {
+  for (const { dir, source } of promptDirectories(sources)) {
+    const text = await readIfPresent(join(dir, key));
+    if (text !== undefined) {
+      sources.log(`prompt-source=${key}:${source}`);
+      return text;
+    }
+  }
+  const override = sources.overrideDir ?? "(none: PROMPTS_DIR is not set)";
+  throw new Error(
+    `prompt template ${key} is missing from both the override directory (${override}) and the image directory (${sources.imageDir})`,
+  );
+}
+
+/** The two prompt directories in precedence order, each with its log label. */
+function promptDirectories(sources: PromptSources): Array<{ dir: string; source: "image" | "override" }> {
+  return [
+    ...(sources.overrideDir === undefined ? [] : [{ dir: sources.overrideDir, source: "override" as const }]),
+    { dir: sources.imageDir, source: "image" },
+  ];
+}
+
+/** A missing file is not an error here — it just means "try the next directory". */
+async function readIfPresent(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 export interface RenderPromptInput {
@@ -40,7 +114,8 @@ export interface RenderPromptInput {
   workItem: WorkItemV1;
   /** Review fixed point: this run's start for the ticket role, the branch start for the spec role. */
   fixedPoint: string;
-  promptsDir: string;
+  /** The key surface resolved by `resolvePromptTemplates` (ADR-0020). */
+  templates: PromptTemplates;
 }
 
 /**
@@ -48,9 +123,9 @@ export interface RenderPromptInput {
  * placeholder substituted. The result is the only prompt the run gets, so a
  * reader never has to open another file (spec #33 §7).
  */
-export async function renderPrompt(input: RenderPromptInput): Promise<string> {
-  const common = await readPromptFile(input.promptsDir, COMMON_PROMPT_KEY);
-  const role = await readPromptFile(input.promptsDir, roleTemplateKey(input.role));
+export function renderPrompt(input: RenderPromptInput): string {
+  const common = input.templates[COMMON_PROMPT_KEY];
+  const role = input.templates[roleTemplateKey(input.role)];
   const template = `${common.trimEnd()}\n\n${role.trimEnd()}\n`;
   return substitutePlaceholders(template, placeholderValues(input));
 }
@@ -63,29 +138,18 @@ export interface RenderReviewPromptInput {
   specRef: string;
   /** The spec body; empty only when the work item carries none (the template then says so). */
   specBody: string;
-  promptsDir: string;
+  /** The key surface resolved by `resolvePromptTemplates` (ADR-0020). */
+  templates: PromptTemplates;
 }
 
 /** The axis template as the reviewer conversation's system prompt, every placeholder substituted. */
-export async function renderReviewPrompt(input: RenderReviewPromptInput): Promise<string> {
-  const template = await readPromptFile(input.promptsDir, reviewTemplateKey(input.axis));
+export function renderReviewPrompt(input: RenderReviewPromptInput): string {
+  const template = input.templates[reviewTemplateKey(input.axis)];
   return substitutePlaceholders(template, {
     fixed_point: input.fixedPoint,
     spec_ref: input.specRef,
     spec_body: input.specBody,
   });
-}
-
-export async function readPromptFile(dir: string, key: string): Promise<string> {
-  const path = join(dir, key);
-  try {
-    return await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`prompt template ${key} is missing from the prompt ConfigMap at ${dir}`);
-    }
-    throw error;
-  }
 }
 
 export function placeholderValues(input: RenderPromptInput): Record<string, string> {
@@ -135,9 +199,9 @@ export function workBody(workItem: WorkItemV1, role: AgentRole): string {
  * same outcome again, which is the failure ADR-0011 names ("否则 agent 可能直接再报
  * 一次 done"). Round 1 gets nothing: there is no previous round to describe.
  *
- * It is generated here rather than authored in the ConfigMap because the facts it
+ * It is generated here rather than authored in a template because the facts it
  * states — which round, how the last one ended, when — live on the volume, and the
- * template's key and placeholder surface stays untouched (ADR-0004, ADR-0017).
+ * template's key and placeholder surface stays untouched (ADR-0017).
  */
 export interface RoundContext {
   /** 1 for a fresh conversation; every round that reported adds one. */

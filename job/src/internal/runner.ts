@@ -20,7 +20,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
 import { RUNNER_EXIT, isRunResultV1, specBranch, type RunResultV1, type WorkItemV1 } from "@remote-agent/shared";
 import type { JobPaths, RunnerEnv } from "./env.js";
-import { renderPrompt, roundHeader, type RoundContext } from "./prompt.js";
+import { renderPrompt, resolvePromptTemplates, roundHeader, type PromptTemplates, type RoundContext } from "./prompt.js";
 import { readPreviousRound, resetForNewRound, type PreviousRound } from "./round.js";
 import { ReviewFixedPointDoc, type ReviewFixedPoint } from "./fixed-point-doc.js";
 import {
@@ -128,11 +128,21 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
   await mkdir(deps.paths.state, { recursive: true });
   await mkdir(deps.paths.home, { recursive: true });
 
+  // Resolve the whole prompt key surface up front, logging each key's source
+  // (ADR-0020). Doing it here — not lazily at the point of use — is what puts a
+  // `prompt-source=<key>:<image|override>` line for every key in one run's log,
+  // so a forgotten override is visible even when this role never reads that key.
+  const templates = await resolvePromptTemplates({
+    imageDir: deps.paths.imagePrompts,
+    ...(deps.env.promptsDir === undefined ? {} : { overrideDir: deps.env.promptsDir }),
+    log: deps.log,
+  });
+
   const storage = await deps.openStorage(deps.paths.sessionDatabase);
   // The `code_review` tool is registered before the harness exists (the registry
   // is a Harness input), so it reaches the harness through this holder.
   const handle: HarnessHandle[] = [];
-  const harness = await openHarness(deps, storage, handle);
+  const harness = await openHarness(deps, storage, handle, templates);
   handle.push(harness);
 
   // SIGTERM (k8s eviction, activeDeadlineSeconds, node drain) is NOT a terminal
@@ -231,7 +241,7 @@ export async function run(deps: RunDeps): Promise<RunOutcome> {
     let submission = pending;
     if (decided === undefined && submission === undefined) {
       const fixedPoint = await readOrComputeFixedPoint(deps, harness, root);
-      submission = await submitRun(deps, storage, root, fixedPoint, round);
+      submission = await submitRun(deps, storage, root, fixedPoint, round, templates);
       deps.crashAfterSubmit?.();
     }
     deps.log(`runner-open conversation=${ROOT_CONVERSATION_ID} resumed=${resumed}`);
@@ -260,6 +270,7 @@ async function openHarness(
   deps: RunDeps,
   storage: Storage,
   handle: HarnessHandle[],
+  templates: PromptTemplates,
 ): Promise<HarnessHandle> {
   if (deps.env.thinkingLevel !== THINKING_LEVEL) {
     // The Job template pins `high` (docs/deployment.md §9); a different value is an
@@ -270,7 +281,7 @@ async function openHarness(
     storage,
     {
       models: deps.models,
-      registry: buildRegistry(deps, handle),
+      registry: buildRegistry(deps, handle, templates),
       // Retries are a run-policy decision, not a per-request one (see
       // GENERATION_RETRY_POLICY): the default budget cannot outlast the gateway
       // restart that made this run necessary in the first place.
@@ -309,6 +320,7 @@ async function openHarness(
 export function buildRegistry(
   deps: Pick<RunDeps, "env" | "paths" | "log" | "standardsFiles">,
   handle: HarnessHandle[],
+  templates: PromptTemplates,
 ): ReturnType<typeof createRegistry> {
   const registry = createRegistry();
   registry.install(CodingTools);
@@ -325,7 +337,7 @@ export function buildRegistry(
             {
               harness: handle[0]!,
               repo: deps.paths.repo,
-              promptsDir: deps.paths.prompts,
+              templates,
               specRef: `${deps.env.repo}#${deps.env.specNumber}`,
               specBody: specBodyFor(deps.env.role, deps.env.workItem),
               model: { provider: "omniroute", modelId: deps.env.omniRoute.reviewModel },
@@ -410,16 +422,17 @@ async function submitRun(
   root: Conversation,
   fixedPoint: ReviewFixedPoint,
   round: RoundContext,
+  templates: PromptTemplates,
 ): Promise<Submission> {
-  const rendered = await renderPrompt({
+  const rendered = renderPrompt({
     role: deps.env.role,
     workItem: deps.env.workItem,
     fixedPoint: fixedPoint.fixedPoint,
-    promptsDir: deps.paths.prompts,
+    templates,
   });
   // The header goes in front of the rendered prompt, not into the templates: the
   // facts it states (which round, how the last one ended) live on the volume, and
-  // the ConfigMap's key and placeholder surface stays untouched (ADR-0004/0017).
+  // the key and placeholder surface stays untouched (ADR-0017).
   const header = roundHeader(round);
   const prompt = header === "" ? rendered : `${header}\n\n${rendered}`;
   // Deduplication key: a process that reaches this line again after a crash finds
@@ -545,7 +558,7 @@ async function assertHandoffFinishedTheRebase(deps: RunDeps, files: readonly str
  * The conflict hand-off's message: which rebase is stopped, on which paths, and the
  * commands that finish it. The rules — keep both intents, never abort or skip,
  * re-report, still never push — live in `_common`, which every role reads
- * (ADR-0004: no prompt text in the image).
+ * (ADR-0020: the templates ship in the image, not in a ConfigMap).
  */
 function conflictHandoffPrompt(input: { branch: string; files: readonly string[] }): string {
   return [

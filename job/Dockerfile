@@ -7,7 +7,10 @@
 #
 #   docker build -f job/Dockerfile -t ghcr.io/2017fighting/remote-agent-job:<tag> .
 #
-# The image carries no prompt (ADR-0004): prompts come from the mounted ConfigMap.
+# The image carries the prompt templates (ADR-0020): `prompts/` is copied to
+# IMAGE_PROMPTS_DIR and the runner reads them from there. An operator can still
+# override a single key through `PROMPTS_DIR`; the Job template mounts the
+# optional override ConfigMap at that path.
 
 # --- build: compile the two entrypoints into self-contained bundles -------------
 FROM node:22.19-bookworm-slim AS build
@@ -59,6 +62,9 @@ WORKDIR /mnt/agent/repo
 
 COPY --from=build /build/dist/seed.mjs /opt/remote-agent/seed.mjs
 COPY --from=build /build/dist/runner.mjs /opt/remote-agent/runner.mjs
+# The prompt key surface travels with the image (ADR-0020). The target path is
+# IMAGE_PROMPTS_DIR in shared/src/paths.ts; a unit test asserts this COPY stays.
+COPY prompts /opt/remote-agent/prompts
 RUN chown -R 1000:1000 /opt/remote-agent
 
 USER 1000
